@@ -646,10 +646,10 @@ DWORD WINAPI XSessionWriteStats(HANDLE hSession, XUID xuid, DWORD dwNumViews, co
 			}
 			if (property.value.type == XUSER_DATA_TYPE_FLOAT || property.value.type == XUSER_DATA_TYPE_DOUBLE) {
 				float value = property.value.type == XUSER_DATA_TYPE_FLOAT ? property.value.fData : (float)property.value.dblData;
-				xls::SteamUserStats()->SetStat(statName->c_str(), value);
+				SteamAPI_ISteamUserStats_SetStatFloat(xls::SteamUserStats(), statName->c_str(), value);
 			}
 			else {
-				xls::SteamUserStats()->SetStat(statName->c_str(), ScoreOf(property.value));
+				SteamAPI_ISteamUserStats_SetStatInt32(xls::SteamUserStats(), statName->c_str(), (int32)ScoreOf(property.value));
 			}
 			statsTouched = true;
 		}

@@ -65,7 +65,7 @@ bool ReadServer(CSteamID lobby, ServerEntry& entry)
 		return false;
 	}
 	memset(&entry.result, 0, sizeof(entry.result));
-	CSteamID owner = matchmaking->GetLobbyOwner(lobby);
+	CSteamID owner = xls::LobbyOwner(matchmaking, lobby);
 	entry.result.serverID = xls::XuidFromSteamId(owner);
 	entry.result.dwServerType = (DWORD)strtoul(matchmaking->GetLobbyData(lobby, Key("type").c_str()), nullptr, 10);
 	xls::NetXnaddrForSteamId(owner, &entry.result.serverAddress);
@@ -125,7 +125,7 @@ public:
 			loaded = true;
 			if (!request->failed) {
 				for (uint32 i = 0; i < request->result.m_nLobbiesMatching; i++) {
-					CSteamID lobby = xls::SteamMatchmaking()->GetLobbyByIndex((int)i);
+					CSteamID lobby = xls::LobbyByIndex(xls::SteamMatchmaking(), (int)i);
 					ServerEntry entry;
 					if (!ReadServer(lobby, entry)) {
 						continue;

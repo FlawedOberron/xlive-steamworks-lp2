@@ -4,6 +4,7 @@
 #pragma warning(push)
 #pragma warning(disable : 4996)
 #include <steam/steam_api.h>
+#include <steam/steam_api_flat.h>
 #pragma warning(pop)
 
 #include "xlive/xdefs.h"
@@ -24,6 +25,16 @@ using ::SteamRemoteStorage;
 using ::SteamNetworkingMessages;
 using ::SteamNetworkingSockets;
 using ::SteamNetworkingUtils;
+
+// Steam methods that return a CSteamID by value. MSVC returns that class through a hidden
+// pointer the callee pops, GCC/MinGW expects it in EDX:EAX, so calling these virtuals from a
+// MinGW build yields a garbage id and an unbalanced stack. The flat API returns a plain uint64,
+// which both compilers agree on; every call site goes through these instead.
+inline CSteamID SteamUserId(ISteamUser* user) { return CSteamID((uint64)SteamAPI_ISteamUser_GetSteamID(user)); }
+inline CSteamID LobbyOwner(ISteamMatchmaking* mm, CSteamID lobby) { return CSteamID((uint64)SteamAPI_ISteamMatchmaking_GetLobbyOwner(mm, lobby.ConvertToUint64())); }
+inline CSteamID LobbyMember(ISteamMatchmaking* mm, CSteamID lobby, int i) { return CSteamID((uint64)SteamAPI_ISteamMatchmaking_GetLobbyMemberByIndex(mm, lobby.ConvertToUint64(), i)); }
+inline CSteamID LobbyByIndex(ISteamMatchmaking* mm, int i) { return CSteamID((uint64)SteamAPI_ISteamMatchmaking_GetLobbyByIndex(mm, i)); }
+inline CSteamID FriendByIndex(ISteamFriends* friends, int i, int flags) { return CSteamID((uint64)SteamAPI_ISteamFriends_GetFriendByIndex(friends, i, flags)); }
 
 bool SteamStart();
 void SteamStop();

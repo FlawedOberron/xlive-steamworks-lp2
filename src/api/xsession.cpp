@@ -167,7 +167,7 @@ CSteamID NewestHostClaim(CSteamID lobby, uint64_t minSeq, XNADDR* hostAddress, u
 	CSteamID claimant;
 	int count = matchmaking->GetNumLobbyMembers(lobby);
 	for (int i = 0; i < count; i++) {
-		CSteamID member = matchmaking->GetLobbyMemberByIndex(lobby, i);
+		CSteamID member = xls::LobbyMember(matchmaking, lobby, i);
 		const char* claim = matchmaking->GetLobbyMemberData(lobby, member, Key("host").c_str());
 		const char* separator = claim ? strchr(claim, '|') : nullptr;
 		if (!separator) {
@@ -217,7 +217,7 @@ bool ReadSessionInfo(CSteamID lobby, XSESSION_INFO* info)
 	info->sessionID = KidFromLobby(lobby);
 	xls::HexDecode(matchmaking->GetLobbyData(lobby, Key("xnkey").c_str()), info->keyExchangeKey.ab, sizeof(info->keyExchangeKey.ab));
 	if (!xls::HexDecode(matchmaking->GetLobbyData(lobby, Key("host").c_str()), &info->hostAddress, sizeof(info->hostAddress))) {
-		xls::NetXnaddrForSteamId(matchmaking->GetLobbyOwner(lobby), &info->hostAddress);
+		xls::NetXnaddrForSteamId(xls::LobbyOwner(matchmaking, lobby), &info->hostAddress);
 	}
 	// Member data is only current for a lobby this client is in
 	if (FindByLobby(lobby)) {
@@ -536,7 +536,7 @@ std::vector<XSESSION_MEMBER> MemberList(const Session& session)
 	if (session.lobby.IsValid() && xls::SteamReady()) {
 		int count = xls::SteamMatchmaking()->GetNumLobbyMembers(session.lobby);
 		for (int i = 0; i < count; i++) {
-			CSteamID steamId = xls::SteamMatchmaking()->GetLobbyMemberByIndex(session.lobby, i);
+			CSteamID steamId = xls::LobbyMember(xls::SteamMatchmaking(), session.lobby, i);
 			XUID xuid = xls::XuidFromSteamId(steamId);
 			add(xuid, xls::UserIndexForXuid(xuid), 0);
 		}
@@ -639,7 +639,7 @@ void OnUserContextChanged(DWORD userIndex, DWORD contextId, DWORD value)
 	for (auto& entry : g_sessions) {
 		Session& session = *entry.second;
 		if (session.host && !session.deleted && session.userIndex == userIndex && session.lobby.IsValid() &&
-		    SteamMatchmaking()->GetLobbyOwner(session.lobby) == SteamLocalId()) {
+		    xls::LobbyOwner(SteamMatchmaking(), session.lobby) == SteamLocalId()) {
 			SteamMatchmaking()->SetLobbyData(session.lobby, ContextKey(contextId).c_str(), xls::FormatA("%u", value).c_str());
 			XLS_LOG_DEBUG("session: advertise context 0x%08x = %u on lobby %llu (updated).", contextId, value, session.lobby.ConvertToUint64());
 		}
@@ -663,7 +663,7 @@ void OnUserPropertyChanged(DWORD userIndex, DWORD propertyId)
 	for (auto& entry : g_sessions) {
 		Session& session = *entry.second;
 		if (session.host && !session.deleted && session.userIndex == userIndex && session.lobby.IsValid() &&
-		    SteamMatchmaking()->GetLobbyOwner(session.lobby) == SteamLocalId()) {
+		    xls::LobbyOwner(SteamMatchmaking(), session.lobby) == SteamLocalId()) {
 			SteamMatchmaking()->SetLobbyData(session.lobby, PropertyKey(propertyId).c_str(), value.c_str());
 			XLS_LOG_DEBUG("session: advertise property 0x%08x = %s on lobby %llu (updated).", propertyId, value.c_str(), session.lobby.ConvertToUint64());
 		}
@@ -754,7 +754,7 @@ void SettleLobbyOwnership(Session& session)
 		return;
 	}
 	ISteamMatchmaking* matchmaking = SteamMatchmaking();
-	if (matchmaking->GetLobbyOwner(session.lobby) != SteamLocalId()) {
+	if (xls::LobbyOwner(matchmaking, session.lobby) != SteamLocalId()) {
 		return;
 	}
 	if (session.host && session.pendingPublish) {
@@ -785,7 +785,7 @@ void OnLobbyChatUpdate(const LobbyChatUpdate_t& update)
 	}
 	else if (BChatMemberStateChangeRemoved(update.m_rgfChatMemberStateChange)) {
 		XLS_LOG_DEBUG("session: %llu left lobby %llu.", changed.ConvertToUint64(), update.m_ulSteamIDLobby);
-		if (!session->host && SteamMatchmaking()->GetLobbyOwner(session->lobby) == SteamLocalId()) {
+		if (!session->host && xls::LobbyOwner(SteamMatchmaking(), session->lobby) == SteamLocalId()) {
 			// Live drops a session from searches once its host deletes it so the migrated host's
 			// publish makes the lobby joinable again.
 			SteamMatchmaking()->SetLobbyJoinable(session->lobby, false);
@@ -1209,7 +1209,7 @@ DWORD WINAPI XSessionMigrateHost(HANDLE hSession, DWORD dwUserIndex, XSESSION_IN
 			ISteamMatchmaking* matchmaking = xls::SteamMatchmaking();
 			std::string claim = xls::HexEncode(&session->info.hostAddress, sizeof(session->info.hostAddress)) + xls::FormatA("|%llu", session->hostSeq);
 			matchmaking->SetLobbyMemberData(session->lobby, Key("host").c_str(), claim.c_str());
-			if (matchmaking->GetLobbyOwner(session->lobby) == xls::SteamLocalId()) {
+			if (xls::LobbyOwner(matchmaking, session->lobby) == xls::SteamLocalId()) {
 				PublishSession(*session);
 				XLS_LOG_INFO("session: migrated to host of lobby %llu.", session->lobby.ConvertToUint64());
 			}
@@ -1307,7 +1307,7 @@ DWORD WINAPI XSessionSearchEx(DWORD dwProcedureIndex, DWORD dwUserIndex, DWORD d
 		if (!call->failed) {
 			std::lock_guard<std::recursive_mutex> lock(g_mutex);
 			for (uint32 i = 0; i < call->result.m_nLobbiesMatching && entries.size() < dwNumResults; i++) {
-				CSteamID lobby = xls::SteamMatchmaking()->GetLobbyByIndex((int)i);
+				CSteamID lobby = xls::LobbyByIndex(xls::SteamMatchmaking(), (int)i);
 				if (FindByLobby(lobby)) {
 					continue;
 				}

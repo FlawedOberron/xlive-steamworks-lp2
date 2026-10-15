@@ -170,7 +170,7 @@ DWORD WINAPI XFriendsCreateEnumerator(DWORD dwUserIndex, DWORD dwStartingIndex, 
 	if (xls::SteamReady() && dwUserIndex == 0) {
 		int count = xls::SteamFriends()->GetFriendCount(k_EFriendFlagImmediate);
 		for (int i = 0; i < count && enumerator->friends.size() < MAX_FRIENDS; i++) {
-			CSteamID steamId = xls::SteamFriends()->GetFriendByIndex(i, k_EFriendFlagImmediate);
+			CSteamID steamId = xls::FriendByIndex(xls::SteamFriends(), i, k_EFriendFlagImmediate);
 			XONLINE_FRIEND entry = {};
 			entry.xuid = xls::XuidFromSteamId(steamId);
 			xls::CopyStringA(entry.szGamertag, sizeof(entry.szGamertag), xls::GamertagForSteamId(steamId).c_str());

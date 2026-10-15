@@ -9,6 +9,56 @@
 
 #include <mutex>
 
+#if defined(__GNUC__) && defined(_WIN32)
+// steam_api.dll is built with MSVC, which places overloaded virtuals in reverse declaration
+// order: its CCallbackBase vtable is { Run(param, ioFailure, call), Run(param), size }, while GCC
+// lays the SDK class out as { Run(param), Run(param, ioFailure, call), size }. A MinGW build
+// therefore registers callback objects with a layout that matches what Steam calls into.
+namespace xls {
+class MsvcCallbackBase {
+public:
+	virtual void RunCallResult(void* param, bool ioFailure, SteamAPICall_t call) = 0;
+	virtual void Run(void* param) = 0;
+	virtual int GetCallbackSizeBytes() = 0;
+
+protected:
+	uint8 m_nCallbackFlags = 0; // same offsets as CCallbackBase; Steam writes the flags
+	int m_iCallback = 0;
+};
+
+template <class T, class P>
+class MsvcCallback final : public MsvcCallbackBase {
+public:
+	using Func = void (T::*)(P*);
+	MsvcCallback(T* target, Func func) : m_target(target), m_func(func)
+	{
+		m_iCallback = P::k_iCallback;
+		SteamAPI_RegisterCallback(reinterpret_cast<CCallbackBase*>(this), P::k_iCallback);
+	}
+	~MsvcCallback()
+	{
+		if (m_nCallbackFlags & 0x01) {
+			SteamAPI_UnregisterCallback(reinterpret_cast<CCallbackBase*>(this));
+		}
+	}
+	MsvcCallback(const MsvcCallback&) = delete;
+	MsvcCallback& operator=(const MsvcCallback&) = delete;
+	void RunCallResult(void* param, bool, SteamAPICall_t) override { (m_target->*m_func)(static_cast<P*>(param)); }
+	void Run(void* param) override { (m_target->*m_func)(static_cast<P*>(param)); }
+	int GetCallbackSizeBytes() override { return (int)sizeof(P); }
+
+private:
+	T* m_target;
+	Func m_func;
+};
+}
+
+#undef STEAM_CALLBACK
+#define STEAM_CALLBACK(thisclass, func, param) \
+	void func(param* pParam); \
+	::xls::MsvcCallback<thisclass, param> m_steamcallback_##func{this, &thisclass::func}
+#endif
+
 namespace xls {
 
 namespace {
@@ -220,7 +270,7 @@ bool SteamStart()
 
 	SteamNetworkingUtils()->InitRelayNetworkAccess();
 
-	XLS_LOG_INFO("steam: initialised app %u as %s (%llu).", SteamUtils()->GetAppID(), SteamFriends()->GetPersonaName(), SteamUser()->GetSteamID().ConvertToUint64());
+	XLS_LOG_INFO("steam: initialised app %u as %s (%llu).", SteamUtils()->GetAppID(), SteamFriends()->GetPersonaName(), xls::SteamUserId(SteamUser()).ConvertToUint64());
 	return true;
 }
 
@@ -298,7 +348,7 @@ CSteamID SteamLocalId()
 	if (!g_ready || !SteamUser()) {
 		return k_steamIDNil;
 	}
-	return SteamUser()->GetSteamID();
+	return xls::SteamUserId(SteamUser());
 }
 
 uint32_t SteamAppId()
