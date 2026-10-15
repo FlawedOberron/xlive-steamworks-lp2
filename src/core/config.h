@@ -106,9 +106,14 @@ struct Config {
 	// UI.
 	bool nativeDialogs = true;          // Win32 fallbacks for keyboard and message box UI.
 	bool homeKeyOpensOverlay = true;    // GFWL opened the Guide on Home
+
+	// Lost Planet 2 mods (src/mods).
+	bool modSkipSplash = false;         // Skip the boot logos, straight to the title screen.
 };
 
 bool ConfigLoad();
+// Loads the configuration once, from whichever thread asks first.
+void ConfigEnsureLoaded();
 const Config& Cfg();
 const std::wstring& ConfigPath();
 

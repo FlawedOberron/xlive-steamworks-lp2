@@ -19,7 +19,6 @@
 namespace {
 
 bool g_initialised = false;
-bool g_configLoaded = false;
 uint32_t g_titleId = 0;
 uint32_t g_titleVersion = 0;
 XLIVE_DEBUG_LEVEL g_debugLevel = XLIVE_DEBUG_LEVEL_DEFAULT;
@@ -64,10 +63,7 @@ HRESULT WINAPI XLiveInitializeEx(XLIVE_INITIALIZE_INFO* pXii, DWORD dwTitleXLive
 	if (g_initialised) {
 		return S_OK;
 	}
-	if (!g_configLoaded) {
-		xls::ConfigLoad();
-		g_configLoaded = true;
-	}
+	xls::ConfigEnsureLoaded();
 	XLS_LOG_INFO("xlive-steamworks %u.%u.%u (linked %s) initialising (title xlive version 0x%08x, flags 0x%08x).", XLS_VERSION_MAJOR, XLS_VERSION_MINOR, XLS_VERSION_PATCH, LinkStamp().c_str(), dwTitleXLiveVersion, pXii ? pXii->dwFlags : 0);
 
 	xls::SteamStart();

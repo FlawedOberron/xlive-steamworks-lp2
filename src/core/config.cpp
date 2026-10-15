@@ -5,6 +5,8 @@
 
 #include <stdio.h>
 
+#include <mutex>
+
 namespace xls {
 
 namespace {
@@ -116,6 +118,12 @@ void LoadTitleServers(const Json& node, Config& config)
 
 }
 
+void ConfigEnsureLoaded()
+{
+	static std::once_flag once;
+	std::call_once(once, [] { ConfigLoad(); });
+}
+
 bool ConfigLoad()
 {
 	Config config;
@@ -210,6 +218,7 @@ bool ConfigLoad()
 			config.voiceEnabled = root["voice"]["enabled"].GetBool(true);
 			config.nativeDialogs = root["ui"]["native_dialogs"].GetBool(true);
 			config.homeKeyOpensOverlay = root["ui"]["home_key_opens_overlay"].GetBool(true);
+			config.modSkipSplash = root["mods"]["skip_splash"].GetBool(false);
 		}
 		else {
 			g_config = config;
