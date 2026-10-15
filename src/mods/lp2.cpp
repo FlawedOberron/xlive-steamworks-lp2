@@ -46,11 +46,24 @@ const uint8_t kSplashMask[] = {1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1
 const uint8_t kSoloBytes[] = {0x8b, 0x8e, 0xb0, 0x05, 0x00, 0x00, 0xb8, 0x01, 0x00, 0x00, 0x00, 0x74, 0x05, 0xb8, 0x02, 0x00, 0x00, 0x00, 0x3b, 0xc8, 0x0f, 0x8e};
 const uint8_t kSoloMask[] = {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
 
+// Match start (DX11 FUN_00e97690): counts the occupied member slots and refuses with alert 0x66
+// unless more than one: cmp ecx,ebx; jg ok; mov ecx,[mgr]; push ebx; push edx; push 2; push 0x66.
+const uint8_t kSoloSlotsBytes[] = {0x05, 0xf0, 0x01, 0x00, 0x00, 0x2b, 0xd3, 0x75, 0, 0x3b, 0xcb, 0x7f, 0, 0x8b, 0x0d, 0, 0, 0, 0, 0x53, 0x52, 0x6a, 0x02, 0x6a, 0x66};
+const uint8_t kSoloSlotsMask[] = {1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1};
+// Match start (DX11 FUN_00e9af08 area): network member count must exceed one:
+// cmp dword [eax+0xa208],1; jg ok; mov ecx,[mgr]; push 1; push ebx; push 2; push 0x66.
+const uint8_t kSoloNetBytes[] = {0x83, 0xb8, 0x08, 0xa2, 0x00, 0x00, 0x01, 0x7f, 0, 0x8b, 0x0d, 0, 0, 0, 0, 0x6a, 0x01, 0x53, 0x6a, 0x02, 0x6a, 0x66};
+const uint8_t kSoloNetMask[] = {1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1};
+
 CodePatch g_patches[] = {
 	{"skip_splash", &Config::modSkipSplash, kSplashBytes, kSplashMask, sizeof(kSplashBytes), {0x4ad03f - 13, 0x49d88f - 13},
 	 {{13, {0x90, 0x90, 0x90, 0x90, 0x90, 0x90}, 6}}, 1, false},
 	{"solo_start", &Config::modSoloStart, kSoloBytes, kSoloMask, sizeof(kSoloBytes), {0xa96c87, 0xa86bb7},
 	 {{7, {0x00}, 1}, {14, {0x00}, 1}}, 2, false},
+	{"solo_start (slots)", &Config::modSoloStart, kSoloSlotsBytes, kSoloSlotsMask, sizeof(kSoloSlotsBytes), {0xa976c6, 0xa875f6},
+	 {{11, {0xeb}, 1}}, 1, false},
+	{"solo_start (members)", &Config::modSoloStart, kSoloNetBytes, kSoloNetMask, sizeof(kSoloNetBytes), {0xa9af70, 0xa8aea0},
+	 {{7, {0xeb}, 1}}, 1, false},
 };
 
 bool Matches(const uint8_t* at, const CodePatch& p)
