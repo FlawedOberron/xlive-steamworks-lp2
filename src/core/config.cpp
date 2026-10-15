@@ -133,6 +133,7 @@ bool ConfigLoad()
 	config.titleStorageDir = exeDir + L"xlive-title-storage\\";
 	config.localStorageDir = exeDir + L"xlive-storage\\";
 	config.dlcRootDir = exeDir + L"DLC\\";
+	config.modDir = exeDir + L"mods\\";
 
 	g_configPath = moduleDir + L"xlive_steamworks.json";
 	if (!FileExists(g_configPath)) {
@@ -219,6 +220,12 @@ bool ConfigLoad()
 			config.nativeDialogs = root["ui"]["native_dialogs"].GetBool(true);
 			config.homeKeyOpensOverlay = root["ui"]["home_key_opens_overlay"].GetBool(true);
 			config.modSkipSplash = root["mods"]["skip_splash"].GetBool(false);
+			config.modDir = PathSetting(root["mods"]["dir"], config.modDir);
+			for (const Json& name : root["mods"]["enabled"].Elements()) {
+				if (name.IsString() && !name.GetString(std::string()).empty()) {
+					config.modsEnabled.push_back(Utf8ToWide(name.GetString(std::string()).c_str()));
+				}
+			}
 		}
 		else {
 			g_config = config;

@@ -109,6 +109,8 @@ struct Config {
 
 	// Lost Planet 2 mods (src/mods).
 	bool modSkipSplash = false;         // Skip the boot logos, straight to the title screen.
+	std::wstring modDir;                // <exe dir>\mods\ unless "mods": {"dir": ...}.
+	std::vector<std::wstring> modsEnabled; // Overlay folders under modDir, later ones win.
 };
 
 bool ConfigLoad();

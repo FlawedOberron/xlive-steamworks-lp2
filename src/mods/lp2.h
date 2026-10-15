@@ -7,4 +7,8 @@ namespace xls::mods {
 // then applies the enabled code patches.
 void Start();
 
+// Hooks the game's file opens so files in enabled mod folders replace the game's own
+// (mods/<name>/nativePC/... overrides <game>/nativePC/...). Called from DllMain.
+void OverlayInstall();
+
 }
