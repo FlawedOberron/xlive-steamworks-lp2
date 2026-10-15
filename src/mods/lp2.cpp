@@ -142,6 +142,26 @@ int __cdecl GameLog(void*, const char* format, ...)
 	while (n && (text[n - 1] == '\n' || text[n - 1] == '\r')) {
 		text[--n] = 0;
 	}
+	// The voice engine reports the same failure every frame; log repeats once with a count.
+	static char last[1024];
+	static unsigned repeats = 0;
+	static CRITICAL_SECTION* lock = [] {
+		auto* cs = new CRITICAL_SECTION;
+		InitializeCriticalSection(cs);
+		return cs;
+	}();
+	EnterCriticalSection(lock);
+	if (strcmp(text, last) == 0) {
+		repeats++;
+		LeaveCriticalSection(lock);
+		return 0;
+	}
+	if (repeats) {
+		XLS_LOG_INFO("game: (previous message repeated %u more times)", repeats);
+	}
+	repeats = 0;
+	memcpy(last, text, sizeof(last));
+	LeaveCriticalSection(lock);
 	XLS_LOG_INFO("game: %s", text);
 	return 0;
 }
