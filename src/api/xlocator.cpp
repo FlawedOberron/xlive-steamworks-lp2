@@ -12,6 +12,8 @@
 #include "core/users.h"
 #include "core/utils.h"
 
+#include <algorithm>
+
 #include <memory>
 #include <mutex>
 

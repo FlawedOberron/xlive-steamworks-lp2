@@ -80,8 +80,25 @@ source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES ${xls_headers} ${xls_sourc
 
 if(XLS_BUILD_STATIC)
     add_library(xlive STATIC ${xls_headers} ${xls_sources})
-else()
+elseif(MSVC)
     add_library(xlive SHARED ${xls_headers} ${xls_sources} ${xls_def})
+else()
+    # MinGW: compile once, generate a .def that maps the export names to the mangled symbols,
+    # then link the dll from the same objects.
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    add_library(xlive_objs OBJECT ${xls_headers} ${xls_sources})
+    set(xls_mingw_def "${CMAKE_CURRENT_BINARY_DIR}/xlive_exports_mingw.def")
+    add_custom_command(
+        OUTPUT "${xls_mingw_def}"
+        COMMAND Python3::Interpreter "${CMAKE_CURRENT_SOURCE_DIR}/cmake/mingw_def.py" "${CMAKE_NM}" "${xls_def}" "${xls_mingw_def}" $<TARGET_OBJECTS:xlive_objs>
+        DEPENDS xlive_objs $<TARGET_OBJECTS:xlive_objs> "${xls_def}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/mingw_def.py"
+        COMMAND_EXPAND_LISTS
+        VERBATIM
+    )
+    add_library(xlive SHARED $<TARGET_OBJECTS:xlive_objs> "${xls_mingw_def}")
+    target_include_directories(xlive_objs PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(xlive_objs PUBLIC steam_api)
+    set_target_properties(xlive_objs PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
 endif()
 
 # A title that links the static library includes <xlive/xfuncs.h> and <xlive/xlive_steamworks.h>.
@@ -100,7 +117,11 @@ set_target_properties(xlive PROPERTIES
     PDB_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/bin/$<0:>"
 )
 
-target_compile_definitions(xlive PRIVATE
+set(xls_target_for_defs xlive)
+if(TARGET xlive_objs)
+    set(xls_target_for_defs xlive_objs)
+endif()
+target_compile_definitions(${xls_target_for_defs} PRIVATE
     UNICODE
     _UNICODE
     WIN32_LEAN_AND_MEAN
@@ -123,13 +144,19 @@ target_compile_options(xlive PRIVATE
     $<$<AND:$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Debug>>:/Od>
 )
 
-target_link_options(xlive PRIVATE
-    /SUBSYSTEM:WINDOWS
-    /DEBUG
-    $<$<CONFIG:Release>:/OPT:REF>
-    $<$<CONFIG:Release>:/OPT:ICF>
-    $<$<CONFIG:Debug>:/SAFESEH:NO>
-)
+if(MSVC)
+    target_link_options(xlive PRIVATE
+        /SUBSYSTEM:WINDOWS
+        /DEBUG
+        $<$<CONFIG:Release>:/OPT:REF>
+        $<$<CONFIG:Release>:/OPT:ICF>
+        $<$<CONFIG:Debug>:/SAFESEH:NO>
+    )
+else()
+    # MinGW cross build: no runtime dlls next to the game, and let the .def's undecorated
+    # names bind to the stdcall-decorated symbols.
+    target_link_options(xlive PRIVATE -static -static-libgcc -static-libstdc++ -Wl,--enable-stdcall-fixup -Wl,--gc-sections -s)
+endif()
 
 # A title loads steam_api.dll from its own directory, so ship the two together.
 if(NOT XLS_BUILD_STATIC)
@@ -141,7 +168,9 @@ add_custom_command(TARGET xlive POST_BUILD
 endif()
 
 # Vendored code keeps its own style, its narrowing warnings are not ours to fix.
-set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/puff.c" PROPERTIES COMPILE_OPTIONS "/wd4244")
+if(MSVC)
+    set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/puff.c" PROPERTIES COMPILE_OPTIONS "/wd4244")
+endif()
 
 option(XLS_BUILD_TESTS "Build the smoke test that drives xlive.dll against a running Steam client" OFF)
 if(XLS_BUILD_TESTS AND NOT XLS_BUILD_STATIC)
@@ -152,7 +181,9 @@ if(XLS_BUILD_TESTS AND NOT XLS_BUILD_STATIC)
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/bin/$<0:>"
     )
     target_compile_definitions(xlive_smoke PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS "XLS_STEAM_HARDWARE_API=${XLS_STEAM_HARDWARE_API}")
-    target_link_options(xlive_smoke PRIVATE /SUBSYSTEM:CONSOLE)
+    if(MSVC)
+        target_link_options(xlive_smoke PRIVATE /SUBSYSTEM:CONSOLE)
+    endif()
 endif()
 
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT xlive)

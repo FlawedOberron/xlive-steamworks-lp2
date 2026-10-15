@@ -9,6 +9,7 @@
 #include <mmsystem.h>
 #include <deque>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <vector>
 

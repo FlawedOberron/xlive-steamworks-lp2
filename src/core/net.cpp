@@ -1320,7 +1320,7 @@ int NetSocketIoctl(SOCKET s, long command, u_long* argument)
 	if (!argument) {
 		return Fail(WSAEFAULT);
 	}
-	switch (command) {
+	switch ((u_long)command) {
 		case FIONBIO:
 			socket->nonBlocking = *argument != 0;
 			return 0;
