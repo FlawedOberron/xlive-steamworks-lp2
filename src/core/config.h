@@ -109,8 +109,11 @@ struct Config {
 
 	// Lost Planet 2 mods (src/mods).
 	bool modSkipSplash = false;         // Skip the boot logos, straight to the title screen.
+	bool modSoloStart = false;          // Let a lobby host start a match alone (test box).
+	bool modGameLog = false;            // Route the game's own debug messages into our log.
 	std::wstring modDir;                // <exe dir>\mods\ unless "mods": {"dir": ...}.
 	std::vector<std::wstring> modsEnabled; // Overlay folders under modDir, later ones win.
+	int modTraceOpens = 0;              // Log the first N file opens the overlay sees.
 };
 
 bool ConfigLoad();

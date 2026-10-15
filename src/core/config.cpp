@@ -220,7 +220,10 @@ bool ConfigLoad()
 			config.nativeDialogs = root["ui"]["native_dialogs"].GetBool(true);
 			config.homeKeyOpensOverlay = root["ui"]["home_key_opens_overlay"].GetBool(true);
 			config.modSkipSplash = root["mods"]["skip_splash"].GetBool(false);
+			config.modSoloStart = root["mods"]["solo_start"].GetBool(false);
+			config.modGameLog = root["mods"]["game_log"].GetBool(false);
 			config.modDir = PathSetting(root["mods"]["dir"], config.modDir);
+			config.modTraceOpens = (int)root["mods"]["trace_opens"].GetInt(0);
 			for (const Json& name : root["mods"]["enabled"].Elements()) {
 				if (name.IsString() && !name.GetString(std::string()).empty()) {
 					config.modsEnabled.push_back(Utf8ToWide(name.GetString(std::string()).c_str()));

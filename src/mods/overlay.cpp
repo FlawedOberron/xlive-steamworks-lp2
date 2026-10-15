@@ -29,6 +29,7 @@ std::wstring g_gameDirLower;
 std::once_flag g_indexOnce;
 std::mutex g_loggedMutex;
 std::set<std::wstring> g_logged;
+LONG g_traced = 0;
 
 std::wstring Lower(std::wstring s)
 {
@@ -77,6 +78,9 @@ void BuildIndex()
 const std::wstring* Redirect(const std::wstring& path)
 {
 	std::call_once(g_indexOnce, BuildIndex);
+	if (Cfg().modTraceOpens > 0 && InterlockedIncrement(&g_traced) <= Cfg().modTraceOpens) {
+		XLS_LOG_INFO("mods: open %s", WideToUtf8(path.c_str()).c_str());
+	}
 	if (g_index.empty()) {
 		return nullptr;
 	}
@@ -145,6 +149,14 @@ DWORD WINAPI HookGetFileAttributesA(LPCSTR path)
 	return g_getFileAttributesA(path);
 }
 
+struct Hooked {
+	const char* name;
+	void** slot;
+	void* hook;
+};
+Hooked g_hooked[3];
+int g_hookedCount = 0;
+
 // Points the game module's KERNEL32 import of name at hook; returns the original.
 void* HookImport(HMODULE module, const char* name, void* hook)
 {
@@ -175,6 +187,9 @@ void* HookImport(HMODULE module, const char* name, void* hook)
 			}
 			slots->u1.Function = (ULONG_PTR)hook;
 			VirtualProtect(&slots->u1.Function, sizeof(void*), old, &old);
+			if (g_hookedCount < 3) {
+				g_hooked[g_hookedCount++] = {name, (void**)&slots->u1.Function, hook};
+			}
 			return original;
 		}
 	}
@@ -199,6 +214,22 @@ void OverlayInstall()
 	HookImport(game, "CreateFileA", (void*)HookCreateFileA);
 	HookImport(game, "CreateFileW", (void*)HookCreateFileW);
 	HookImport(game, "GetFileAttributesA", (void*)HookGetFileAttributesA);
+}
+
+void OverlayVerify()
+{
+	for (int i = 0; i < g_hookedCount; i++) {
+		Hooked& h = g_hooked[i];
+		if (*h.slot == h.hook) {
+			continue;
+		}
+		XLS_LOG_WARN("mods: import %s was rewritten (now 0x%p), hooking it again.", h.name, *h.slot);
+		DWORD old = 0;
+		if (VirtualProtect(h.slot, sizeof(void*), PAGE_READWRITE, &old)) {
+			*h.slot = h.hook;
+			VirtualProtect(h.slot, sizeof(void*), old, &old);
+		}
+	}
 }
 
 }

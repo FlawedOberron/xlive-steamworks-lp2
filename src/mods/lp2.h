@@ -10,5 +10,7 @@ void Start();
 // Hooks the game's file opens so files in enabled mod folders replace the game's own
 // (mods/<name>/nativePC/... overrides <game>/nativePC/...). Called from DllMain.
 void OverlayInstall();
+// Re-applies the import hooks if something (SteamStub) restored the import table.
+void OverlayVerify();
 
 }
