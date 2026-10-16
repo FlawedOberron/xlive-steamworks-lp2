@@ -1,4 +1,5 @@
 #include "mods/lp2.h"
+#include "mods/packages.h"
 
 #include "core/config.h"
 #include "core/json.h"
@@ -13,12 +14,9 @@
 #include <string>
 #include <vector>
 
-// Extra online map slots. A mod folder may hold a mod.json such as
-//   {"maps": [{"slot": 13, "base": 0, "name": "Test Arena"}]}
-// which makes online map id 13 selectable and gives it map 0's preload list (the vehicle, weapon
-// and object archives the game loads before the area). The map's own files come through the file
-// overlay as aArea_ONLINE_13*.arc and friends; its name (MsgOnline 126+slot) and picker thumbnail
-// (id221 mc_monitor frame slot+2) come from overlay files too.
+// Extra online map slots for map packages (packages.cpp assigns the slots and serves the files):
+// makes each slot selectable everywhere, gives it its base map's preload list (the vehicle, weapon
+// and object archives the game loads before the area) and its own size class.
 //
 // The game identifies online maps by these numbers (map picker values 0-19, session data). 0-12
 // and 15 are real maps and 16-19 are the Random <Small/Medium/Large/All> choices, so only 13 and
@@ -99,41 +97,6 @@ bool WriteCode(void* at, const void* bytes, size_t size)
 	VirtualProtect(at, size, old, &old);
 	FlushInstructionCache(GetCurrentProcess(), at, size);
 	return true;
-}
-
-void LoadModJson(const std::wstring& mod)
-{
-	std::wstring path = Cfg().modDir + mod + L"\\mod.json";
-	HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
-	if (file == INVALID_HANDLE_VALUE) {
-		return;
-	}
-	std::string text;
-	char buf[4096];
-	DWORD got = 0;
-	while (ReadFile(file, buf, sizeof(buf), &got, nullptr) && got) {
-		text.append(buf, got);
-	}
-	CloseHandle(file);
-	Json root;
-	std::string error;
-	if (!Json::Parse(text, root, &error)) {
-		XLS_LOG_WARN("mods: %ls: %s", path.c_str(), error.c_str());
-		return;
-	}
-	for (const Json& m : root["maps"].Elements()) {
-		std::string size = m["size"].GetString(std::string());
-		int sizeClass = size == "small" ? 0 : size == "medium" ? 1 : size == "large" ? 2 : -1;
-		ModMap map{(int)m["slot"].GetInt(-1), (int)m["base"].GetInt(0), sizeClass, m["name"].GetString(std::string())};
-		bool freeSlot = map.slot == 13 || map.slot == 14;
-		if (!freeSlot || g_slotUsed[map.slot]) {
-			XLS_LOG_WARN("mods: %ls: map \"%s\" wants slot %d, which is not a free slot (13 or 14) or is taken.", mod.c_str(), map.name.c_str(), map.slot);
-			continue;
-		}
-		g_slotUsed[map.slot] = true;
-		g_maps.push_back(map);
-		XLS_LOG_INFO("mods: %ls: map \"%s\" in online slot %d (preloads like map %d).", mod.c_str(), map.name.c_str(), map.slot, map.base);
-	}
 }
 
 bool InstallAvailability(uint8_t* base, int build)
@@ -295,8 +258,9 @@ bool MapsWanted()
 {
 	if (!g_loaded) {
 		g_loaded = true;
-		for (const std::wstring& mod : Cfg().modsEnabled) {
-			LoadModJson(mod);
+		for (const MapPackage& p : PackageMaps()) {
+			g_slotUsed[p.slot] = true;
+			g_maps.push_back({p.slot, p.base, p.size, p.name});
 		}
 	}
 	return !g_maps.empty();

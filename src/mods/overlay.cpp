@@ -1,4 +1,6 @@
 #include "mods/lp2.h"
+#include "mods/package.h"
+#include "mods/packages.h"
 
 #include "core/config.h"
 #include "core/log.h"
@@ -6,6 +8,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <mutex>
 #include <set>
 #include <string>
@@ -62,15 +65,98 @@ void IndexFolder(const std::wstring& root, const std::wstring& rel, size_t* coun
 	FindClose(find);
 }
 
+// A zip mod is unpacked once into ModCache\mods\<name>\ (again when the zip changes).
+std::wstring UnpackZipMod(const std::wstring& zipPath, const std::wstring& name)
+{
+	std::wstring dir = Cfg().modCacheDir + L"mods\\" + name + L"\\";
+	WIN32_FILE_ATTRIBUTE_DATA a{};
+	GetFileAttributesExW(zipPath.c_str(), GetFileExInfoStandard, &a);
+	char buf[128];
+	snprintf(buf, sizeof(buf), "lp2-mods 1 size %lu:%lu time %lu:%lu", a.nFileSizeHigh, a.nFileSizeLow, a.ftLastWriteTime.dwHighDateTime, a.ftLastWriteTime.dwLowDateTime);
+	std::string stamp = buf;
+	Bytes old;
+	if (ReadWholeFile(dir + L"stamp.txt", &old) && std::string(old.begin(), old.end()) == stamp) {
+		return dir;
+	}
+	Zip zip;
+	if (!zip.Open(zipPath)) {
+		XLS_LOG_WARN("mods: %ls is not a readable zip.", zipPath.c_str());
+		return L"";
+	}
+	for (const ZipEntry& e : zip.Entries()) {
+		Bytes data;
+		if (e.name.find("..") != std::string::npos || !zip.Read(e, &data)) {
+			continue;
+		}
+		std::wstring out = dir + Utf8ToWide(e.name.c_str());
+		for (wchar_t& c : out) {
+			c = c == L'/' ? L'\\' : c;
+		}
+		WriteWholeFile(out, data);
+	}
+	WriteWholeFile(dir + L"stamp.txt", Bytes(stamp.begin(), stamp.end()));
+	return dir;
+}
+
+// Overlay mods in load order: the "enabled" list if given, else everything in the Mods folder
+// (folders and .zip files) alphabetically, minus "disabled". Later mods win.
+std::vector<std::wstring> ModRoots()
+{
+	std::vector<std::wstring> names = Cfg().modsEnabled;
+	if (names.empty()) {
+		WIN32_FIND_DATAW data;
+		HANDLE find = FindFirstFileW((Cfg().modDir + L"*").c_str(), &data);
+		if (find != INVALID_HANDLE_VALUE) {
+			do {
+				std::wstring n = data.cFileName;
+				bool dir = (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+				if (n == L"." || n == L".." || (!dir && (n.size() < 4 || _wcsicmp(n.c_str() + n.size() - 4, L".zip") != 0))) {
+					continue;
+				}
+				names.push_back(n);
+			} while (FindNextFileW(find, &data));
+			FindClose(find);
+		}
+		std::sort(names.begin(), names.end(), [](const std::wstring& x, const std::wstring& y) { return _wcsicmp(x.c_str(), y.c_str()) < 0; });
+	}
+	std::vector<std::wstring> roots;
+	for (const std::wstring& n : names) {
+		std::wstring stem = n.size() > 4 && _wcsicmp(n.c_str() + n.size() - 4, L".zip") == 0 ? n.substr(0, n.size() - 4) : n;
+		bool disabled = false;
+		for (const std::wstring& d : Cfg().modsDisabled) {
+			disabled |= _wcsicmp(d.c_str(), n.c_str()) == 0 || _wcsicmp(d.c_str(), stem.c_str()) == 0;
+		}
+		if (disabled) {
+			continue;
+		}
+		std::wstring path = Cfg().modDir + n;
+		if (stem != n) {
+			path = UnpackZipMod(path, stem);
+			if (path.empty()) {
+				continue;
+			}
+		}
+		else {
+			path += L"\\";
+		}
+		roots.push_back(path);
+	}
+	return roots;
+}
+
 void BuildIndex()
 {
 	ConfigEnsureLoaded();
 	g_gameDirLower = Lower(ExeDirectory());
-	for (const std::wstring& mod : Cfg().modsEnabled) {
-		std::wstring root = Cfg().modDir + mod + L"\\";
+	for (const std::wstring& root : ModRoots()) {
 		size_t count = 0;
 		IndexFolder(root, L"", &count);
-		XLS_LOG_INFO("mods: overlay %s: %u files from %s.", WideToUtf8(mod.c_str()).c_str(), (unsigned)count, WideToUtf8(root.c_str()).c_str());
+		XLS_LOG_INFO("mods: overlay %s: %u files.", WideToUtf8(root.c_str()).c_str(), (unsigned)count);
+	}
+	size_t before = g_index.size();
+	PackagesIndex(&g_index);
+	if (g_index.size() != before) {
+		XLS_LOG_INFO("mods: map packages: %u files.", (unsigned)(g_index.size() - before));
 	}
 }
 
@@ -81,9 +167,6 @@ const std::wstring* Redirect(const std::wstring& path)
 	if (Cfg().modTraceOpens > 0 && InterlockedIncrement(&g_traced) <= Cfg().modTraceOpens) {
 		XLS_LOG_INFO("mods: open %s", WideToUtf8(path.c_str()).c_str());
 	}
-	if (g_index.empty()) {
-		return nullptr;
-	}
 	wchar_t full[MAX_PATH * 2];
 	DWORD length = GetFullPathNameW(path.c_str(), (DWORD)(sizeof(full) / sizeof(full[0])), full, nullptr);
 	if (length == 0 || length >= sizeof(full) / sizeof(full[0])) {
@@ -93,15 +176,21 @@ const std::wstring* Redirect(const std::wstring& path)
 	if (lower.compare(0, g_gameDirLower.size(), g_gameDirLower) != 0) {
 		return nullptr;
 	}
-	auto it = g_index.find(lower.substr(g_gameDirLower.size()));
-	if (it == g_index.end()) {
+	std::wstring rel = lower.substr(g_gameDirLower.size());
+	auto it = g_index.find(rel);
+	const std::wstring* found = it == g_index.end() ? nullptr : &it->second;
+	// Shared game files that map packages add to (names), built from whatever would be opened.
+	if (const std::wstring* generated = PackagesGenerated(rel, found ? *found : std::wstring(full, length))) {
+		found = generated;
+	}
+	if (!found) {
 		return nullptr;
 	}
 	std::lock_guard<std::mutex> lock(g_loggedMutex);
-	if (g_logged.insert(it->first).second) {
-		XLS_LOG_INFO("mods: %s -> %s", WideToUtf8(it->first.c_str()).c_str(), WideToUtf8(it->second.c_str()).c_str());
+	if (g_logged.insert(rel).second) {
+		XLS_LOG_INFO("mods: %s -> %s", WideToUtf8(rel.c_str()).c_str(), WideToUtf8(found->c_str()).c_str());
 	}
-	return &it->second;
+	return found;
 }
 
 std::wstring Widen(LPCSTR path)

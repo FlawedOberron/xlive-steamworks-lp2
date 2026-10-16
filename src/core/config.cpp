@@ -133,7 +133,10 @@ bool ConfigLoad()
 	config.titleStorageDir = exeDir + L"xlive-title-storage\\";
 	config.localStorageDir = exeDir + L"xlive-storage\\";
 	config.dlcRootDir = exeDir + L"DLC\\";
-	config.modDir = exeDir + L"mods\\";
+	config.modDir = exeDir + L"Mods\\";
+	config.mapsDir = exeDir + L"Maps\\";
+	config.partsDir = exeDir + L"Parts\\";
+	config.modCacheDir = exeDir + L"ModCache\\";
 
 	g_configPath = moduleDir + L"xlive_steamworks.json";
 	if (!FileExists(g_configPath)) {
@@ -223,6 +226,14 @@ bool ConfigLoad()
 			config.modSoloStart = root["mods"]["solo_start"].GetBool(false);
 			config.modGameLog = root["mods"]["game_log"].GetBool(false);
 			config.modDir = PathSetting(root["mods"]["dir"], config.modDir);
+			config.mapsDir = PathSetting(root["mods"]["maps_dir"], config.mapsDir);
+			config.partsDir = PathSetting(root["mods"]["parts_dir"], config.partsDir);
+			config.modCacheDir = PathSetting(root["mods"]["cache_dir"], config.modCacheDir);
+			for (const Json& name : root["mods"]["disabled"].Elements()) {
+				if (name.IsString() && !name.GetString(std::string()).empty()) {
+					config.modsDisabled.push_back(Utf8ToWide(name.GetString(std::string()).c_str()));
+				}
+			}
 			config.modTraceOpens = (int)root["mods"]["trace_opens"].GetInt(0);
 			for (const Json& name : root["mods"]["enabled"].Elements()) {
 				if (name.IsString() && !name.GetString(std::string()).empty()) {

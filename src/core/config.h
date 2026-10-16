@@ -111,8 +111,12 @@ struct Config {
 	bool modSkipSplash = false;         // Skip the boot logos, straight to the title screen.
 	bool modSoloStart = false;          // Let a lobby host start a match alone (test box).
 	bool modGameLog = false;            // Route the game's own debug messages into our log.
-	std::wstring modDir;                // <exe dir>\mods\ unless "mods": {"dir": ...}.
-	std::vector<std::wstring> modsEnabled; // Overlay folders under modDir, later ones win.
+	std::wstring modDir;                // <exe dir>\Mods\ unless "mods": {"dir": ...}: overlay mods (folders or .zip).
+	std::wstring mapsDir;               // <exe dir>\Maps\ ("mods": {"maps_dir": ...}): map packages (.zip).
+	std::wstring partsDir;              // <exe dir>\Parts\ ("mods": {"parts_dir": ...}): part packages (.zip).
+	std::wstring modCacheDir;           // <exe dir>\ModCache\: unpacked and generated files.
+	std::vector<std::wstring> modsEnabled; // If set, only these overlay mods, in this order (later ones win).
+	std::vector<std::wstring> modsDisabled; // Otherwise every mod in modDir except these, alphabetically.
 	int modTraceOpens = 0;              // Log the first N file opens the overlay sees.
 };
 
