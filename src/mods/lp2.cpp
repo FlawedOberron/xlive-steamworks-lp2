@@ -316,6 +316,10 @@ DWORD WINAPI Worker(LPVOID)
 	if (mapsPending) {
 		XLS_LOG_WARN("mods: maps: unknown game build, mod map slots not enabled.");
 	}
+	else {
+		// The viability hook sits near the end of .text, so by now all of it is decrypted.
+		MapsPatchPickers(base);
+	}
 	// Unknown build: by now the code is decrypted, so scan the whole section once.
 	for (CodePatch& p : g_patches) {
 		if (p.done) {

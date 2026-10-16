@@ -249,6 +249,17 @@ bool MapsWanted()
 	return !g_maps.empty();
 }
 
+// Called once the whole of .text is decrypted (SteamStub decrypts it progressively, so the
+// pickers can still be encrypted when MapsTryInstall succeeds).
+void MapsPatchPickers(unsigned char* base)
+{
+	if (g_maps.empty()) {
+		return;
+	}
+	int tables = PatchInlineTables(base);
+	XLS_LOG_INFO("mods: maps: %d map picker check(s) patched.", tables);
+}
+
 // Called from the worker until it returns true (the code must be decrypted first).
 bool MapsTryInstall(unsigned char* base)
 {
@@ -264,8 +275,7 @@ bool MapsTryInstall(unsigned char* base)
 			XLS_LOG_WARN("mods: maps: availability check not recognised, mod map slots stay hidden.");
 			return true;
 		}
-		int tables = PatchInlineTables(base);
-		XLS_LOG_INFO("mods: maps: %u mod map slot(s) enabled (%s), %d inline map check(s) patched.", (unsigned)g_maps.size(), build == 0 ? "DX11" : "DX9", tables);
+		XLS_LOG_INFO("mods: maps: %u mod map slot(s) enabled (%s).", (unsigned)g_maps.size(), build == 0 ? "DX11" : "DX9");
 		return true;
 	}
 	return false;

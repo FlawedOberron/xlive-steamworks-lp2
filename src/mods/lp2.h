@@ -14,6 +14,7 @@ void OverlayInstall();
 // MapsTryInstall patches the game once its code is decrypted and returns true when done.
 bool MapsWanted();
 bool MapsTryInstall(unsigned char* base);
+void MapsPatchPickers(unsigned char* base);
 
 // Re-applies the import hooks if something (SteamStub) restored the import table.
 void OverlayVerify();
