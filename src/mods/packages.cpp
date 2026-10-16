@@ -5,6 +5,7 @@
 #include "core/log.h"
 #include "core/utils.h"
 #include "mods/package.h"
+#include "mods/parts.h"
 
 #include <windows.h>
 
@@ -194,6 +195,7 @@ void Load()
 {
 	ConfigEnsureLoaded();
 	LoadMaps();
+	PartsLoad();
 }
 
 // MsgOnline with the mod maps' names, for one ID_FCORE_<lang>_PC.arc.
