@@ -270,7 +270,14 @@ DWORD WINAPI Worker(LPVOID)
 	// after DllMain returns. Poll the known sites until the patterns appear.
 	g_viableDone = !Cfg().modSoloStart;
 	bool mapsPending = MapsWanted();
-	for (int tick = 0; tick < 30000 && (pending || gameLogPending || !g_viableDone || mapsPending); tick++) {
+	bool zoomPending = Cfg().modHoldZoom && dx11;
+	if (Cfg().modHoldZoom && !dx11) {
+		XLS_LOG_WARN("mods: hold_zoom is only mapped for LP2DX11.exe.");
+	}
+	for (int tick = 0; tick < 30000 && (pending || gameLogPending || !g_viableDone || mapsPending || zoomPending); tick++) {
+		if (zoomPending && HoldZoomTryInstall(base)) {
+			zoomPending = false;
+		}
 		if (mapsPending && MapsTryInstall(base)) {
 			mapsPending = false;
 		}
@@ -312,6 +319,9 @@ DWORD WINAPI Worker(LPVOID)
 		if (!g_viableDone) {
 			XLS_LOG_WARN("mods: solo_start (in match): viability check not found, matches will end at GO.");
 		}
+	}
+	if (zoomPending) {
+		XLS_LOG_WARN("mods: hold_zoom: zoom check not found in this build.");
 	}
 	if (mapsPending) {
 		XLS_LOG_WARN("mods: maps: unknown game build, mod map slots not enabled.");

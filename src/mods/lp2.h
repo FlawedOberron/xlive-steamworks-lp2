@@ -16,6 +16,9 @@ bool MapsWanted();
 bool MapsTryInstall(unsigned char* base);
 void MapsPatchPickers(unsigned char* base);
 
+// hold_zoom (zoom.cpp): returns true once the zoom check is hooked (LP2DX11.exe only).
+bool HoldZoomTryInstall(unsigned char* base);
+
 // Re-applies the import hooks if something (SteamStub) restored the import table.
 void OverlayVerify();
 

@@ -225,6 +225,7 @@ bool ConfigLoad()
 			config.modSkipSplash = root["mods"]["skip_splash"].GetBool(false);
 			config.modSoloStart = root["mods"]["solo_start"].GetBool(false);
 			config.modGameLog = root["mods"]["game_log"].GetBool(false);
+			config.modHoldZoom = root["mods"]["hold_zoom"].GetBool(false);
 			config.modDir = PathSetting(root["mods"]["dir"], config.modDir);
 			config.mapsDir = PathSetting(root["mods"]["maps_dir"], config.mapsDir);
 			config.partsDir = PathSetting(root["mods"]["parts_dir"], config.partsDir);
