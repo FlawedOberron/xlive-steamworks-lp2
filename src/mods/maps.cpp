@@ -31,6 +31,7 @@ namespace {
 struct ModMap {
 	int slot;
 	int base;
+	int size; // 0 small, 1 medium, 2 large; -1 = the base map's
 	std::string name;
 };
 
@@ -121,7 +122,9 @@ void LoadModJson(const std::wstring& mod)
 		return;
 	}
 	for (const Json& m : root["maps"].Elements()) {
-		ModMap map{(int)m["slot"].GetInt(-1), (int)m["base"].GetInt(0), m["name"].GetString(std::string())};
+		std::string size = m["size"].GetString(std::string());
+		int sizeClass = size == "small" ? 0 : size == "medium" ? 1 : size == "large" ? 2 : -1;
+		ModMap map{(int)m["slot"].GetInt(-1), (int)m["base"].GetInt(0), sizeClass, m["name"].GetString(std::string())};
 		bool freeSlot = map.slot == 13 || map.slot == 14;
 		if (!freeSlot || g_slotUsed[map.slot]) {
 			XLS_LOG_WARN("mods: %ls: map \"%s\" wants slot %d, which is not a free slot (13 or 14) or is taken.", mod.c_str(), map.name.c_str(), map.slot);
@@ -206,6 +209,42 @@ const uint8_t kCaseTables[][14] = {
 	{0, 3, 3, 1, 3, 3, 3, 3, 3, 3, 3, 2, 2, 2},
 };
 
+// When a match starts (DX11 FUN_00828f90) the chosen map goes through a {u32 map, u32 size} table
+// for maps 0-15 in .dataa (DX11 0x1746038, DX9 0x1735fe8). 13 and 14 are placeholders that turn
+// into 1 and 12, so a mod map in slot 13 used to load Turbulent Jungle. Each mod slot gets
+// {slot, size}. Size 0/1/2 = small/medium/large, used by the lobby and the Random <size> choices.
+bool PatchRemapTable(uint8_t* base)
+{
+	static const uint32_t kPrefix[] = {0, 1, 1, 0, 2, 0, 3, 1, 4, 0, 5, 2, 6, 1, 7, 2, 8, 1, 9, 0, 10, 0, 11, 1, 12, 0};
+	auto* nt = (IMAGE_NT_HEADERS*)(base + ((IMAGE_DOS_HEADER*)base)->e_lfanew);
+	IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+	for (int i = 0; i < nt->FileHeader.NumberOfSections; i++, sec++) {
+		if (memcmp(sec->Name, ".dataa", 7) != 0) {
+			continue;
+		}
+		uint8_t* start = base + sec->VirtualAddress;
+		uint8_t* end = start + sec->Misc.VirtualSize - 16 * 8;
+		for (uint8_t* p = start; p < end; p += 4) {
+			if (memcmp(p, kPrefix, sizeof(kPrefix)) != 0) {
+				continue;
+			}
+			auto* table = (uint32_t*)p;
+			for (const ModMap& m : g_maps) {
+				uint32_t size = m.size >= 0 ? (uint32_t)m.size : (m.base < 16 ? table[m.base * 2 + 1] : 1);
+				uint32_t entry[2] = {(uint32_t)m.slot, size};
+				DWORD old = 0;
+				if (VirtualProtect(table + m.slot * 2, 8, PAGE_READWRITE, &old)) {
+					memcpy(table + m.slot * 2, entry, 8);
+					VirtualProtect(table + m.slot * 2, 8, old, &old);
+				}
+				XLS_LOG_INFO("mods: maps: slot %d resolves to itself, size %s.", m.slot, size == 0 ? "small" : size == 1 ? "medium" : "large");
+			}
+			return true;
+		}
+	}
+	return false;
+}
+
 int PatchInlineTables(uint8_t* base)
 {
 	auto* nt = (IMAGE_NT_HEADERS*)(base + ((IMAGE_DOS_HEADER*)base)->e_lfanew);
@@ -270,7 +309,10 @@ void MapsPatchPickers(unsigned char* base)
 		return;
 	}
 	int tables = PatchInlineTables(base);
-	XLS_LOG_INFO("mods: maps: %d map picker check(s) patched.", tables);
+	XLS_LOG_INFO("mods: maps: %d map availability check(s) patched.", tables);
+	if (!PatchRemapTable(base)) {
+		XLS_LOG_WARN("mods: maps: match-start map table not found, mod maps will load another map.");
+	}
 }
 
 // Called from the worker until it returns true (the code must be decrypted first).
