@@ -269,7 +269,11 @@ DWORD WINAPI Worker(LPVOID)
 	// SteamStub decrypts .text in place before jumping to the game's entry point, which may be
 	// after DllMain returns. Poll the known sites until the patterns appear.
 	g_viableDone = !Cfg().modSoloStart;
-	for (int tick = 0; tick < 30000 && (pending || gameLogPending || !g_viableDone); tick++) {
+	bool mapsPending = MapsWanted();
+	for (int tick = 0; tick < 30000 && (pending || gameLogPending || !g_viableDone || mapsPending); tick++) {
+		if (mapsPending && MapsTryInstall(base)) {
+			mapsPending = false;
+		}
 		if (!g_viableDone) {
 			for (uint32_t rva : kViableRvas) {
 				uint8_t* site = base + rva;
@@ -308,6 +312,9 @@ DWORD WINAPI Worker(LPVOID)
 		if (!g_viableDone) {
 			XLS_LOG_WARN("mods: solo_start (in match): viability check not found, matches will end at GO.");
 		}
+	}
+	if (mapsPending) {
+		XLS_LOG_WARN("mods: maps: unknown game build, mod map slots not enabled.");
 	}
 	// Unknown build: by now the code is decrypted, so scan the whole section once.
 	for (CodePatch& p : g_patches) {
