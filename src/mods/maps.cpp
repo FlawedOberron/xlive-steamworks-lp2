@@ -194,11 +194,17 @@ bool InstallPreload(uint8_t* base, int build)
 	return true;
 }
 
-// The same switch is inlined in the map pickers (DX11 create-session FUN_00e8c910 at 0xe8c9c0,
-// and 0xe9c35c): movzx eax,byte [eax+TABLE]; jmp [eax*4+JUMPS] with a 14-entry case table for
-// maps 2-15 in which 13 and 14 select the "skip" case. Every referenced copy gets entries 11/12
-// (maps 13/14) set to the entry of map 3, which is always available.
-const uint8_t kCaseTable[] = {0, 4, 1, 4, 4, 4, 2, 0, 4, 2, 4, 3, 3, 2};
+// Map availability is also inlined as switch (map - 2) with a 14-entry byte case table:
+//   cmp reg,0xd; ja default; movzx reg,byte [reg+TABLE]; jmp [reg*4+JUMPS]
+// Three table layouts send maps 13/14 to "skip" / "alert 175 (HARDUMMY)" / "DLC check": the map
+// pickers (DX11 0xe8c9c0, 0xe9c2c8), lobby entry (0xe9a297) and others such as saved matches.
+// Every referenced copy gets entries 11/12 (maps 13/14) set to the entry of map 3, which is always
+// available. Other 14-case switches on the map id hold per-map properties and are left alone.
+const uint8_t kCaseTables[][14] = {
+	{0, 4, 1, 4, 4, 4, 2, 0, 4, 2, 4, 3, 3, 2},
+	{0, 3, 1, 3, 3, 3, 1, 0, 3, 1, 3, 2, 2, 1},
+	{0, 3, 3, 1, 3, 3, 3, 3, 3, 3, 3, 2, 2, 2},
+};
 
 int PatchInlineTables(uint8_t* base)
 {
@@ -213,22 +219,29 @@ int PatchInlineTables(uint8_t* base)
 		}
 	}
 	int patched = 0;
-	for (uint8_t* t = text; text && t + sizeof(kCaseTable) <= text + size; t++) {
-		if (memcmp(t, kCaseTable, sizeof(kCaseTable)) != 0) {
+	// cmp r32,0xd (83 f8+r 0d); ja rel8 (77 xx) or ja rel32 (0f 87 xx xx xx xx);
+	// movzx r32,byte [r32+imm32] (0f b6 modrm imm32, mod=10)
+	for (uint8_t* c = text; text && c + 17 <= text + size; c++) {
+		if (c[0] != 0x83 || (c[1] & 0xf8) != 0xf8 || c[2] != 0x0d) {
 			continue;
 		}
-		// Only tables the code indexes with movzx eax,byte [eax+t] (0f b6 80 imm32) in the 512 bytes before.
-		uint32_t va = (uint32_t)(uintptr_t)t;
-		bool referenced = false;
-		for (uint8_t* c = t - 512; c < t - 7 && !referenced; c++) {
-			referenced = c[0] == 0x0f && c[1] == 0xb6 && c[2] == 0x80 && *(uint32_t*)(c + 3) == va;
-		}
-		if (!referenced) {
+		uint8_t* m = c[3] == 0x77 ? c + 5 : (c[3] == 0x0f && c[4] == 0x87 ? c + 9 : nullptr);
+		if (!m || m[0] != 0x0f || m[1] != 0xb6 || (m[2] & 0xc0) != 0x80) {
 			continue;
 		}
-		uint8_t entries[2] = {g_slotUsed[13] ? t[1] : t[11], g_slotUsed[14] ? t[1] : t[12]};
-		if (WriteCode(t + 11, entries, 2)) {
-			patched++;
+		uint8_t* t = (uint8_t*)(uintptr_t)*(uint32_t*)(m + 3);
+		if (t < text || t + 14 > text + size) {
+			continue;
+		}
+		for (const uint8_t* layout : kCaseTables) {
+			if (memcmp(t, layout, 11) != 0 || t[13] != layout[13] || (t[11] != layout[11] && t[11] != t[1])) {
+				continue;
+			}
+			uint8_t entries[2] = {g_slotUsed[13] ? t[1] : layout[11], g_slotUsed[14] ? t[1] : layout[12]};
+			if (WriteCode(t + 11, entries, 2)) {
+				patched++;
+			}
+			break;
 		}
 	}
 	return patched;
