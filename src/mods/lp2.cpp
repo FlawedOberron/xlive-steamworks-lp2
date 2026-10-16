@@ -202,6 +202,47 @@ bool HookGameLog(uint8_t* base)
 	return true;
 }
 
+// --- solo_start (in match): the match monitor (DX11 FUN_0100e1a0) asks FUN_01008be0 whether the
+// match can go on and ends it with reason 7 ("not enough players / a team is empty"). The one call
+// is redirected through MatchViable, which turns reason 7 into "fine" and passes every other reason
+// (disconnects, host loss) through unchanged.
+//   cmp [ebx+0x25f],cl; jne far; mov ecx,ebp; call check; mov esi,eax; test esi,esi; je far
+const uint8_t kViableBytes[] = {0x38, 0x8b, 0x5f, 0x02, 0x00, 0x00, 0x0f, 0x85, 0, 0, 0, 0, 0x8b, 0xcd, 0xe8, 0, 0, 0, 0, 0x8b, 0xf0, 0x85, 0xf6, 0x0f, 0x84};
+const uint8_t kViableMask[] = {1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1};
+const size_t kViableCall = 14;
+const uint32_t kViableRvas[] = {0xc0e4c0, 0xbfe0e0}; // LP2DX11.exe, LP2DX9.exe
+using ViableFn = int(__cdecl*)();
+ViableFn g_viableOriginal = nullptr;
+bool g_viableDone = false;
+
+int __cdecl MatchViable()
+{
+	int reason = g_viableOriginal();
+	return reason == 7 ? 0 : reason;
+}
+
+bool MatchesBytes(const uint8_t* at, const uint8_t* bytes, const uint8_t* mask, size_t size)
+{
+	for (size_t i = 0; i < size; i++) {
+		if (mask[i] && at[i] != bytes[i]) {
+			return false;
+		}
+	}
+	return true;
+}
+
+void HookViable(uint8_t* site)
+{
+	uint8_t* call = site + kViableCall;
+	int32_t rel = *(int32_t*)(call + 1);
+	g_viableOriginal = (ViableFn)(call + 5 + rel);
+	int32_t newRel = (int32_t)((uint8_t*)&MatchViable - (call + 5));
+	if (Write(call + 1, &newRel, sizeof(newRel))) {
+		XLS_LOG_INFO("mods: solo_start (in match): hooked viability check 0x%p at 0x%p.", (void*)g_viableOriginal, call);
+	}
+	g_viableDone = true;
+}
+
 DWORD WINAPI Worker(LPVOID)
 {
 	ConfigEnsureLoaded();
@@ -227,7 +268,17 @@ DWORD WINAPI Worker(LPVOID)
 	}
 	// SteamStub decrypts .text in place before jumping to the game's entry point, which may be
 	// after DllMain returns. Poll the known sites until the patterns appear.
-	for (int tick = 0; tick < 30000 && (pending || gameLogPending); tick++) {
+	g_viableDone = !Cfg().modSoloStart;
+	for (int tick = 0; tick < 30000 && (pending || gameLogPending || !g_viableDone); tick++) {
+		if (!g_viableDone) {
+			for (uint32_t rva : kViableRvas) {
+				uint8_t* site = base + rva;
+				if (site >= text && site + sizeof(kViableBytes) <= text + textSize && MatchesBytes(site, kViableBytes, kViableMask, sizeof(kViableBytes))) {
+					HookViable(site);
+					break;
+				}
+			}
+		}
 		for (CodePatch& p : g_patches) {
 			if (p.done) {
 				continue;
@@ -246,6 +297,17 @@ DWORD WINAPI Worker(LPVOID)
 		}
 		OverlayVerify();
 		Sleep(1);
+	}
+	if (!g_viableDone) {
+		for (uint8_t* at = text; at + sizeof(kViableBytes) <= text + textSize; at++) {
+			if (MatchesBytes(at, kViableBytes, kViableMask, sizeof(kViableBytes))) {
+				HookViable(at);
+				break;
+			}
+		}
+		if (!g_viableDone) {
+			XLS_LOG_WARN("mods: solo_start (in match): viability check not found, matches will end at GO.");
+		}
 	}
 	// Unknown build: by now the code is decrypted, so scan the whole section once.
 	for (CodePatch& p : g_patches) {
