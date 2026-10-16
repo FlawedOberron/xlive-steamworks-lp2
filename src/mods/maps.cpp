@@ -194,6 +194,46 @@ bool InstallPreload(uint8_t* base, int build)
 	return true;
 }
 
+// The same switch is inlined in the map pickers (DX11 create-session FUN_00e8c910 at 0xe8c9c0,
+// and 0xe9c35c): movzx eax,byte [eax+TABLE]; jmp [eax*4+JUMPS] with a 14-entry case table for
+// maps 2-15 in which 13 and 14 select the "skip" case. Every referenced copy gets entries 11/12
+// (maps 13/14) set to the entry of map 3, which is always available.
+const uint8_t kCaseTable[] = {0, 4, 1, 4, 4, 4, 2, 0, 4, 2, 4, 3, 3, 2};
+
+int PatchInlineTables(uint8_t* base)
+{
+	auto* nt = (IMAGE_NT_HEADERS*)(base + ((IMAGE_DOS_HEADER*)base)->e_lfanew);
+	IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
+	uint8_t* text = nullptr;
+	size_t size = 0;
+	for (int i = 0; i < nt->FileHeader.NumberOfSections; i++, sec++) {
+		if (memcmp(sec->Name, ".text", 6) == 0) {
+			text = base + sec->VirtualAddress;
+			size = sec->Misc.VirtualSize;
+		}
+	}
+	int patched = 0;
+	for (uint8_t* t = text; text && t + sizeof(kCaseTable) <= text + size; t++) {
+		if (memcmp(t, kCaseTable, sizeof(kCaseTable)) != 0) {
+			continue;
+		}
+		// Only tables the code indexes with movzx eax,byte [eax+t] (0f b6 80 imm32) in the 512 bytes before.
+		uint32_t va = (uint32_t)(uintptr_t)t;
+		bool referenced = false;
+		for (uint8_t* c = t - 512; c < t - 7 && !referenced; c++) {
+			referenced = c[0] == 0x0f && c[1] == 0xb6 && c[2] == 0x80 && *(uint32_t*)(c + 3) == va;
+		}
+		if (!referenced) {
+			continue;
+		}
+		uint8_t entries[2] = {g_slotUsed[13] ? t[1] : t[11], g_slotUsed[14] ? t[1] : t[12]};
+		if (WriteCode(t + 11, entries, 2)) {
+			patched++;
+		}
+	}
+	return patched;
+}
+
 bool g_loaded = false;
 
 }
@@ -224,7 +264,8 @@ bool MapsTryInstall(unsigned char* base)
 			XLS_LOG_WARN("mods: maps: availability check not recognised, mod map slots stay hidden.");
 			return true;
 		}
-		XLS_LOG_INFO("mods: maps: %u mod map slot(s) enabled (%s).", (unsigned)g_maps.size(), build == 0 ? "DX11" : "DX9");
+		int tables = PatchInlineTables(base);
+		XLS_LOG_INFO("mods: maps: %u mod map slot(s) enabled (%s), %d inline map check(s) patched.", (unsigned)g_maps.size(), build == 0 ? "DX11" : "DX9", tables);
 		return true;
 	}
 	return false;
