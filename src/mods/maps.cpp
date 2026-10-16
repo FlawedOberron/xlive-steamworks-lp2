@@ -210,7 +210,7 @@ const uint8_t kCaseTables[][14] = {
 };
 
 // When a match starts (DX11 FUN_00828f90) the chosen map goes through a {u32 map, u32 size} table
-// for maps 0-15 in .dataa (DX11 0x1746038, DX9 0x1735fe8). 13 and 14 are placeholders that turn
+// for maps 0-15 in .data (DX11 0x1746038, DX9 0x1735fe8). 13 and 14 are placeholders that turn
 // into 1 and 12, so a mod map in slot 13 used to load Turbulent Jungle. Each mod slot gets
 // {slot, size}. Size 0/1/2 = small/medium/large, used by the lobby and the Random <size> choices.
 bool PatchRemapTable(uint8_t* base)
@@ -219,7 +219,8 @@ bool PatchRemapTable(uint8_t* base)
 	auto* nt = (IMAGE_NT_HEADERS*)(base + ((IMAGE_DOS_HEADER*)base)->e_lfanew);
 	IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
 	for (int i = 0; i < nt->FileHeader.NumberOfSections; i++, sec++) {
-		if (memcmp(sec->Name, ".dataa", 7) != 0) {
+		// ".data" in the shipped exe (Steamless renames it ".dataa" in unpacked copies).
+		if (memcmp(sec->Name, ".data", 5) != 0) {
 			continue;
 		}
 		uint8_t* start = base + sec->VirtualAddress;
