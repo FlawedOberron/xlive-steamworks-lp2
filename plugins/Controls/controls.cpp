@@ -44,6 +44,10 @@ const uint32_t kSiteRvas[] = {0xb8d96c /* DX11 */, 0xb7d9cc /* DX9 */};
 // Pointer to the options object; its +0x68 holds the 45 key bindings (u32: virtual-key code, or
 // mouse code | 0x80000000), copied there when the key config menu closes.
 const uint32_t kOptionsPtrs[] = {0x1852238 /* DX11 */, 0x1842198 /* DX9 */};
+// The game's slot -> action bits table: 45 x {u64 bits, u64 default binding}. Context-free: the VS
+// code reads the same bits differently (slot 8 grenade 0x200 = VS secondary, slot 13 action 1 0x1 =
+// get out, slot 12 change weapon 0x8 = ascend, slot 18 T-ENG w2 0x40000, ...).
+const uint32_t kSlotBits[] = {0x1645040 /* DX11 */, 0x1634f08 /* DX9 */};
 const uint32_t kSetsOffset = 0x3b8 - 0x3b0; // from ecx (pad+0x3b0)
 const int kSetCount = 5;
 
@@ -83,11 +87,11 @@ const Action kFootActions[] = {
 };
 const Action kVsActions[] = {
 	{"fire", 0x100, 0x100, 0x100, 7},
-	{"secondary", 0x200, 0x200 | W2(0x400000), 0x200 | W2(0x400000), -1}, // native button unknown
+	{"secondary", 0x200, 0x200 | W2(0x400000), 0x200 | W2(0x400000), 8}, // the grenade button
 	{"grenade", 0x200, 0x200 | W2(0x400000), 0x200 | W2(0x400000), 8}, // same button as secondary
 	{"zoom", 0x100000, 0x100000, 0x100000, 29},
-	// In a VS the grenade button gives 0x1 (get out), not the grenade bits (2026-10-17 bit log).
-	{"get_out", 0x1, 0x1, 0x1, 8},
+	// Get out is the Action 1 button (slot 13, bit 0x1).
+	{"get_out", 0x1, 0x1, 0x1, 13},
 	// Transforming VSs (e.g. type 0x9a) transform on the jump bit, which is boost in others. Nothing
 	// is cleared: a transform key adds the bit, Space keeps doing what it does.
 	{"transform", 0x2, 0x2, 0, -1},
@@ -130,6 +134,7 @@ std::vector<Rule> g_rules[kContextCount];
 using UpdateFn = void(__attribute__((thiscall)) *)(void*);
 UpdateFn g_update = nullptr;
 uint32_t g_optionsPtr = 0;
+uint32_t g_slotBits = 0;
 uint32_t g_inputPtr = 0;   // input manager (FUN_00860f70 reads mouse codes from it), DX11 only for now
 uint32_t g_mouseFn = 0;
 
@@ -248,31 +253,22 @@ uint32_t BindingCode(int vk)
 	return (uint32_t)vk;
 }
 
-// A key source takes its key over in its context: the actions the game itself puts on that key
-// there are dropped (e.g. right click no longer zooms in a VS once it fires the second weapon).
-uint64_t NativeClear(Context context, int vk)
+// A key source takes its key over in its context: whatever the player bound to that key in the
+// game's own config is dropped there (e.g. right click no longer zooms in a VS once it fires the
+// second weapon; wheel down no longer swaps to T-ENG while scoped). Uses the player's bindings and
+// the game's slot -> bits table, so it works for any assignment.
+uint64_t NativeClear(Context, int vk)
 {
 	uint8_t* options = g_optionsPtr ? *(uint8_t**)(uintptr_t)g_optionsPtr : nullptr;
-	if (!options) {
+	if (!options || !g_slotBits) {
 		return 0;
 	}
 	uint32_t code = BindingCode(vk);
 	uint64_t clear = 0;
-	auto scan = [&](const Action* list, size_t count) {
-		for (size_t i = 0; i < count; i++) {
-			if (list[i].slot >= 0 && *(uint32_t*)(options + 0x68 + list[i].slot * 4) == code) {
-				clear |= list[i].clear;
-			}
+	for (int slot = 0; slot < 45; slot++) {
+		if (*(uint32_t*)(options + 0x68 + slot * 4) == code) {
+			clear |= *(uint64_t*)(uintptr_t)(g_slotBits + slot * 16);
 		}
-	};
-	if (context == kFly) {
-		scan(kFlyActions, sizeof(kFlyActions) / sizeof(kFlyActions[0]));
-	}
-	if (context == kFoot || context == kScoped) {
-		scan(kFootActions, sizeof(kFootActions) / sizeof(kFootActions[0]));
-	}
-	else {
-		scan(kVsActions, sizeof(kVsActions) / sizeof(kVsActions[0]));
 	}
 	return clear;
 }
@@ -571,6 +567,7 @@ bool ControlsTryInstall(unsigned char* base)
 	uint8_t* call = site + 6;
 	g_update = (UpdateFn)(call + 5 + *(int32_t*)(call + 1));
 	g_optionsPtr = site == base + kSiteRvas[0] ? kOptionsPtrs[0] : kOptionsPtrs[1];
+	g_slotBits = site == base + kSiteRvas[0] ? kSlotBits[0] : kSlotBits[1];
 	if (site == base + kSiteRvas[0]) {
 		g_inputPtr = 0x18de7f4; // LP2DX11.exe
 		g_mouseFn = 0x860f70;
