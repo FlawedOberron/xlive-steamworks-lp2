@@ -131,9 +131,15 @@ void __attribute__((thiscall)) Draw(uint8_t* screen)
 			setArrow(screen, r, 0, 0);
 			continue;
 		}
-		void* messages = *(void**)(uintptr_t)kMsgMgr;
-		uint32_t id = ((uint32_t*)(uintptr_t)kLabelIds)[row->label];
-		const char* label = ((MessageFn)(uintptr_t)kMessage)(messages, kMsgPc, id, 0x16);
+		const char* label;
+		if (row->slot == 0x1d) {
+			label = "Aim"; // the game's "Zoom In": it toggles (or, held, aims); zoom steps are separate
+		}
+		else {
+			void* messages = *(void**)(uintptr_t)kMsgMgr;
+			uint32_t id = ((uint32_t*)(uintptr_t)kLabelIds)[row->label];
+			label = ((MessageFn)(uintptr_t)kMessage)(messages, kMsgPc, id, 0x16);
+		}
 		setList(screen, r, label ? label : "", 1);
 		if (row->slot == 0x2e || row->slot == 0x2f) {
 			char number[16];
