@@ -46,8 +46,8 @@ const int kSetCount = 5;
 
 constexpr uint64_t W2(uint32_t bits) { return (uint64_t)bits << 32; }
 
-enum Context { kFoot, kVs, kContextCount };
-const char* const kContextNames[kContextCount] = {"foot", "vs"};
+enum Context { kFoot, kVs, kFly, kContextCount };
+const char* const kContextNames[kContextCount] = {"foot", "vs", "fly"};
 
 // An action as the pad shows it: any bit of test means the button is down; set is what the game
 // itself produces for it; clear is what a rule removes (bits shared with other actions are left
@@ -82,8 +82,9 @@ const Action kVsActions[] = {
 	{"fire", 0x100, 0x100, 0x100, 7},
 	{"secondary", 0x200, 0x200 | W2(0x400000), 0x200 | W2(0x400000), 8},
 	{"grenade", 0x200, 0x200 | W2(0x400000), 0x200 | W2(0x400000), 8}, // same button as secondary
-	// 0x1 also comes with zoom in a VS, but get out shares it (and may need it held): never cleared.
-	{"zoom", 0x100000, 0x100000 | 0x1, 0x100000, 29},
+	{"zoom", 0x100000, 0x100000, 0x100000, 29},
+	// In a VS the grenade button gives 0x1 (get out), not the grenade bits (2026-10-17 bit log).
+	{"get_out", 0x1, 0x1, 0x1, -1},
 	{"brake", 0x20, 0x20, 0x20, 9},
 	{"crouch", 0x20, 0x20, 0x20, 9},
 	{"reload", 0x400, 0x400 | 0x800 | W2(0x200000), 0x400 | 0x800 | W2(0x200000), 28},
@@ -91,6 +92,13 @@ const Action kVsActions[] = {
 	{"dash", W2(0x10000000), W2(0x10000000), W2(0x10000000), 37},
 	{"boost", 0x2, 0x2 | 0x10 | 0x1000 | W2(0x40 | 0x80), 0x2, 19},
 	{"jump", 0x2, 0x2 | 0x10 | 0x1000 | W2(0x40 | 0x80), 0x2, 19},
+};
+
+// Flying VSs: the VS actions plus these (ascend = the change weapon button, descend = the drop
+// weapon button as the game's controls page lists them; descend's bit is from one test, unconfirmed).
+const Action kFlyActions[] = {
+	{"ascend", 0x8, 0x8, 0x8, 12},
+	{"descend", W2(0x40000), W2(0x40000), W2(0x40000), 16},
 };
 
 struct Rule {
@@ -107,6 +115,14 @@ UpdateFn g_update = nullptr;
 
 const Action* FindAction(Context context, const std::string& name)
 {
+	if (context == kFly) {
+		for (const Action& a : kFlyActions) {
+			if (_stricmp(a.name, name.c_str()) == 0) {
+				return &a;
+			}
+		}
+		context = kVs;
+	}
 	const Action* list = context == kVs ? kVsActions : kFootActions;
 	size_t count = context == kVs ? sizeof(kVsActions) / sizeof(kVsActions[0]) : sizeof(kFootActions) / sizeof(kFootActions[0]);
 	for (size_t i = 0; i < count; i++) {
@@ -188,7 +204,7 @@ bool ControlsLoadRules()
 			}
 		}
 		if (context < 0) {
-			LOG_WARN("unknown context \"%s\" (use foot or vs).", remap.context.c_str());
+			LOG_WARN("unknown context \"%s\" (use foot, vs or fly).", remap.context.c_str());
 			continue;
 		}
 		const Action* dest = FindAction((Context)context, remap.dest);
@@ -215,6 +231,16 @@ bool ControlsLoadRules()
 		}
 		any = true;
 	}
+	// Flying VSs inherit the VS rules whose action the fly section does not set itself.
+	for (const Rule& r : g_rules[kVs]) {
+		bool overridden = false;
+		for (const Rule& f : g_rules[kFly]) {
+			overridden |= _stricmp(f.dest->name, r.dest->name) == 0;
+		}
+		if (!overridden) {
+			g_rules[kFly].push_back(r);
+		}
+	}
 	return any;
 }
 
@@ -234,6 +260,14 @@ Context CurrentContext(uint8_t* pad)
 	uint8_t* unit = *(uint8_t**)(pad + 0x480);
 	uint8_t* ride = Alive(unit) ? *(uint8_t**)(unit + 0x40) : nullptr;
 	bool vs = Alive(ride) && ride != unit && ride[0x1f] == 2;
+	bool fly = false;
+	if (vs) {
+		int type = ride[0x1e];
+		for (int t : g_settings.flyTypes) {
+			fly |= t == type;
+		}
+	}
+	Context context = fly ? kFly : vs ? kVs : kFoot;
 	if (g_settings.log) {
 		static uint8_t* lastUnit = nullptr;
 		static uint8_t* lastRide = nullptr;
@@ -242,10 +276,10 @@ Context CurrentContext(uint8_t* pad)
 			lastRide = ride;
 			LOG_INFO("pad %p unit %p (id %08x) ride %p (id %08x) -> %s.", pad, unit,
 			             Alive(unit) ? *(uint32_t*)(unit + 0x1c) : 0, ride, Alive(ride) ? *(uint32_t*)(ride + 0x1c) : 0,
-			             kContextNames[vs ? kVs : kFoot]);
+			             kContextNames[context]);
 		}
 	}
-	return vs ? kVs : kFoot;
+	return context;
 }
 
 void Remap(uint64_t* sets, const std::vector<Rule>& rules)
@@ -394,9 +428,9 @@ void __attribute__((thiscall)) PadUpdate(uint8_t* self)
 	// With "log": true, every change of the held bits in a VS (game's, then after the rules), to
 	// map buttons that are not known yet.
 	static uint64_t lastHeld = 0;
-	if (g_settings.log && context == kVs && before != lastHeld) {
+	if (g_settings.log && context != kFoot && before != lastHeld) {
 		lastHeld = before;
-		LOG_INFO("vs held: game w1 %08x w2 %08x -> w1 %08x w2 %08x.", (uint32_t)before, (uint32_t)(before >> 32), (uint32_t)sets[0], (uint32_t)(sets[0] >> 32));
+		LOG_INFO("%s held: game w1 %08x w2 %08x -> w1 %08x w2 %08x.", kContextNames[context], (uint32_t)before, (uint32_t)(before >> 32), (uint32_t)sets[0], (uint32_t)(sets[0] >> 32));
 	}
 }
 

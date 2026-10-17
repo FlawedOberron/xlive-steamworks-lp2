@@ -5,8 +5,10 @@
 	// Split controls: in a VS, an action can take the button of another action.
 	// Foot actions: jump, grapple, next_weapon, crouch, fire, grenade, reload, action,
 	//   quick_turn, zoom, melee, gesture, teng, dodge
-	// VS actions: fire, secondary (= the grenade button), zoom, brake, reload, quick_turn,
-	//   dash, boost
+	// VS actions: fire, secondary, zoom, get_out (= the grenade button in a VS), brake, reload,
+	//   quick_turn, dash, boost
+	// Flying VS ("fly", inherits "vs" unless set here): the VS actions plus ascend (= change
+	//   weapon button) and descend (= drop weapon button). Which VS types fly: "fly_types".
 	// A source is either another action (borrow its button; works for pads too) or a key:
 	//   "key:F", "key:5", "key:F13", "key:NUM5", "key:MOUSE_X1" (side button), "key:MOUSE_R",
 	//   "key:SPACE", "key:LSHIFT", "key:0x52" (any virtual-key code). Keyboard and mouse only.
@@ -17,6 +19,11 @@
 	"vs": {
 		// "secondary": "zoom",
 		// "zoom": "grenade"
+	},
+
+	"fly": {
+		// "ascend": "jump",
+		// "descend": "crouch"
 	},
 
 	// Log on-foot / VS changes (for testing).

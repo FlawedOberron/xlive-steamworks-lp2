@@ -43,7 +43,13 @@ void LoadSettings()
 	}
 	g_settings.holdToAim = root["hold_to_aim"].GetBool(true);
 	g_settings.log = root["log"].GetBool(false);
-	for (const char* context : {"foot", "vs"}) {
+	if (root["fly_types"].Elements().size()) {
+		g_settings.flyTypes.clear();
+		for (const xls::Json& t : root["fly_types"].Elements()) {
+			g_settings.flyTypes.push_back((int)t.GetInt(0));
+		}
+	}
+	for (const char* context : {"foot", "vs", "fly"}) {
 		for (const auto& remap : root[context].Items()) {
 			std::string source = remap.second.GetString(std::string());
 			if (!source.empty()) {

@@ -24,6 +24,7 @@ struct Settings {
 	bool holdToAim = true;      // zoom while the zoom button is held, instead of toggling
 	bool log = false;           // log on-foot / VS context changes and the units seen
 	std::vector<Remap> remaps;  // per context: action dest takes the input of action source
+	std::vector<int> flyTypes = {0xa8, 0xda}; // VS types (unit id byte 2) that fly
 };
 extern Settings g_settings;
 
