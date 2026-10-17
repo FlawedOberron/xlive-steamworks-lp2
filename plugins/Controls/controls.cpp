@@ -1,7 +1,4 @@
-#include "mods/lp2.h"
-
-#include "core/config.h"
-#include "core/log.h"
+#include "plugin.h"
 
 #include <windows.h>
 
@@ -22,7 +19,7 @@
 // dest follow the input of action source and drops source's own bits, in all five sets alike, so
 // held/pressed/released stay consistent and gamepads work the same way. Example, zoom on right
 // click and grenade on G, but right click fires the VS's second weapon and G zooms in a VS:
-//   "controls": {"vs": {"secondary": "zoom", "zoom": "grenade"}}
+//   controls.json: {"vs": {"secondary": "zoom", "zoom": "grenade"}}
 //
 // Context: the pad's unit (pad+0x480) and what it is riding (unit+0x40, as the game's own zoom
 // check reads it, DX11 0x9397af). Riding a unit of category 2 (byte +0x1f, the two-weapon units)
@@ -31,7 +28,7 @@
 //
 //   lea ecx,[esi+0x3b0]; call update; call ...    (8d 8e b0 03 00 00 e8 ........ e8)
 
-namespace xls::mods {
+namespace controls {
 
 namespace {
 
@@ -110,10 +107,12 @@ const Action* FindAction(Context context, const std::string& name)
 	return nullptr;
 }
 
-bool LoadRules()
+}
+
+bool ControlsLoadRules()
 {
 	bool any = false;
-	for (const Config::ControlRemap& remap : Cfg().modControls) {
+	for (const Remap& remap : g_settings.remaps) {
 		int context = -1;
 		for (int c = 0; c < kContextCount; c++) {
 			if (_stricmp(remap.context.c_str(), kContextNames[c]) == 0) {
@@ -121,21 +120,23 @@ bool LoadRules()
 			}
 		}
 		if (context < 0) {
-			XLS_LOG_WARN("mods: controls: unknown context \"%s\" (use foot or vs).", remap.context.c_str());
+			LOG_WARN("unknown context \"%s\" (use foot or vs).", remap.context.c_str());
 			continue;
 		}
 		const Action* dest = FindAction((Context)context, remap.dest);
 		const Action* source = FindAction((Context)context, remap.source);
 		if (!dest || !source) {
-			XLS_LOG_WARN("mods: controls: %s: unknown action \"%s\".", kContextNames[context], (!dest ? remap.dest : remap.source).c_str());
+			LOG_WARN("%s: unknown action \"%s\".", kContextNames[context], (!dest ? remap.dest : remap.source).c_str());
 			continue;
 		}
 		g_rules[context].push_back({dest, source});
-		XLS_LOG_INFO("mods: controls: %s: %s <- %s.", kContextNames[context], dest->name, source->name);
+		LOG_INFO("%s: %s <- %s.", kContextNames[context], dest->name, source->name);
 		any = true;
 	}
 	return any;
 }
+
+namespace {
 
 bool Alive(const uint8_t* unit)
 {
@@ -151,13 +152,13 @@ Context CurrentContext(uint8_t* pad)
 	uint8_t* unit = *(uint8_t**)(pad + 0x480);
 	uint8_t* ride = Alive(unit) ? *(uint8_t**)(unit + 0x40) : nullptr;
 	bool vs = Alive(ride) && ride != unit && ride[0x1f] == 2;
-	if (Cfg().modControlsLog) {
+	if (g_settings.log) {
 		static uint8_t* lastUnit = nullptr;
 		static uint8_t* lastRide = nullptr;
 		if (unit != lastUnit || ride != lastRide) {
 			lastUnit = unit;
 			lastRide = ride;
-			XLS_LOG_INFO("mods: controls: pad %p unit %p (id %08x) ride %p (id %08x) -> %s.", pad, unit,
+			LOG_INFO("pad %p unit %p (id %08x) ride %p (id %08x) -> %s.", pad, unit,
 			             Alive(unit) ? *(uint32_t*)(unit + 0x1c) : 0, ride, Alive(ride) ? *(uint32_t*)(ride + 0x1c) : 0,
 			             kContextNames[vs ? kVs : kFoot]);
 		}
@@ -211,17 +212,11 @@ bool SiteMatches(const uint8_t* at)
 
 }
 
-bool ControlsWanted()
-{
-	static bool wanted = LoadRules() || Cfg().modControlsLog;
-	return wanted;
-}
-
 bool ControlsTryInstall(unsigned char* base)
 {
 	uint8_t* site = nullptr;
 	for (uint32_t rva : kSiteRvas) {
-		if (SiteMatches(base + rva)) {
+		if (InImage(base, rva, sizeof(kSiteBytes)) && SiteMatches(base + rva)) {
 			site = base + rva;
 			break;
 		}
@@ -239,7 +234,7 @@ bool ControlsTryInstall(unsigned char* base)
 	memcpy(call + 1, &rel, 4);
 	VirtualProtect(call + 1, 4, old, &old);
 	FlushInstructionCache(GetCurrentProcess(), call + 1, 4);
-	XLS_LOG_INFO("mods: controls: pad update hooked at 0x%p (game update 0x%p).", call, (void*)g_update);
+	LOG_INFO("pad update hooked at 0x%p (game update 0x%p).", call, (void*)g_update);
 	return true;
 }
 

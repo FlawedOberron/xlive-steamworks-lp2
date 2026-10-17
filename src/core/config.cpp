@@ -11,6 +11,9 @@ namespace xls {
 
 namespace {
 
+// Old "mods" keys whose features moved into plugin mods, reported once the log is open.
+std::vector<std::string> g_movedSettings;
+
 Config g_config;
 std::wstring g_configPath;
 
@@ -222,20 +225,11 @@ bool ConfigLoad()
 			config.voiceEnabled = root["voice"]["enabled"].GetBool(true);
 			config.nativeDialogs = root["ui"]["native_dialogs"].GetBool(true);
 			config.homeKeyOpensOverlay = root["ui"]["home_key_opens_overlay"].GetBool(true);
-			config.modSkipSplash = root["mods"]["skip_splash"].GetBool(false);
 			config.modSoloStart = root["mods"]["solo_start"].GetBool(false);
 			config.modGameLog = root["mods"]["game_log"].GetBool(false);
-			config.modHoldZoom = root["mods"]["hold_zoom"].GetBool(false);
-			for (const auto& context : root["mods"]["controls"].Items()) {
-				if (context.first == "log") {
-					config.modControlsLog = context.second.GetBool(false);
-					continue;
-				}
-				for (const auto& remap : context.second.Items()) {
-					std::string source = remap.second.GetString(std::string());
-					if (!source.empty()) {
-						config.modControls.push_back({context.first, remap.first, source});
-					}
+			for (const char* moved : {"skip_splash", "hold_zoom", "controls"}) {
+				if (root["mods"][moved].IsObject() || root["mods"][moved].GetBool(false)) {
+					g_movedSettings.push_back(moved);
 				}
 			}
 			config.modDir = PathSetting(root["mods"]["dir"], config.modDir);
@@ -264,6 +258,9 @@ bool ConfigLoad()
 
 	g_config = config;
 	LogInit(config.logPath, config.logLevel, config.logToDebugger);
+	for (const std::string& moved : g_movedSettings) {
+		XLS_LOG_WARN("config: mods.%s is now a plugin mod (Mods\\SkipSplash or Mods\\Controls); the setting is ignored.", moved.c_str());
+	}
 	if (loaded) {
 		XLS_LOG_INFO("config: loaded %ls.", g_configPath.c_str());
 	}

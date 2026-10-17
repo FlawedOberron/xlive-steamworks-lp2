@@ -4,6 +4,7 @@
 #include "api/xsession.h"
 
 #include "core/config.h"
+#include "mods/lp2.h"
 #include "core/enumerator.h"
 #include "core/log.h"
 #include "core/net.h"
@@ -63,6 +64,7 @@ HRESULT WINAPI XLiveInitializeEx(XLIVE_INITIALIZE_INFO* pXii, DWORD dwTitleXLive
 	if (g_initialised) {
 		return S_OK;
 	}
+	xls::mods::NotifyTitleStarted();
 	xls::ConfigEnsureLoaded();
 	XLS_LOG_INFO("xlive-steamworks %u.%u.%u (linked %s) initialising (title xlive version 0x%08x, flags 0x%08x).", XLS_VERSION_MAJOR, XLS_VERSION_MINOR, XLS_VERSION_PATCH, LinkStamp().c_str(), dwTitleXLiveVersion, pXii ? pXii->dwFlags : 0);
 

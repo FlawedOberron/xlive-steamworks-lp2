@@ -172,6 +172,35 @@ if(MSVC)
     set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/puff.c" PROPERTIES COMPILE_OPTIONS "/wd4244")
 endif()
 
+# --- Lost Planet 2 plugin mods (sdk/lp2mod.h) ----------------------------------------------------
+# Each builds bin/plugins/<Name>/<Name>.dll; the folder (plus its settings file) is the mod to copy
+# into the game's Mods folder.
+option(XLS_BUILD_PLUGINS "Build the Lost Planet 2 plugin mods" ON)
+function(lp2_plugin name)
+    add_library(${name} SHARED ${ARGN})
+    set(out "${CMAKE_CURRENT_SOURCE_DIR}/bin/plugins/${name}/$<0:>")
+    set_target_properties(${name} PROPERTIES
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED ON
+        PREFIX ""
+        RUNTIME_OUTPUT_DIRECTORY "${out}"
+        LIBRARY_OUTPUT_DIRECTORY "${out}"
+        ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/plugins"
+    )
+    target_include_directories(${name} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_compile_definitions(${name} PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _CRT_SECURE_NO_WARNINGS)
+    if(NOT MSVC)
+        target_link_options(${name} PRIVATE -static -static-libgcc -static-libstdc++ -Wl,--gc-sections -s)
+    endif()
+endfunction()
+if(XLS_BUILD_PLUGINS AND NOT XLS_BUILD_STATIC)
+    lp2_plugin(SkipSplash plugins/SkipSplash/skip_splash.cpp)
+    lp2_plugin(Controls plugins/Controls/plugin.cpp plugins/Controls/controls.cpp plugins/Controls/zoom.cpp src/core/json.cpp)
+    add_custom_command(TARGET Controls POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/plugins/Controls/controls.json" "$<TARGET_FILE_DIR:Controls>/controls.json"
+    )
+endif()
+
 option(XLS_BUILD_TESTS "Build the smoke test that drives xlive.dll against a running Steam client" OFF)
 if(XLS_BUILD_TESTS AND NOT XLS_BUILD_STATIC)
     add_executable(xlive_smoke tests/smoke/smoke.cpp tests/smoke/pair.cpp)

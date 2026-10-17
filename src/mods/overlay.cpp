@@ -148,7 +148,7 @@ void BuildIndex()
 {
 	ConfigEnsureLoaded();
 	g_gameDirLower = Lower(ExeDirectory());
-	for (const std::wstring& root : ModRoots()) {
+	for (const std::wstring& root : ModRootList()) {
 		size_t count = 0;
 		IndexFolder(root, L"", &count);
 		XLS_LOG_INFO("mods: overlay %s: %u files.", WideToUtf8(root.c_str()).c_str(), (unsigned)count);
@@ -285,6 +285,17 @@ void* HookImport(HMODULE module, const char* name, void* hook)
 	return nullptr;
 }
 
+}
+
+const std::vector<std::wstring>& ModRootList()
+{
+	static std::once_flag once;
+	static std::vector<std::wstring> roots;
+	std::call_once(once, [] {
+		ConfigEnsureLoaded();
+		roots = ModRoots();
+	});
+	return roots;
 }
 
 void OverlayInstall()

@@ -61,12 +61,6 @@ Comments are allowed. Mod-related keys:
 ```jsonc
 {
 	"mods": {
-		"hold_zoom": true,        // zoom while the zoom button is held, instead of toggling
-		"controls": {             // split controls: per context, action <- the button of another action
-			"vs": { "secondary": "zoom", "zoom": "grenade" }
-			// "log": true         // log on-foot / VS context changes (testing)
-		},
-		"skip_splash": false,     // skip the boot logos
 		"disabled": ["SomeMod"],  // Mods\ entries to skip (folder or zip name without .zip)
 		// "enabled": [...],      // or: only these Mods\ entries, in this order (later ones win)
 		"game_log": false,        // copy the game's own debug messages into the log
@@ -77,15 +71,20 @@ Comments are allowed. Mod-related keys:
 }
 ```
 
-## Built-in quality-of-life options
+## Plugin mods (code)
 
-These double as demo mods.
+xlive.dll itself only adds networking and mod support; gameplay and quality-of-life changes are
+plugin mods, so the game stays as vanilla as you want. A plugin mod is a normal Mods\ entry with a
+.dll at its top level (contract: `sdk/lp2mod.h`); delete the folder or list it in
+`mods.disabled` to turn it off.
 
-| Option | What it does | Status |
-|---|---|---|
-| `hold_zoom` | Zoom only while the zoom button is held; release to unzoom. On foot; DX11 works, DX9 mapped but untested. | Works (DX11) |
-| `controls` | Split on-foot / VS controls: in a VS, an action takes the button of another action (works for keyboard, mouse and pad). Actions — foot: jump, grapple, next_weapon, crouch, fire, grenade, reload, action, quick_turn, zoom, melee, gesture, teng, dodge; vs: fire, secondary (= grenade button), zoom, brake, reload, quick_turn, dash, boost. | Built, untested |
-| Key config menu rows | "Hold to aim" under Zoom In, plus separate "VS Zoom" / "VS Secondary" key rows in the game's keyboard config | Planned |
+| Mod | What it does | Settings | Status |
+|---|---|---|---|
+| `Mods\SkipSplash` | Skip the boot logos, straight to the title screen. | none | Works (was built in) |
+| `Mods\Controls` | Hold to aim (zoom only while held, on foot) and split on-foot / VS controls: in a VS an action can take the button of another action (keyboard, mouse and pad). Foot actions: jump, grapple, next_weapon, crouch, fire, grenade, reload, action, quick_turn, zoom, melee, gesture, teng, dodge; VS: fire, secondary (= grenade button), zoom, brake, reload, quick_turn, dash, boost. | `controls.json` | Hold to aim works (DX11); split controls untested |
+| Key config menu rows | "Hold to aim" under Zoom In, separate "VS Zoom" / "VS Secondary" key rows | (planned, in Controls) | Planned |
+
+The old `mods.skip_splash` / `mods.hold_zoom` settings are ignored (a warning in the log says so).
 
 ## Mods\ (file replacement)
 

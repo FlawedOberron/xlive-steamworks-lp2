@@ -33,12 +33,6 @@ struct CodePatch {
 	bool done;
 };
 
-// Boot-logo state machine (DX11 FUN_008acfb0) state 0:
-//   mov ecx,[abs]; cmp byte [ecx+0x1829],0; jz show_logos; pop edi; mov byte [esi+4],6
-// NOPing the jz makes state 0 always continue to state 6 (logos done, title screen).
-const uint8_t kSplashBytes[] = {0x8b, 0x0d, 0, 0, 0, 0, 0x80, 0xb9, 0x29, 0x18, 0x00, 0x00, 0x00, 0x0f, 0x84, 0xec, 0x00, 0x00, 0x00, 0x5f, 0xc6, 0x46, 0x04, 0x06};
-const uint8_t kSplashMask[] = {1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
-
 // Lobby host input (DX11 FUN_00e969f0): on confirm, the host may start only when the lobby has
 // more members than the minimum (1, or 2 when teams are fixed):
 //   mov ecx,[esi+0x5b0]; mov eax,1; jz +5; mov eax,2; cmp ecx,eax; jle ignore
@@ -56,8 +50,6 @@ const uint8_t kSoloNetBytes[] = {0x83, 0xb8, 0x08, 0xa2, 0x00, 0x00, 0x01, 0x7f,
 const uint8_t kSoloNetMask[] = {1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1};
 
 CodePatch g_patches[] = {
-	{"skip_splash", &Config::modSkipSplash, kSplashBytes, kSplashMask, sizeof(kSplashBytes), {0x4ad03f - 13, 0x49d88f - 13},
-	 {{13, {0x90, 0x90, 0x90, 0x90, 0x90, 0x90}, 6}}, 1, false},
 	{"solo_start", &Config::modSoloStart, kSoloBytes, kSoloMask, sizeof(kSoloBytes), {0xa96c87, 0xa86bb7},
 	 {{7, {0x00}, 1}, {14, {0x00}, 1}}, 2, false},
 	{"solo_start (slots)", &Config::modSoloStart, kSoloSlotsBytes, kSoloSlotsMask, sizeof(kSoloSlotsBytes), {0xa976c6, 0xa875f6},
@@ -270,14 +262,11 @@ DWORD WINAPI Worker(LPVOID)
 	// after DllMain returns. Poll the known sites until the patterns appear.
 	g_viableDone = !Cfg().modSoloStart;
 	bool mapsPending = MapsWanted();
-	bool zoomPending = Cfg().modHoldZoom;
-	bool controlsPending = ControlsWanted();
-	for (int tick = 0; tick < 30000 && (pending || gameLogPending || !g_viableDone || mapsPending || zoomPending || controlsPending); tick++) {
-		if (zoomPending && HoldZoomTryInstall(base)) {
-			zoomPending = false;
-		}
-		if (controlsPending && ControlsTryInstall(base)) {
-			controlsPending = false;
+	PluginsLoad();
+	bool pluginsPending = true;
+	for (int tick = 0; tick < 30000 && (pending || gameLogPending || !g_viableDone || mapsPending || pluginsPending); tick++) {
+		if (pluginsPending) {
+			pluginsPending = PluginsPoll();
 		}
 		if (mapsPending && MapsTryInstall(base)) {
 			mapsPending = false;
@@ -321,11 +310,8 @@ DWORD WINAPI Worker(LPVOID)
 			XLS_LOG_WARN("mods: solo_start (in match): viability check not found, matches will end at GO.");
 		}
 	}
-	if (zoomPending) {
-		XLS_LOG_WARN("mods: hold_zoom: zoom check not found in this build.");
-	}
-	if (controlsPending) {
-		XLS_LOG_WARN("mods: controls: pad update call not found in this build, split controls off.");
+	if (pluginsPending) {
+		PluginsGiveUp();
 	}
 	if (mapsPending) {
 		XLS_LOG_WARN("mods: maps: unknown game build, mod map slots not enabled.");

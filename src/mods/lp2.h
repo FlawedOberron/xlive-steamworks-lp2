@@ -1,6 +1,9 @@
 // Lost Planet 2 specific mods, enabled from the "mods" section of the configuration.
 #pragma once
 
+#include <string>
+#include <vector>
+
 namespace xls::mods {
 
 // Called from DllMain. Starts a worker that waits for SteamStub to decrypt the game's code and
@@ -16,13 +19,15 @@ bool MapsWanted();
 bool MapsTryInstall(unsigned char* base);
 void MapsPatchPickers(unsigned char* base);
 
-// hold_zoom (zoom.cpp): returns true once the zoom check is hooked (LP2DX11.exe and LP2DX9.exe).
-bool HoldZoomTryInstall(unsigned char* base);
+// Enabled mod folders in load order (zip mods unpacked into ModCache), computed once.
+const std::vector<std::wstring>& ModRootList();
 
-// Split controls (controls.cpp): per-context action remaps from "mods": {"controls": ...}.
-// ControlsTryInstall returns true once the pad update is hooked.
-bool ControlsWanted();
-bool ControlsTryInstall(unsigned char* base);
+// Code plugins (plugins.cpp, contract in sdk/lp2mod.h): top-level .dll files of enabled mods.
+void PluginsLoad();
+bool PluginsPoll(); // true while some plugin still wants polling
+void PluginsGiveUp();
+// Called on the game's first XLiveInitialize: its code is decrypted by then.
+void NotifyTitleStarted();
 
 // Re-applies the import hooks if something (SteamStub) restored the import table.
 void OverlayVerify();

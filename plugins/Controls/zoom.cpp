@@ -1,7 +1,4 @@
-#include "mods/lp2.h"
-
-#include "core/config.h"
-#include "core/log.h"
+#include "plugin.h"
 
 #include <windows.h>
 
@@ -23,7 +20,7 @@
 //   je +0xe; mov edx,[ebp]; mov eax,[edx+0xb8]
 // The 13 bytes from mov edx,[ebp] become: mov ecx,ebp; push esi; call ZoomCheck; nop x5.
 
-namespace xls::mods {
+namespace controls {
 
 namespace {
 
@@ -90,7 +87,7 @@ bool HoldZoomTryInstall(unsigned char* base)
 {
 	uint8_t* site = nullptr;
 	for (const Layout& L : kLayouts) {
-		if (memcmp(base + L.siteRva, kSiteBytes, sizeof(kSiteBytes)) == 0) {
+		if (InImage(base, L.siteRva, sizeof(kSiteBytes)) && memcmp(base + L.siteRva, kSiteBytes, sizeof(kSiteBytes)) == 0) {
 			site = base + L.siteRva;
 			g_layout = &L;
 			break;
@@ -109,7 +106,7 @@ bool HoldZoomTryInstall(unsigned char* base)
 	memcpy(site + kPatchAt, patch, kPatchSize);
 	VirtualProtect(site + kPatchAt, kPatchSize, old, &old);
 	FlushInstructionCache(GetCurrentProcess(), site + kPatchAt, kPatchSize);
-	XLS_LOG_INFO("mods: hold_zoom: zoom check hooked at 0x%p (%s layout).", site + kPatchAt, g_layout->exe);
+	LOG_INFO("hold to aim: zoom check hooked at 0x%p (%s layout).", site + kPatchAt, g_layout->exe);
 	return true;
 }
 

@@ -1,0 +1,19 @@
+{
+	// Zoom while the zoom button is held; release to unzoom (on foot).
+	"hold_to_aim": true,
+
+	// Split controls: in a VS, an action can take the button of another action.
+	// Foot actions: jump, grapple, next_weapon, crouch, fire, grenade, reload, action,
+	//   quick_turn, zoom, melee, gesture, teng, dodge
+	// VS actions: fire, secondary (= the grenade button), zoom, brake, reload, quick_turn,
+	//   dash, boost
+	// Example: zoom on right click and grenade on G on foot, but in a VS right click fires the
+	// second weapon and G zooms.
+	"vs": {
+		// "secondary": "zoom",
+		// "zoom": "grenade"
+	},
+
+	// Log on-foot / VS changes (for testing).
+	"log": false
+}
