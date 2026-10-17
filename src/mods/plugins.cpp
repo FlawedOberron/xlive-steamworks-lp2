@@ -36,7 +36,22 @@ std::vector<Plugin*> g_plugins;
 volatile LONG g_titleStarted = 0;
 thread_local const Plugin* t_current = nullptr;
 
-void HostLog(int level, const char* format, ...)
+// The plugin whose code contains address, for logs from game threads.
+const Plugin* PluginAt(void* address)
+{
+	HMODULE module = nullptr;
+	if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)address, &module)) {
+		return nullptr;
+	}
+	for (const Plugin* p : g_plugins) {
+		if (p->module == module) {
+			return p;
+		}
+	}
+	return nullptr;
+}
+
+__attribute__((noinline)) void HostLog(int level, const char* format, ...)
 {
 	char text[1024];
 	va_list args;
@@ -44,7 +59,8 @@ void HostLog(int level, const char* format, ...)
 	_vsnprintf(text, sizeof(text) - 1, format, args);
 	va_end(args);
 	text[sizeof(text) - 1] = 0;
-	const char* name = t_current ? t_current->name.c_str() : "plugin";
+	const Plugin* from = t_current ? t_current : PluginAt(__builtin_return_address(0));
+	const char* name = from ? from->name.c_str() : "?";
 	LogLevel l = level <= LP2MOD_LOG_ERROR ? LogLevel::Error : level == LP2MOD_LOG_WARN ? LogLevel::Warn : level == LP2MOD_LOG_INFO ? LogLevel::Info : LogLevel::Debug;
 	LogWrite(l, "plugin %s: %s", name, text);
 }
