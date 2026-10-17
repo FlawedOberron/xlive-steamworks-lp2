@@ -157,9 +157,23 @@ void ToggleHoldToAim(uint8_t* screen)
 	LOG_INFO("menu: hold to aim %s.", g_settings.holdToAim ? "on" : "off");
 }
 
+// The mouse: +0x154 is the id of the element under the pointer (rows 0x1fe..0x205 = the 8 visible
+// rows, 0 = Default, 1 = Back, 0x213/0x214 = scroll arrows), +0x15c bit 0 a click. Hovering a row
+// moves the cursor there every frame, so a header under the pointer would hold the cursor. The
+// pointer over a header counts as over nothing.
+void IgnoreHeaderUnderMouse(uint8_t* screen)
+{
+	uint32_t hover = *(uint32_t*)(screen + 0x154);
+	if (hover - 0x1fe < 8 && IsHeader(Cursor(screen) - Visible(screen) + (int)(hover - 0x1fe))) {
+		*(uint32_t*)(screen + 0x154) = 0xffff;
+		*(uint32_t*)(screen + 0x15c) &= ~1u;
+	}
+}
+
 // Runs a state handler; if the cursor moved onto a header, runs it again (same input, same move).
 void RunSkippingHeaders(uint8_t* screen)
 {
+	IgnoreHeaderUnderMouse(screen);
 	for (int pass = 0; pass < 4; pass++) {
 		int before = Cursor(screen);
 		if (State(screen) == 6) {
