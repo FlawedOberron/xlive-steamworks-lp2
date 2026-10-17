@@ -23,9 +23,13 @@ DWORD WINAPI Worker(LPVOID)
 	bool mapsPending = MapsWanted();
 	PluginsLoad();
 	bool pluginsPending = true;
+	bool pathPending = !PartPackages().empty();
 	bool started = false;
-	for (int tick = 0; tick < 30000 && (mapsPending || pluginsPending || !started); tick++) {
+	for (int tick = 0; tick < 30000 && (mapsPending || pluginsPending || pathPending || !started); tick++) {
 		started = TitleStarted();
+		if (pathPending && PartsTryInstallPathHook(base)) {
+			pathPending = false;
+		}
 		if (pluginsPending) {
 			pluginsPending = PluginsPoll();
 		}

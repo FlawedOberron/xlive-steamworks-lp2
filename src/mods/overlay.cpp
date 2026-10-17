@@ -1,4 +1,5 @@
 #include "mods/lp2.h"
+#include "mods/parts.h"
 #include "mods/package.h"
 #include "mods/packages.h"
 
@@ -155,6 +156,7 @@ void BuildIndex()
 	}
 	size_t before = g_index.size();
 	PackagesIndex(&g_index);
+	PartsIndex(&g_index);
 	if (g_index.size() != before) {
 		XLS_LOG_INFO("mods: map packages: %u files.", (unsigned)(g_index.size() - before));
 	}

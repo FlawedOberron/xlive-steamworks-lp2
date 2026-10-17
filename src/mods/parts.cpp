@@ -8,6 +8,8 @@
 
 #include <windows.h>
 
+#include <wctype.h>
+
 #include <stdio.h>
 #include <string.h>
 
@@ -251,7 +253,7 @@ const char* const kPrefixes[kPartSlotCount] = {"hd", "bd", "bk", "lg"};
 const int kSnameCategory[kPartSlotCount] = {1, 2, 3, 4};  // head, body, back, legs
 const int kSnameFloats[kPartSlotCount] = {3, 3, 12, 0};
 const int kLastItem = 69;
-const char* const kGenVersion = "lp2-partpkg 2";
+const char* const kGenVersion = "lp2-partpkg 3";
 
 std::once_flag g_pkgOnce;
 std::vector<PartPackage> g_packages;
@@ -346,6 +348,72 @@ std::string FileStamp(const std::wstring& path)
 	return buf;
 }
 
+
+// The carrier route: the part's model and every texture it names, as loose files under a path of
+// our own (model\hm\lpc\<hash>\<pfx><hash>...), served by the overlay; MT loads a resource from a
+// loose nativePC file when no archive has it. Texture names in the model sit in fixed 64-byte
+// records, so they can be rewritten to any name that fits.
+std::wstring LooseRoot()
+{
+	return Cfg().modCacheDir + L"parts\\loose\\";
+}
+
+bool BuildLoose(const std::string& base, const Bytes& modelIn, const std::vector<ArcEntry>& textures, const std::string& tmpl,
+                const std::string& colourName)
+{
+	Bytes model = modelIn;
+	if (model.size() < 0x80) {
+		return false;
+	}
+	uint32_t ntex = *(uint32_t*)(model.data() + 0x1C);
+	uint32_t oTex = *(uint32_t*)(model.data() + 0x2C);
+	if (oTex + ntex * 64 > model.size()) {
+		return false;
+	}
+	for (uint32_t i = 0; i < ntex; i++) {
+		char* rec = (char*)model.data() + oTex + i * 64;
+		std::string name(rec, strnlen(rec, 64));
+		const ArcEntry* tex = nullptr;
+		for (const ArcEntry& e : textures) {
+			if (_stricmp(e.name.c_str(), name.c_str()) == 0) {
+				tex = &e;
+			}
+		}
+		bool isColour = name.find("_BM-00") != std::string::npos && name.find(tmpl) != std::string::npos;
+		if (isColour) {
+			for (const ArcEntry& e : textures) {
+				if (_stricmp(e.name.c_str(), colourName.c_str()) == 0) {
+					tex = &e;
+				}
+			}
+		}
+		if (!tex) {
+			continue; // not one of the part's own textures: keep the game's path
+		}
+		size_t at = name.find(tmpl);
+		std::string tail = at == std::string::npos ? "_" + std::to_string(i) : name.substr(at + tmpl.size());
+		if (isColour) {
+			tail = "_BM-00_A";
+		}
+		std::string loose = base + tail;
+		if (loose.size() >= 64) {
+			return false;
+		}
+		memset(rec, 0, 64);
+		memcpy(rec, loose.data(), loose.size());
+		if (!WriteWholeFile(LooseRoot() + L"nativePC\\" + Utf8ToWide(loose.c_str()) + L".rTexture", tex->data)) {
+			return false;
+		}
+	}
+	// the colour map is also asked for on its own (kind 1): always provide it
+	for (const ArcEntry& e : textures) {
+		if (_stricmp(e.name.c_str(), colourName.c_str()) == 0) {
+			WriteWholeFile(LooseRoot() + L"nativePC\\" + Utf8ToWide((base + "_BM-00_A").c_str()) + L".rTexture", e.data);
+		}
+	}
+	return WriteWholeFile(LooseRoot() + L"nativePC\\" + Utf8ToWide(base.c_str()) + L".rModel", model);
+}
+
 bool BuildPackage(const PartSet& set, int slot, int item, PartPackage* out)
 {
 	std::string tmpl = set.templates[slot];
@@ -361,6 +429,10 @@ bool BuildPackage(const PartSet& set, int slot, int item, PartPackage* out)
 		c = (char)tolower((unsigned char)c);
 	}
 	std::string pfx = tmpl.substr(0, 2), sset = tmpl.substr(2, 2), svar = tmpl.substr(4, 2);
+	char hash[16];
+	std::string hkey = set.id + ":" + kSlotNames[slot];
+	snprintf(hash, sizeof(hash), "%08x", Fnv1a32(hkey.data(), hkey.size()));
+	std::string looseBase = "model\\hm\\lpc\\" + std::string(hash) + "\\" + pfx + hash;
 	std::wstring srcDir = ExeDirectory() + L"nativePC\\arcXmlTmpPC\\CustomParts\\";
 	std::wstring root = Cfg().modCacheDir + L"parts\\pkg\\" + Utf8ToWide(set.id.c_str()) + L"_" + Utf8ToWide(kSlotNames[slot]) + L"\\";
 	std::wstring dstDir = root + L"Content\\nativePC\\arcXmlTmpPC\\CustomParts\\";
@@ -428,6 +500,39 @@ bool BuildPackage(const PartSet& set, int slot, int item, PartPackage* out)
 				XLS_LOG_WARN("mods: parts %s: %s: no colour %c archive for %s.", set.id.c_str(), kSlotNames[slot], kColours[set.colour], tmpl.c_str());
 			}
 		}
+		{
+			// loose copy: the template's textures (main + chosen colour archive) with ours in place
+			std::vector<ArcEntry> texs, colourEntries;
+			Bytes file;
+			if (ReadWholeFile(srcDir + Utf8ToWide(tmpl.c_str()) + L".arc", &file)) {
+				ArcRead(file, &texs);
+			}
+			if (ReadWholeFile(srcDir + Utf8ToWide(tmpl.c_str()) + Utf8ToWide(Hex2(set.colour).c_str()) + L".arc", &file)) {
+				ArcRead(file, &colourEntries);
+				texs.insert(texs.end(), colourEntries.begin(), colourEntries.end());
+			}
+			std::vector<ArcEntry> only;
+			for (ArcEntry& e : texs) {
+				if (e.classHash != ClassHash("rTexture")) {
+					continue;
+				}
+				for (const auto& t : mainTex) {
+					if (EndsWith(e.name, t.first)) {
+						e.data = *t.second;
+					}
+				}
+				for (const auto& t : colourTex) {
+					if (EndsWith(e.name, t.first)) {
+						e.data = *t.second;
+					}
+				}
+				only.push_back(e);
+			}
+			std::string colourName = "model\\hm\\hm" + sset + "\\" + tmpl + "\\" + tmpl + "_BM-00_" + kColours[set.colour];
+			if (!BuildLoose(looseBase, model, only, tmpl, colourName)) {
+				XLS_LOG_WARN("mods: parts %s: %s: loose copy failed.", set.id.c_str(), kSlotNames[slot]);
+			}
+		}
 		std::string sname = SnameBin(slot, item, set.name);
 		WriteWholeFile(root + L"Content\\nativePC\\sname.bin", Bytes(sname.begin(), sname.end()));
 		WriteWholeFile(root + L"stamp.txt", Bytes(stamp.begin(), stamp.end()));
@@ -437,6 +542,7 @@ bool BuildPackage(const PartSet& set, int slot, int item, PartPackage* out)
 	out->slot = slot;
 	out->item = item;
 	out->root = root;
+	out->loosePath = looseBase;
 	out->displayName = Utf8ToWide((set.name + " (" + kSlotNames[slot] + ")").c_str());
 	std::string key = std::string("lpc:") + set.id + ":" + kSlotNames[slot];
 	uint64_t h = Fnv1a64(key.data(), key.size());
@@ -547,6 +653,112 @@ void PartsStartUnlocker()
 	if (thread) {
 		CloseHandle(thread);
 	}
+}
+
+namespace {
+
+void IndexTree(const std::wstring& root, const std::wstring& rel, std::unordered_map<std::wstring, std::wstring>* index)
+{
+	WIN32_FIND_DATAW fd;
+	HANDLE h = FindFirstFileW((root + rel + L"*").c_str(), &fd);
+	if (h == INVALID_HANDLE_VALUE) {
+		return;
+	}
+	do {
+		std::wstring n = fd.cFileName;
+		if (n == L"." || n == L"..") {
+			continue;
+		}
+		if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+			IndexTree(root, rel + n + L"\\", index);
+		}
+		else {
+			std::wstring key = rel + n;
+			for (wchar_t& c : key) {
+				c = towlower(c);
+			}
+			(*index)[key] = root + rel + n;
+		}
+	} while (FindNextFileW(h, &fd));
+	FindClose(h);
+}
+
+// --- Path hook: after the game builds a part's resource path (thiscall(parts, out, kind, cat)),
+// a category wearing one of our generated DLC slots gets its model (kind 0) and colour texture
+// (kind 1) from the loose copy. parts+0x44+cat*4: set byte (DLC = 0x0e / 0x2e), +0x46: variant
+// (the DLC slot). Category order hd, bd, bk, lg = PartSlot.
+using PathFn = void(__attribute__((thiscall)) *)(uint8_t*, char*, int, uint32_t);
+PathFn g_pathOriginal = nullptr;
+
+void __attribute__((thiscall)) PartPath(uint8_t* parts, char* out, int kind, uint32_t cat)
+{
+	g_pathOriginal(parts, out, kind, cat);
+	if (cat >= 4 || (kind != 0 && kind != 1)) {
+		return;
+	}
+	uint8_t set = parts[0x44 + cat * 4];
+	uint8_t variant = parts[0x46 + cat * 4];
+	if ((set & 0xdf) != 0x0e) {
+		return;
+	}
+	for (const PartPackage& pkg : g_packages) {
+		if (pkg.slot == (int)cat && pkg.item == variant && !pkg.loosePath.empty()) {
+			std::string path = pkg.loosePath + (kind == 1 ? "_BM-00_A" : "");
+			if (path.size() < 64) {
+				memcpy(out, path.c_str(), path.size() + 1);
+			}
+			return;
+		}
+	}
+}
+
+const uint8_t kPathPrologue[] = {0x81, 0xec, 0xd0, 0x00, 0x00, 0x00, 0x53, 0x55, 0x8b, 0xac, 0x24, 0xe4, 0x00, 0x00, 0x00, 0x56, 0x8b, 0xf1, 0xb8};
+const uint32_t kPathRvas[] = {0xb664b0 /* DX11 */, 0xb56650 /* DX9 */};
+
+}
+
+void PartsIndex(std::unordered_map<std::wstring, std::wstring>* index)
+{
+	if (PartPackages().empty()) {
+		return;
+	}
+	IndexTree(LooseRoot(), L"", index);
+}
+
+bool PartsTryInstallPathHook(unsigned char* base)
+{
+	uint8_t* fn = nullptr;
+	for (uint32_t rva : kPathRvas) {
+		if (memcmp(base + rva, kPathPrologue, sizeof(kPathPrologue)) == 0) {
+			fn = base + rva;
+		}
+	}
+	if (!fn) {
+		return false;
+	}
+	const size_t len = 8; // sub esp,0xd0; push ebx; push ebp
+	auto* tramp = (uint8_t*)VirtualAlloc(nullptr, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+	if (!tramp) {
+		return false;
+	}
+	memcpy(tramp, fn, len);
+	tramp[len] = 0xe9;
+	int32_t back = (int32_t)((fn + len) - (tramp + len + 5));
+	memcpy(tramp + len + 1, &back, 4);
+	FlushInstructionCache(GetCurrentProcess(), tramp, 32);
+	g_pathOriginal = (PathFn)tramp;
+	uint8_t patch[8] = {0xe9, 0, 0, 0, 0, 0x90, 0x90, 0x90};
+	int32_t rel = (int32_t)((uint8_t*)&PartPath - (fn + 5));
+	memcpy(patch + 1, &rel, 4);
+	DWORD old = 0;
+	if (!VirtualProtect(fn, len, PAGE_EXECUTE_READWRITE, &old)) {
+		return false;
+	}
+	memcpy(fn, patch, len);
+	VirtualProtect(fn, len, old, &old);
+	FlushInstructionCache(GetCurrentProcess(), fn, len);
+	XLS_LOG_INFO("mods: parts: path builder hooked at 0x%p (custom parts load from loose files).", fn);
+	return true;
 }
 
 }
