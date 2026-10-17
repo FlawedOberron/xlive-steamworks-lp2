@@ -226,6 +226,18 @@ bool ConfigLoad()
 			config.modSoloStart = root["mods"]["solo_start"].GetBool(false);
 			config.modGameLog = root["mods"]["game_log"].GetBool(false);
 			config.modHoldZoom = root["mods"]["hold_zoom"].GetBool(false);
+			for (const auto& context : root["mods"]["controls"].Items()) {
+				if (context.first == "log") {
+					config.modControlsLog = context.second.GetBool(false);
+					continue;
+				}
+				for (const auto& remap : context.second.Items()) {
+					std::string source = remap.second.GetString(std::string());
+					if (!source.empty()) {
+						config.modControls.push_back({context.first, remap.first, source});
+					}
+				}
+			}
 			config.modDir = PathSetting(root["mods"]["dir"], config.modDir);
 			config.mapsDir = PathSetting(root["mods"]["maps_dir"], config.mapsDir);
 			config.partsDir = PathSetting(root["mods"]["parts_dir"], config.partsDir);

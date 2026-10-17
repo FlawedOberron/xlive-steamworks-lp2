@@ -16,8 +16,13 @@ bool MapsWanted();
 bool MapsTryInstall(unsigned char* base);
 void MapsPatchPickers(unsigned char* base);
 
-// hold_zoom (zoom.cpp): returns true once the zoom check is hooked (LP2DX11.exe only).
+// hold_zoom (zoom.cpp): returns true once the zoom check is hooked (LP2DX11.exe and LP2DX9.exe).
 bool HoldZoomTryInstall(unsigned char* base);
+
+// Split controls (controls.cpp): per-context action remaps from "mods": {"controls": ...}.
+// ControlsTryInstall returns true once the pad update is hooked.
+bool ControlsWanted();
+bool ControlsTryInstall(unsigned char* base);
 
 // Re-applies the import hooks if something (SteamStub) restored the import table.
 void OverlayVerify();

@@ -270,13 +270,14 @@ DWORD WINAPI Worker(LPVOID)
 	// after DllMain returns. Poll the known sites until the patterns appear.
 	g_viableDone = !Cfg().modSoloStart;
 	bool mapsPending = MapsWanted();
-	bool zoomPending = Cfg().modHoldZoom && dx11;
-	if (Cfg().modHoldZoom && !dx11) {
-		XLS_LOG_WARN("mods: hold_zoom is only mapped for LP2DX11.exe.");
-	}
-	for (int tick = 0; tick < 30000 && (pending || gameLogPending || !g_viableDone || mapsPending || zoomPending); tick++) {
+	bool zoomPending = Cfg().modHoldZoom;
+	bool controlsPending = ControlsWanted();
+	for (int tick = 0; tick < 30000 && (pending || gameLogPending || !g_viableDone || mapsPending || zoomPending || controlsPending); tick++) {
 		if (zoomPending && HoldZoomTryInstall(base)) {
 			zoomPending = false;
+		}
+		if (controlsPending && ControlsTryInstall(base)) {
+			controlsPending = false;
 		}
 		if (mapsPending && MapsTryInstall(base)) {
 			mapsPending = false;
@@ -322,6 +323,9 @@ DWORD WINAPI Worker(LPVOID)
 	}
 	if (zoomPending) {
 		XLS_LOG_WARN("mods: hold_zoom: zoom check not found in this build.");
+	}
+	if (controlsPending) {
+		XLS_LOG_WARN("mods: controls: pad update call not found in this build, split controls off.");
 	}
 	if (mapsPending) {
 		XLS_LOG_WARN("mods: maps: unknown game build, mod map slots not enabled.");

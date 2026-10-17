@@ -61,7 +61,11 @@ Comments are allowed. Mod-related keys:
 ```jsonc
 {
 	"mods": {
-		"hold_zoom": true,        // zoom while the zoom button is held (DX11), instead of toggling
+		"hold_zoom": true,        // zoom while the zoom button is held, instead of toggling
+		"controls": {             // split controls: per context, action <- the button of another action
+			"vs": { "secondary": "zoom", "zoom": "grenade" }
+			// "log": true         // log on-foot / VS context changes (testing)
+		},
 		"skip_splash": false,     // skip the boot logos
 		"disabled": ["SomeMod"],  // Mods\ entries to skip (folder or zip name without .zip)
 		// "enabled": [...],      // or: only these Mods\ entries, in this order (later ones win)
@@ -79,8 +83,9 @@ These double as demo mods.
 
 | Option | What it does | Status |
 |---|---|---|
-| `hold_zoom` | Zoom only while the zoom button is held; release to unzoom. DX11 only. | Works |
-| Split on-foot / VS controls | Separate key bindings on foot, while scoped and in a VS (e.g. zoom in/out on keys when scoped) | Planned |
+| `hold_zoom` | Zoom only while the zoom button is held; release to unzoom. On foot; DX11 works, DX9 mapped but untested. | Works (DX11) |
+| `controls` | Split on-foot / VS controls: in a VS, an action takes the button of another action (works for keyboard, mouse and pad). Actions — foot: jump, grapple, next_weapon, crouch, fire, grenade, reload, action, quick_turn, zoom, melee, gesture, teng, dodge; vs: fire, secondary (= grenade button), zoom, brake, reload, quick_turn, dash, boost. | Built, untested |
+| Key config menu rows | "Hold to aim" under Zoom In, plus separate "VS Zoom" / "VS Secondary" key rows in the game's keyboard config | Planned |
 
 ## Mods\ (file replacement)
 
