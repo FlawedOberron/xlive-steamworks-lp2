@@ -94,6 +94,8 @@ const uint32_t kMsgPc = 0x1373294;  // "MsgPC" message file name
 const uint32_t kMsgMgr = 0x18e0860; // message / input manager pointer
 const uint32_t kSetList = 0xf04d90, kSetListData = 0xf04e10, kSetArrowState = 0xf04f40;
 const uint32_t kMessage = 0x77b280, kKeyName = 0xf04b60;
+const uint32_t kInvoke = 0xf4a390;   // thiscall(screen, result*, "path", args, count): call ActionScript
+const uint32_t kValueFree = 0x77a680; // thiscall(value*): release an ActionScript value
 const uint32_t kKeyNames = 0x17fd228; // 100 x {char* "<KEY_..>", i32 virtual key, i32 mouse code}
 
 const uint8_t kDrawPrologue[] = {0x83, 0xec, 0x20, 0x53, 0x55, 0x56, 0x8b, 0xf1};
@@ -124,6 +126,41 @@ bool IsHeader(int row)
 const Row* RowAt(int row)
 {
 	return row >= 0 && row < (int)kRowCount ? &g_table[row] : nullptr;
+}
+
+// An ActionScript argument as the game passes them: {interface, type, value}; type 3 = number
+// (a float in this build), 4 = string, 2 = bool.
+struct AsValue {
+	void* object;
+	uint32_t type;
+	union {
+		float number;
+		const char* text;
+		uint32_t flag;
+	};
+};
+using InvokeFn = bool(__attribute__((thiscall)) *)(uint8_t*, void*, const char*, AsValue*, int);
+using ValueFreeFn = void(__attribute__((thiscall)) *)(AsValue*);
+
+void CallRow(uint8_t* screen, const char* path, int row)
+{
+	AsValue arg = {};
+	arg.type = 3;
+	arg.number = (float)row;
+	((InvokeFn)(uintptr_t)kInvoke)(screen, nullptr, path, &arg, 1);
+	((ValueFreeFn)(uintptr_t)kValueFree)(&arg);
+}
+
+// Header rows show the row clip's "ERROR" frame (selectError); the game resets rows when the
+// cursor moves, so this runs again after every list update.
+void StyleHeaders(uint8_t* screen)
+{
+	int first = Cursor(screen) - Visible(screen);
+	for (int r = 0; r < 8; r++) {
+		if (IsHeader(first + r)) {
+			CallRow(screen, "_root.mc_main.selectError", r);
+		}
+	}
 }
 
 int g_captureRow = -1;   // row whose key is being captured
@@ -222,6 +259,7 @@ void __attribute__((thiscall)) Draw(uint8_t* screen)
 		bool conflict = *(int*)(screen + 0x294 + row->slot * 4) == 1;
 		setArrow(screen, r, conflict, conflict);
 	}
+	StyleHeaders(screen);
 }
 
 void ToggleHoldToAim(uint8_t* screen)
@@ -327,11 +365,13 @@ void __attribute__((thiscall)) ListState(uint8_t* screen)
 		return;
 	}
 	RunSkippingHeaders(screen);
+	StyleHeaders(screen);
 }
 
 void __attribute__((thiscall)) NumberState(uint8_t* screen)
 {
 	RunSkippingHeaders(screen);
+	StyleHeaders(screen);
 }
 
 void __attribute__((thiscall)) StartCapture(uint8_t* screen, int state)
