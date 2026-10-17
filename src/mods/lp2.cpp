@@ -2,6 +2,7 @@
 
 #include "core/config.h"
 #include "core/log.h"
+#include "mods/parts.h"
 
 #include <windows.h>
 
@@ -46,6 +47,9 @@ DWORD WINAPI Worker(LPVOID)
 	else {
 		// The game has called XLiveInitialize, so all of its code is decrypted.
 		MapsPatchPickers(base);
+	}
+	if (started) {
+		PartsStartUnlocker();
 	}
 	return 0;
 }

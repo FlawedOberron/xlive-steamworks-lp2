@@ -44,6 +44,9 @@ struct PartPackage {
 // scan (api/xcontent.cpp).
 const std::vector<PartPackage>& PartPackages();
 
+// Keeps the generated parts unlocked in the player's profile (a fresh save has DLC ids locked).
+void PartsStartUnlocker();
+
 // Scans Parts\ (once; thread-safe): <name>.zip or folders, each holding lpc.json and the models
 // the Blender exporter wrote (body.rModel, head.rModel, back.rModel, legs.rModel).
 void PartsLoad();

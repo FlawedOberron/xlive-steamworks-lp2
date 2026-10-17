@@ -433,4 +433,60 @@ const std::vector<PartPackage>& PartPackages()
 	return g_packages;
 }
 
+namespace {
+
+// Unlocks: the game keeps per-category part unlock masks in its game object (DX11 *0x18520c0,
+// DX9 *0x1842020): 32 bytes each at +0x50710 head, +0x50730 body, +0x50770 back, +0x50750 legs,
+// bit 0x80000000 >> (id & 31) of dword id >> 5 (FUN_007de7c0 sets one). A fresh save has the DLC
+// ids locked, so a thread keeps the bits of the generated parts (id 180 + item) set; profile
+// loads replace the masks, the next pass sets them again (and the save then keeps them).
+const uint32_t kUnlockMask[kPartSlotCount] = {0x50710, 0x50730, 0x50770, 0x50750};
+
+DWORD WINAPI UnlockThread(LPVOID param)
+{
+	uint32_t gamePtr = (uint32_t)(uintptr_t)param;
+	bool logged = false;
+	for (;;) {
+		Sleep(2000);
+		uint8_t* game = *(uint8_t**)(uintptr_t)gamePtr;
+		if (!game) {
+			continue;
+		}
+		MEMORY_BASIC_INFORMATION mbi{};
+		if (!VirtualQuery(game + 0x50770, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT) {
+			continue;
+		}
+		int set = 0;
+		for (const PartPackage& pkg : g_packages) {
+			int id = 180 + pkg.item;
+			volatile LONG* word = (volatile LONG*)(game + kUnlockMask[pkg.slot] + (id >> 5) * 4);
+			LONG bit = (LONG)(0x80000000u >> (id & 31));
+			if (!(*word & bit)) {
+				InterlockedOr(word, bit);
+				set++;
+			}
+		}
+		if (set && !logged) {
+			XLS_LOG_INFO("mods: parts: unlocked %d custom part(s) in the profile.", set);
+			logged = true;
+		}
+	}
+}
+
+}
+
+void PartsStartUnlocker()
+{
+	char exe[MAX_PATH] = {};
+	GetModuleFileNameA(nullptr, exe, MAX_PATH);
+	uint32_t gamePtr = strstr(exe, "LP2DX11") ? 0x18520c0 : strstr(exe, "LP2DX9") ? 0x1842020 : 0;
+	if (!gamePtr || PartPackages().empty()) {
+		return;
+	}
+	HANDLE thread = CreateThread(nullptr, 0, UnlockThread, (LPVOID)(uintptr_t)gamePtr, 0, nullptr);
+	if (thread) {
+		CloseHandle(thread);
+	}
+}
+
 }

@@ -63,7 +63,8 @@ Comments are allowed. Mod-related keys:
 	"mods": {
 		"disabled": ["SomeMod"],  // Mods\ entries to skip (folder or zip name without .zip)
 		// "enabled": [...],      // or: only these Mods\ entries, in this order (later ones win)
-		"trace_opens": 0          // debugging: log the first N files the game opens
+		"trace_opens": 0,         // debugging: log the first N files the game opens
+		"parts_first_slot": 20    // first DLC slot custom parts use (20-69); raise it if a real DLC package uses low slots
 	},
 	"log": { "level": "info" }   // debug / trace for troubleshooting
 }
@@ -124,7 +125,7 @@ Drop the exporter's `LPC_<id>` folder in as is, or zip it:
 ```
 Parts\
 └─ LPC_scav01\             (or LPC_scav01.zip)
-   ├─ lpc.json              {"id", "name", "faction", "parts": {"body": {"file", "template"}, ...}}
+   ├─ lpc.json              {"id", "name", "faction", "colour", "parts": {"body": {"file", "template"}, ...}}
    ├─ body.rModel
    ├─ head.rModel
    ├─ back.rModel
@@ -134,9 +135,18 @@ Parts\
 Factions: `RND` Rounders, `FJ` Fight Junkies, `SPE` Snow Pirate Elites, `NEV` NEVEC Black Ops,
 `FF` Femmes Fatales, `ALL` everyone.
 
-**Status:** the loader registers and checks part sets (see the log) but doesn't show them in
-game yet. Planned: unlimited custom parts through one extra entry per part list, leaving
-Capcom's DLC slots alone. Making parts: see `README-parts.md` in the creator tools.
+`colour` (optional, `"A"`–`"D"`, default `"A"`): which of the template part's four colour maps the
+set wears (the A–D swatch of stock parts; skin stays the same, the cloth changes).
+
+**How they appear:** at start, each part of each set is built into a small DLC content package in
+`ModCache\parts\pkg\` (the template part's archives with the custom model in place; rebuilt only
+when something changes) and listed in each category's part list under the set's name, after the
+stock parts. Sets take DLC slots from 20 upward in `id` order (50 sets at most for now), and the
+loader keeps them unlocked in the profile, so a fresh save sees them too.
+
+Limits for now: one colour per set (DLC slots always load colour A; the loader copies your choice
+there), no custom textures yet (the template's are used), and everyone in a match needs the same
+`Parts\` content (see Multiplayer rules). Making parts: `README-parts.md` in the creator tools.
 
 ## Troubleshooting
 
