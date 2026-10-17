@@ -51,6 +51,8 @@ const RemapRow kRemapRows[] = {
 	{"fly", "descend", "Descend"},
 	{"scoped", "zoom_in", "Zoom in"},
 	{"scoped", "zoom_out", "Zoom out"},
+	{"vs", "transform", "VS Transform"},
+	{"fly", "transform", "Transform"},
 };
 
 struct Row {
@@ -76,9 +78,11 @@ const Row kRows[] = {
 	{0, kSlotRemap + 5}, {0, kSlotRemap + 6},                 // zoom in / out steps
 	{0, kSlotHeader + 3},
 	{0, kSlotRemap + 0}, {0, kSlotRemap + 1}, {0, kSlotRemap + 2}, // VS secondary, zoom, get out
+	{0, kSlotRemap + 7},                                      // VS transform
 	{42, 0x26}, {41, 0x27},                                   // reload VS right / left
 	{0, kSlotHeader + 4},
 	{0, kSlotRemap + 3}, {0, kSlotRemap + 4},                 // ascend, descend
+	{0, kSlotRemap + 8},                                      // transform (flying)
 };
 const size_t kRowCount = sizeof(kRows) / sizeof(kRows[0]);
 Row g_table[kRowCount + 8]; // padding: the original table was followed by more rows
@@ -203,7 +207,20 @@ std::string RemapText(uint8_t* screen, const RemapRow& r)
 	if (vk == 0) {
 		return BindingText(screen, sourceSlot);
 	}
-	return BindingText(screen, ControlsActionSlot(r.context, r.dest)); // the game's own key
+	if (strcmp(r.context, "fly") == 0 || strcmp(r.context, "scoped") == 0) {
+		// No rule of its own: inherited from vs / foot.
+		RemapRow parent = {strcmp(r.context, "fly") == 0 ? "vs" : "foot", r.dest, r.label};
+		sourceSlot = -1;
+		vk = ControlsRuleFor(parent.context, r.dest, &sourceSlot);
+		if (vk > 0) {
+			return KeyText(vk);
+		}
+		if (vk == 0) {
+			return BindingText(screen, sourceSlot);
+		}
+	}
+	int slot = ControlsActionSlot(r.context, r.dest);
+	return slot >= 0 ? BindingText(screen, slot) : std::string("-"); // the game's own key, or none
 }
 
 void __attribute__((thiscall)) Draw(uint8_t* screen)

@@ -78,7 +78,7 @@ const Action kFootActions[] = {
 	{"zoom", 0x100000, 0x100000, 0x100000, 29},
 	{"melee", W2(0x20), W2(0x20), W2(0x20), 11},
 	{"gesture", W2(0x100), W2(0x100), W2(0x100), 20},
-	{"teng", W2(0x4000), W2(0x4000), W2(0x4000), 18},
+	{"teng", W2(0x40000), W2(0x40000), W2(0x40000), 18}, // 0x40000 (2026-10-17 bit log; the pad round had 0x4000)
 	{"dodge", W2(0x8000000), W2(0x8000000), W2(0x8000000), 36},
 };
 const Action kVsActions[] = {
@@ -88,6 +88,9 @@ const Action kVsActions[] = {
 	{"zoom", 0x100000, 0x100000, 0x100000, 29},
 	// In a VS the grenade button gives 0x1 (get out), not the grenade bits (2026-10-17 bit log).
 	{"get_out", 0x1, 0x1, 0x1, 8},
+	// Transforming VSs (e.g. type 0x9a) transform on the jump bit, which is boost in others. Nothing
+	// is cleared: a transform key adds the bit, Space keeps doing what it does.
+	{"transform", 0x2, 0x2, 0, -1},
 	{"brake", 0x20, 0x20, 0x20, 9},
 	{"crouch", 0x20, 0x20, 0x20, 9},
 	{"reload", 0x400, 0x400 | 0x800 | W2(0x200000), 0x400 | 0x800 | W2(0x200000), 28},
