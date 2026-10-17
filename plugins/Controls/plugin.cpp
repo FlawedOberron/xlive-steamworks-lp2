@@ -19,6 +19,7 @@ namespace {
 bool g_zoomPending = false;
 bool g_controlsPending = false;
 bool g_promptsPending = false;
+bool g_menuPending = false;
 
 void LoadSettings()
 {
@@ -61,6 +62,49 @@ void LoadSettings()
 
 }
 
+
+void SaveHoldToAim()
+{
+	std::wstring path = std::wstring(g_host->mod_dir) + L"controls.json";
+	std::string text;
+	HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+	if (file != INVALID_HANDLE_VALUE) {
+		char buffer[4096];
+		DWORD read = 0;
+		while (ReadFile(file, buffer, sizeof(buffer), &read, nullptr) && read > 0) {
+			text.append(buffer, read);
+		}
+		CloseHandle(file);
+	}
+	const char* value = g_settings.holdToAim ? "true" : "false";
+	size_t key = text.find("\"hold_to_aim\"");
+	if (key != std::string::npos) {
+		size_t colon = text.find(':', key);
+		size_t start = text.find_first_not_of(" \t", colon + 1);
+		size_t end = text.find_first_of(",\r\n}", start);
+		if (colon == std::string::npos || start == std::string::npos || end == std::string::npos) {
+			return;
+		}
+		text.replace(start, end - start, value);
+	}
+	else {
+		size_t brace = text.find('{');
+		if (brace == std::string::npos) {
+			text = "{\n}\n";
+			brace = 0;
+		}
+		text.insert(brace + 1, std::string("\n\t\"hold_to_aim\": ") + value + (text.find(':', brace) != std::string::npos ? "," : ""));
+	}
+	file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+	if (file == INVALID_HANDLE_VALUE) {
+		LOG_WARN("menu: could not save controls.json (%lu).", GetLastError());
+		return;
+	}
+	DWORD written = 0;
+	WriteFile(file, text.data(), (DWORD)text.size(), &written, nullptr);
+	CloseHandle(file);
+}
+
 }
 
 using namespace controls;
@@ -72,7 +116,8 @@ extern "C" __declspec(dllexport) int lp2mod_load(const LP2ModHost* host)
 	}
 	g_host = host;
 	LoadSettings();
-	g_zoomPending = g_settings.holdToAim;
+	g_zoomPending = true; // installed even when off, so the menu can switch it on
+	g_menuPending = true;
 	bool rules = ControlsLoadRules();
 	g_controlsPending = rules || g_settings.log;
 	g_promptsPending = rules;
@@ -88,10 +133,13 @@ extern "C" __declspec(dllexport) int lp2mod_poll(void)
 	if (g_controlsPending && ControlsTryInstall(g_host->game_base)) {
 		g_controlsPending = false;
 	}
+	if (g_menuPending && MenuTryInstall(g_host->game_base)) {
+		g_menuPending = false;
+	}
 	if (g_promptsPending && PromptsTryInstall(g_host->game_base)) {
 		g_promptsPending = false;
 	}
-	if ((g_zoomPending || g_controlsPending || g_promptsPending) && g_host->title_started()) {
+	if ((g_zoomPending || g_controlsPending || g_promptsPending || g_menuPending) && g_host->title_started()) {
 		if (g_zoomPending) {
 			LOG_WARN("hold to aim: zoom check not found in this game build.");
 		}
@@ -101,7 +149,10 @@ extern "C" __declspec(dllexport) int lp2mod_poll(void)
 		if (g_promptsPending) {
 			LOG_WARN("prompt refresh not found in this game build, prompts keep the game's keys.");
 		}
+		if (g_menuPending) {
+			LOG_WARN("menu: key config code is not as expected, Controls page left as it is.");
+		}
 		return 1;
 	}
-	return !g_zoomPending && !g_controlsPending && !g_promptsPending;
+	return !g_zoomPending && !g_controlsPending && !g_promptsPending && !g_menuPending;
 }

@@ -41,6 +41,10 @@ bool HoldZoomTryInstall(unsigned char* base);
 // Split controls (controls.cpp): true if any rule applies; true once the pad update is hooked.
 bool ControlsLoadRules();
 bool ControlsTryInstall(unsigned char* base);
+// Key config menu (menu.cpp): true once done (or not mapped for this exe).
+bool MenuTryInstall(unsigned char* base);
+// Writes g_settings.holdToAim into controls.json (plugin.cpp).
+void SaveHoldToAim();
 // Prompts follow the rules (controls.cpp): true once the prompt refresh is hooked.
 bool PromptsTryInstall(unsigned char* base);
 

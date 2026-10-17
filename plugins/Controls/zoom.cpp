@@ -55,6 +55,9 @@ bool __attribute__((thiscall)) ZoomCheck(uint8_t* self, uint8_t* character)
 	if (check(self)) {
 		return true;
 	}
+	if (!g_settings.holdToAim) {
+		return false; // toggled off in the menu: the game's own toggle zoom
+	}
 	uint8_t index = self[0x84];
 	if (index >= 16 || !character) {
 		return false;
