@@ -225,9 +225,7 @@ bool ConfigLoad()
 			config.voiceEnabled = root["voice"]["enabled"].GetBool(true);
 			config.nativeDialogs = root["ui"]["native_dialogs"].GetBool(true);
 			config.homeKeyOpensOverlay = root["ui"]["home_key_opens_overlay"].GetBool(true);
-			config.modSoloStart = root["mods"]["solo_start"].GetBool(false);
-			config.modGameLog = root["mods"]["game_log"].GetBool(false);
-			for (const char* moved : {"skip_splash", "hold_zoom", "controls"}) {
+			for (const char* moved : {"skip_splash", "hold_zoom", "controls", "solo_start", "game_log"}) {
 				if (root["mods"][moved].IsObject() || root["mods"][moved].GetBool(false)) {
 					g_movedSettings.push_back(moved);
 				}
@@ -259,7 +257,7 @@ bool ConfigLoad()
 	g_config = config;
 	LogInit(config.logPath, config.logLevel, config.logToDebugger);
 	for (const std::string& moved : g_movedSettings) {
-		XLS_LOG_WARN("config: mods.%s is now a plugin mod (Mods\\SkipSplash or Mods\\Controls); the setting is ignored.", moved.c_str());
+		XLS_LOG_WARN("config: mods.%s is now a plugin mod (Mods\\SkipSplash, Controls or DevTools); the setting is ignored.", moved.c_str());
 	}
 	if (loaded) {
 		XLS_LOG_INFO("config: loaded %ls.", g_configPath.c_str());

@@ -108,8 +108,6 @@ struct Config {
 	bool homeKeyOpensOverlay = true;    // GFWL opened the Guide on Home
 
 	// Lost Planet 2 mods (src/mods).
-	bool modSoloStart = false;          // Let a lobby host start a match alone (test box).
-	bool modGameLog = false;            // Route the game's own debug messages into our log.
 	std::wstring modDir;                // <exe dir>\Mods\ unless "mods": {"dir": ...}: overlay mods (folders or .zip).
 	std::wstring mapsDir;               // <exe dir>\Maps\ ("mods": {"maps_dir": ...}): map packages (.zip).
 	std::wstring partsDir;              // <exe dir>\Parts\ ("mods": {"parts_dir": ...}): part packages (.zip).

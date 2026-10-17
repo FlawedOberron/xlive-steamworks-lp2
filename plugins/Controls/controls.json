@@ -7,6 +7,11 @@
 	//   quick_turn, zoom, melee, gesture, teng, dodge
 	// VS actions: fire, secondary (= the grenade button), zoom, brake, reload, quick_turn,
 	//   dash, boost
+	// A source is either another action (borrow its button; works for pads too) or a key:
+	//   "key:F", "key:5", "key:F13", "key:NUM5", "key:MOUSE_X1" (side button), "key:MOUSE_R",
+	//   "key:SPACE", "key:LSHIFT", "key:0x52" (any virtual-key code). Keyboard and mouse only.
+	// Borrowing takes the button away from its own action; a key source leaves the key's own
+	// game binding alone, so pick a key that is free (or unused in a VS).
 	// Example: zoom on right click and grenade on G on foot, but in a VS right click fires the
 	// second weapon and G zooms.
 	"vs": {

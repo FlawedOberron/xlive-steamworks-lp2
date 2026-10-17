@@ -1,0 +1,6 @@
+{
+	// Let a lobby host start a Player Match alone and play it (a private test box for maps and parts).
+	"solo_start": true,
+	// Copy the game's own debug messages into xlive_steamworks.log (LP2DX11.exe only).
+	"game_log": false
+}

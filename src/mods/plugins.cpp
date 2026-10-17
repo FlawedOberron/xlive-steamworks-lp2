@@ -166,4 +166,9 @@ void NotifyTitleStarted()
 	InterlockedExchange(&g_titleStarted, 1);
 }
 
+bool TitleStarted()
+{
+	return g_titleStarted != 0;
+}
+
 }

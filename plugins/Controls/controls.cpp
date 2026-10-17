@@ -2,7 +2,9 @@
 
 #include <windows.h>
 
+#include <ctype.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <string>
@@ -20,6 +22,10 @@
 // held/pressed/released stay consistent and gamepads work the same way. Example, zoom on right
 // click and grenade on G, but right click fires the VS's second weapon and G zooms in a VS:
 //   controls.json: {"vs": {"secondary": "zoom", "zoom": "grenade"}}
+// A source can also be a key or mouse button ("key:F", "key:MOUSE_X1"): then the action follows
+// that key directly (read with GetAsyncKeyState while the game window is in front), with our own
+// press/release edges, and the key's own game binding is left alone. In a VS the game only reports
+// a few actions, so this is the way to put a VS action on any key. Keyboard and mouse only.
 //
 // Context: the pad's unit (pad+0x480) and what it is riding (unit+0x40, as the game's own zoom
 // check reads it, DX11 0x9397af). Riding a unit of category 2 (byte +0x1f, the two-weapon units)
@@ -88,7 +94,10 @@ const Action kVsActions[] = {
 
 struct Rule {
 	const Action* dest;
-	const Action* source;
+	const Action* source; // nullptr when the source is a key
+	int vk = 0;           // virtual-key code of a key source
+	bool down = false;    // key state at the previous pad update
+	bool wasDown = false;
 };
 std::vector<Rule> g_rules[kContextCount];
 
@@ -105,6 +114,64 @@ const Action* FindAction(Context context, const std::string& name)
 		}
 	}
 	return nullptr;
+}
+
+struct KeyName {
+	const char* name;
+	int vk;
+};
+const KeyName kKeyNames[] = {
+	{"SPACE", VK_SPACE}, {"TAB", VK_TAB}, {"ENTER", VK_RETURN}, {"BACKSPACE", VK_BACK},
+	{"SHIFT", VK_SHIFT}, {"LSHIFT", VK_LSHIFT}, {"RSHIFT", VK_RSHIFT},
+	{"CTRL", VK_CONTROL}, {"LCTRL", VK_LCONTROL}, {"RCTRL", VK_RCONTROL},
+	{"ALT", VK_MENU}, {"LALT", VK_LMENU}, {"RALT", VK_RMENU}, {"CAPSLOCK", VK_CAPITAL},
+	{"INSERT", VK_INSERT}, {"DELETE", VK_DELETE}, {"HOME", VK_HOME}, {"END", VK_END},
+	{"PAGEUP", VK_PRIOR}, {"PAGEDOWN", VK_NEXT},
+	{"UP", VK_UP}, {"DOWN", VK_DOWN}, {"LEFT", VK_LEFT}, {"RIGHT", VK_RIGHT},
+	{"MOUSE_L", VK_LBUTTON}, {"MOUSE_R", VK_RBUTTON}, {"MOUSE_M", VK_MBUTTON},
+	{"MOUSE_X1", VK_XBUTTON1}, {"MOUSE4", VK_XBUTTON1}, {"MOUSE_X2", VK_XBUTTON2}, {"MOUSE5", VK_XBUTTON2},
+	{",", VK_OEM_COMMA}, {".", VK_OEM_PERIOD}, {"-", VK_OEM_MINUS}, {"=", VK_OEM_PLUS},
+	{";", VK_OEM_1}, {"/", VK_OEM_2}, {"`", VK_OEM_3}, {"[", VK_OEM_4}, {"\\", VK_OEM_5},
+	{"]", VK_OEM_6}, {"'", VK_OEM_7},
+};
+
+// "key:<name>": a letter or digit, F1-F24, NUM0-NUM9, a name above, or a hex code (0x41).
+int ParseKey(const std::string& source)
+{
+	if (_strnicmp(source.c_str(), "key:", 4) != 0) {
+		return 0;
+	}
+	std::string name = source.substr(4);
+	for (char& c : name) {
+		c = (char)toupper((unsigned char)c);
+	}
+	if (name.size() == 1 && (isalpha((unsigned char)name[0]) || isdigit((unsigned char)name[0]))) {
+		return name[0];
+	}
+	if (name.size() >= 2 && name[0] == 'F' && isdigit((unsigned char)name[1])) {
+		int n = atoi(name.c_str() + 1);
+		return n >= 1 && n <= 24 ? VK_F1 + n - 1 : 0;
+	}
+	if (name.size() == 4 && name.compare(0, 3, "NUM") == 0 && isdigit((unsigned char)name[3])) {
+		return VK_NUMPAD0 + (name[3] - '0');
+	}
+	if (name.size() > 2 && name[0] == '0' && name[1] == 'X') {
+		int vk = (int)strtol(name.c_str() + 2, nullptr, 16);
+		return vk > 0 && vk < 256 ? vk : 0;
+	}
+	for (const KeyName& k : kKeyNames) {
+		if (name == k.name) {
+			return k.vk;
+		}
+	}
+	return -1; // "key:" with an unknown name
+}
+
+bool GameInFront()
+{
+	DWORD pid = 0;
+	GetWindowThreadProcessId(GetForegroundWindow(), &pid);
+	return pid == GetCurrentProcessId();
 }
 
 }
@@ -124,13 +191,27 @@ bool ControlsLoadRules()
 			continue;
 		}
 		const Action* dest = FindAction((Context)context, remap.dest);
-		const Action* source = FindAction((Context)context, remap.source);
-		if (!dest || !source) {
+		int vk = ParseKey(remap.source);
+		if (vk < 0) {
+			LOG_WARN("%s: unknown key \"%s\".", kContextNames[context], remap.source.c_str());
+			continue;
+		}
+		const Action* source = vk ? nullptr : FindAction((Context)context, remap.source);
+		if (!dest || (!vk && !source)) {
 			LOG_WARN("%s: unknown action \"%s\".", kContextNames[context], (!dest ? remap.dest : remap.source).c_str());
 			continue;
 		}
-		g_rules[context].push_back({dest, source});
-		LOG_INFO("%s: %s <- %s.", kContextNames[context], dest->name, source->name);
+		Rule rule;
+		rule.dest = dest;
+		rule.source = source;
+		rule.vk = vk;
+		g_rules[context].push_back(rule);
+		if (vk) {
+			LOG_INFO("%s: %s <- key 0x%02x (%s).", kContextNames[context], dest->name, vk, remap.source.c_str() + 4);
+		}
+		else {
+			LOG_INFO("%s: %s <- %s.", kContextNames[context], dest->name, source->name);
+		}
 		any = true;
 	}
 	return any;
@@ -174,6 +255,9 @@ void Remap(uint64_t* sets, const std::vector<Rule>& rules)
 		uint64_t clear = 0;
 		for (const Rule& r : rules) {
 			for (const Action* a : {r.dest, r.source}) {
+				if (!a) {
+					continue; // key source: its game binding is left alone
+				}
 				clear |= a->clear;
 				if (!(snap[k] & a->keepIf)) {
 					clear |= a->clearIfNot;
@@ -182,7 +266,18 @@ void Remap(uint64_t* sets, const std::vector<Rule>& rules)
 		}
 		uint64_t out = snap[k] & ~clear;
 		for (const Rule& r : rules) {
-			if (snap[k] & r.source->test) {
+			bool on;
+			if (r.source) {
+				on = (snap[k] & r.source->test) != 0;
+			}
+			else {
+				bool pressed = r.down && !r.wasDown;
+				bool released = !r.down && r.wasDown;
+				// held, pressed, +0x3c8 (taken as pressed), released, +0x3d8 (taken as changed)
+				const bool byKind[kSetCount] = {r.down, pressed, pressed, released, pressed || released};
+				on = byKind[k];
+			}
+			if (on) {
 				out |= r.dest->set;
 			}
 		}
@@ -194,6 +289,17 @@ void __attribute__((thiscall)) PadUpdate(uint8_t* self)
 {
 	g_update(self);
 	uint8_t* pad = self - 0x3b0;
+	// Key sources keep their state in every context, so entering or leaving a VS while holding the
+	// key gives no false press.
+	bool front = GameInFront();
+	for (std::vector<Rule>& list : g_rules) {
+		for (Rule& r : list) {
+			if (r.vk) {
+				r.wasDown = r.down;
+				r.down = front && (GetAsyncKeyState(r.vk) & 0x8000) != 0;
+			}
+		}
+	}
 	const std::vector<Rule>& rules = g_rules[CurrentContext(pad)];
 	if (!rules.empty()) {
 		Remap((uint64_t*)(self + kSetsOffset), rules);

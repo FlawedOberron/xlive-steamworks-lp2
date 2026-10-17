@@ -195,7 +195,11 @@ function(lp2_plugin name)
 endfunction()
 if(XLS_BUILD_PLUGINS AND NOT XLS_BUILD_STATIC)
     lp2_plugin(SkipSplash plugins/SkipSplash/skip_splash.cpp)
+    lp2_plugin(DevTools plugins/DevTools/dev_tools.cpp src/core/json.cpp)
     lp2_plugin(Controls plugins/Controls/plugin.cpp plugins/Controls/controls.cpp plugins/Controls/zoom.cpp src/core/json.cpp)
+    add_custom_command(TARGET DevTools POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/plugins/DevTools/devtools.json" "$<TARGET_FILE_DIR:DevTools>/devtools.json"
+    )
     add_custom_command(TARGET Controls POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/plugins/Controls/controls.json" "$<TARGET_FILE_DIR:Controls>/controls.json"
     )

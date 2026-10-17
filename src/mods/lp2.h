@@ -6,8 +6,8 @@
 
 namespace xls::mods {
 
-// Called from DllMain. Starts a worker that waits for SteamStub to decrypt the game's code and
-// then applies the enabled code patches.
+// Called from DllMain. Starts a worker that loads the plugin mods and waits for SteamStub to
+// decrypt the game's code to apply the mod-support patches.
 void Start();
 
 // Hooks the game's file opens so files in enabled mod folders replace the game's own
@@ -28,6 +28,7 @@ bool PluginsPoll(); // true while some plugin still wants polling
 void PluginsGiveUp();
 // Called on the game's first XLiveInitialize: its code is decrypted by then.
 void NotifyTitleStarted();
+bool TitleStarted();
 
 // Re-applies the import hooks if something (SteamStub) restored the import table.
 void OverlayVerify();

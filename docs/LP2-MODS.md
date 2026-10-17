@@ -63,8 +63,6 @@ Comments are allowed. Mod-related keys:
 	"mods": {
 		"disabled": ["SomeMod"],  // Mods\ entries to skip (folder or zip name without .zip)
 		// "enabled": [...],      // or: only these Mods\ entries, in this order (later ones win)
-		"game_log": false,        // copy the game's own debug messages into the log
-		"solo_start": false,      // testing: let a lobby host start a match alone
 		"trace_opens": 0          // debugging: log the first N files the game opens
 	},
 	"log": { "level": "info" }   // debug / trace for troubleshooting
@@ -81,10 +79,10 @@ plugin mods, so the game stays as vanilla as you want. A plugin mod is a normal 
 | Mod | What it does | Settings | Status |
 |---|---|---|---|
 | `Mods\SkipSplash` | Skip the boot logos, straight to the title screen. | none | Works (was built in) |
-| `Mods\Controls` | Hold to aim (zoom only while held, on foot) and split on-foot / VS controls: in a VS an action can take the button of another action (keyboard, mouse and pad). Foot actions: jump, grapple, next_weapon, crouch, fire, grenade, reload, action, quick_turn, zoom, melee, gesture, teng, dodge; VS: fire, secondary (= grenade button), zoom, brake, reload, quick_turn, dash, boost. | `controls.json` | Hold to aim works (DX11); split controls untested |
+| `Mods\Controls` | Hold to aim (zoom only while held, on foot) and split on-foot / VS controls: in a VS an action can take the button of another action (keyboard, mouse and pad) or any key / mouse button (`"key:F"`, `"key:MOUSE_X1"`). Foot actions: jump, grapple, next_weapon, crouch, fire, grenade, reload, action, quick_turn, zoom, melee, gesture, teng, dodge; VS: fire, secondary (= grenade button), zoom, brake, reload, quick_turn, dash, boost. | `controls.json` | Hold to aim works (DX11); split controls untested |
 | Key config menu rows | "Hold to aim" under Zoom In, separate "VS Zoom" / "VS Secondary" key rows | (planned, in Controls) | Planned |
 
-The old `mods.skip_splash` / `mods.hold_zoom` settings are ignored (a warning in the log says so).
+The old `mods.skip_splash`, `hold_zoom`, `solo_start` and `game_log` settings are ignored (a warning in the log says so).
 
 ## Mods\ (file replacement)
 
