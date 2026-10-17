@@ -18,6 +18,7 @@ namespace {
 
 bool g_zoomPending = false;
 bool g_controlsPending = false;
+bool g_promptsPending = false;
 
 void LoadSettings()
 {
@@ -66,7 +67,9 @@ extern "C" __declspec(dllexport) int lp2mod_load(const LP2ModHost* host)
 	g_host = host;
 	LoadSettings();
 	g_zoomPending = g_settings.holdToAim;
-	g_controlsPending = ControlsLoadRules() || g_settings.log;
+	bool rules = ControlsLoadRules();
+	g_controlsPending = rules || g_settings.log;
+	g_promptsPending = rules;
 	LOG_INFO("hold to aim %s, %u remap(s).", g_settings.holdToAim ? "on" : "off", (unsigned)g_settings.remaps.size());
 	return 0;
 }
@@ -79,14 +82,20 @@ extern "C" __declspec(dllexport) int lp2mod_poll(void)
 	if (g_controlsPending && ControlsTryInstall(g_host->game_base)) {
 		g_controlsPending = false;
 	}
-	if ((g_zoomPending || g_controlsPending) && g_host->title_started()) {
+	if (g_promptsPending && PromptsTryInstall(g_host->game_base)) {
+		g_promptsPending = false;
+	}
+	if ((g_zoomPending || g_controlsPending || g_promptsPending) && g_host->title_started()) {
 		if (g_zoomPending) {
 			LOG_WARN("hold to aim: zoom check not found in this game build.");
 		}
 		if (g_controlsPending) {
 			LOG_WARN("pad update call not found in this game build, split controls off.");
 		}
+		if (g_promptsPending) {
+			LOG_WARN("prompt refresh not found in this game build, prompts keep the game's keys.");
+		}
 		return 1;
 	}
-	return !g_zoomPending && !g_controlsPending;
+	return !g_zoomPending && !g_controlsPending && !g_promptsPending;
 }

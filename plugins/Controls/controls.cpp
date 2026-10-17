@@ -50,47 +50,47 @@ enum Context { kFoot, kVs, kContextCount };
 const char* const kContextNames[kContextCount] = {"foot", "vs"};
 
 // An action as the pad shows it: any bit of test means the button is down; set is what the game
-// itself produces for it; clear is what a rule removes. Bits shared with other actions are left
-// out of clear (VS zoom also sets 0x1, which get out shares; keepIf keeps those when present).
+// itself produces for it; clear is what a rule removes (bits shared with other actions are left
+// out: VS zoom also sets 0x1, which get out shares). slot: the action's key config slot, which is
+// also its prompt tag index (FUN_00848110).
 struct Action {
 	const char* name;
 	uint64_t test;
 	uint64_t set;
 	uint64_t clear;
-	uint64_t clearIfNot; // also cleared, unless a keepIf bit is present
-	uint64_t keepIf;
+	int slot; // key config slot = prompt tag index (-1: none), for the on-screen prompts
 };
 
 // From the 2026-10-16 pad rounds (lp2-tools/padmap.py, the user's bindings).
 const Action kFootActions[] = {
-	{"jump", 0x2, 0x2, 0x2},
-	{"grapple", 0x4, 0x4, 0x4},
-	{"next_weapon", 0x8, 0x8, 0x8},
-	{"crouch", 0x20, 0x20, 0x20},
-	{"fire", 0x100, 0x100, 0x100},
-	{"grenade", 0x200, 0x200 | W2(0x400000), 0x200 | W2(0x400000)},
-	{"reload", 0x400, 0x400 | 0x800 | W2(0x200000), 0x400 | 0x800 | W2(0x200000)},
-	{"action", 0x2000, 0x2000, 0x2000},
-	{"quick_turn", 0x10000, 0x10000 | 0x20000, 0x10000 | 0x20000},
-	{"zoom", 0x100000, 0x100000, 0x100000},
-	{"melee", W2(0x20), W2(0x20), W2(0x20)},
-	{"gesture", W2(0x100), W2(0x100), W2(0x100)},
-	{"teng", W2(0x4000), W2(0x4000), W2(0x4000)},
-	{"dodge", W2(0x8000000), W2(0x8000000), W2(0x8000000)},
+	{"jump", 0x2, 0x2, 0x2, 19},
+	{"grapple", 0x4, 0x4, 0x4, 10},
+	{"next_weapon", 0x8, 0x8, 0x8, 12},
+	{"crouch", 0x20, 0x20, 0x20, 9},
+	{"fire", 0x100, 0x100, 0x100, 7},
+	{"grenade", 0x200, 0x200 | W2(0x400000), 0x200 | W2(0x400000), 8},
+	{"reload", 0x400, 0x400 | 0x800 | W2(0x200000), 0x400 | 0x800 | W2(0x200000), 28},
+	{"action", 0x2000, 0x2000, 0x2000, 13},
+	{"quick_turn", 0x10000, 0x10000 | 0x20000, 0x10000 | 0x20000, 6},
+	{"zoom", 0x100000, 0x100000, 0x100000, 29},
+	{"melee", W2(0x20), W2(0x20), W2(0x20), 11},
+	{"gesture", W2(0x100), W2(0x100), W2(0x100), 20},
+	{"teng", W2(0x4000), W2(0x4000), W2(0x4000), 18},
+	{"dodge", W2(0x8000000), W2(0x8000000), W2(0x8000000), 36},
 };
 const Action kVsActions[] = {
-	{"fire", 0x100, 0x100, 0x100},
-	{"secondary", 0x200, 0x200 | W2(0x400000), 0x200 | W2(0x400000)},
-	{"grenade", 0x200, 0x200 | W2(0x400000), 0x200 | W2(0x400000)}, // same button as secondary
+	{"fire", 0x100, 0x100, 0x100, 7},
+	{"secondary", 0x200, 0x200 | W2(0x400000), 0x200 | W2(0x400000), 8},
+	{"grenade", 0x200, 0x200 | W2(0x400000), 0x200 | W2(0x400000), 8}, // same button as secondary
 	// 0x1 also comes with zoom in a VS, but get out shares it (and may need it held): never cleared.
-	{"zoom", 0x100000, 0x100000 | 0x1, 0x100000},
-	{"brake", 0x20, 0x20, 0x20},
-	{"crouch", 0x20, 0x20, 0x20},
-	{"reload", 0x400, 0x400 | 0x800 | W2(0x200000), 0x400 | 0x800 | W2(0x200000)},
-	{"quick_turn", 0x10000, 0x10000 | 0x20000 | W2(0x80000), 0x10000 | 0x20000 | W2(0x80000)},
-	{"dash", W2(0x10000000), W2(0x10000000), W2(0x10000000)},
-	{"boost", 0x2, 0x2 | 0x10 | 0x1000 | W2(0x40 | 0x80), 0x2},
-	{"jump", 0x2, 0x2 | 0x10 | 0x1000 | W2(0x40 | 0x80), 0x2},
+	{"zoom", 0x100000, 0x100000 | 0x1, 0x100000, 29},
+	{"brake", 0x20, 0x20, 0x20, 9},
+	{"crouch", 0x20, 0x20, 0x20, 9},
+	{"reload", 0x400, 0x400 | 0x800 | W2(0x200000), 0x400 | 0x800 | W2(0x200000), 28},
+	{"quick_turn", 0x10000, 0x10000 | 0x20000 | W2(0x80000), 0x10000 | 0x20000 | W2(0x80000), 6},
+	{"dash", W2(0x10000000), W2(0x10000000), W2(0x10000000), 37},
+	{"boost", 0x2, 0x2 | 0x10 | 0x1000 | W2(0x40 | 0x80), 0x2, 19},
+	{"jump", 0x2, 0x2 | 0x10 | 0x1000 | W2(0x40 | 0x80), 0x2, 19},
 };
 
 struct Rule {
@@ -260,9 +260,6 @@ void Remap(uint64_t* sets, const std::vector<Rule>& rules)
 					continue; // key source: its game binding is left alone
 				}
 				clear |= a->clear;
-				if (!(snap[k] & a->keepIf)) {
-					clear |= a->clearIfNot;
-				}
 			}
 		}
 		uint64_t out = snap[k] & ~clear;
@@ -286,6 +283,91 @@ void Remap(uint64_t* sets, const std::vector<Rule>& rules)
 	}
 }
 
+// --- On-screen prompts. The prompt refresh (DX11 FUN_00848110, DX9 FUN_00838cc0; thiscall, ecx =
+// the message system) gives every prompt tag object (array at +0x4c4, count +0x4b8; tag index =
+// key config slot) its key icon at +0xc: 0x24 + index of the key's virtual-key code in the key
+// table, 0x84/0x85/0x86 for the left/right/middle mouse button, 0x8d for none; then sets +0x47c
+// (redraw). The refresh is hooked at its start (8 relocatable bytes): after the game's refresh, the
+// rules of the current context give each moved action the icon of its source. A context change
+// runs the refresh again, so prompts follow on foot / in a VS.
+struct PromptLayout {
+	uint32_t refreshRva;
+	uint32_t keyTable; // u32 virtual-key codes, 0x60 entries
+};
+const PromptLayout kPromptLayouts[] = {
+	{0x448110, 0x1372d78}, // LP2DX11.exe
+	{0x438cc0, 0x1362ba8}, // LP2DX9.exe
+};
+// sub esp,0x10; push ebx; push esi; push edi; mov edi,ecx
+const uint8_t kRefreshPrologue[] = {0x83, 0xec, 0x10, 0x53, 0x56, 0x57, 0x8b, 0xf9};
+const int kIconNone = 0x8d;
+
+const PromptLayout* g_prompt = nullptr;
+using RefreshFn = void(__attribute__((thiscall)) *)(uint8_t*);
+RefreshFn g_refresh = nullptr; // trampoline to the game's refresh
+uint8_t* volatile g_messageSystem = nullptr;
+int g_promptContext = kFoot;
+
+int IconOfKey(int vk)
+{
+	switch (vk) {
+	case VK_LBUTTON:
+		return 0x84;
+	case VK_RBUTTON:
+		return 0x85;
+	case VK_MBUTTON:
+		return 0x86;
+	}
+	const uint32_t* table = (const uint32_t*)(uintptr_t)g_prompt->keyTable;
+	for (int i = 0; i < 0x60; i++) {
+		if ((int)table[i] == vk) {
+			return 0x24 + i;
+		}
+	}
+	return kIconNone;
+}
+
+void ApplyPromptRules(uint8_t* system)
+{
+	const std::vector<Rule>& rules = g_rules[g_promptContext];
+	uint8_t** tags = *(uint8_t***)(system + 0x4c4);
+	int count = *(int*)(system + 0x4b8);
+	if (rules.empty() || !tags || count <= 0) {
+		return;
+	}
+	if (count > 64) {
+		count = 64;
+	}
+	int icons[64];
+	for (int i = 0; i < count; i++) {
+		icons[i] = tags[i] ? *(int*)(tags[i] + 0xc) : kIconNone;
+	}
+	for (const Rule& r : rules) {
+		int dest = r.dest->slot;
+		if (dest < 0 || dest >= count || !tags[dest]) {
+			continue;
+		}
+		int source = r.source ? r.source->slot : -1;
+		*(int*)(tags[dest] + 0xc) = r.vk ? IconOfKey(r.vk) : (source >= 0 && source < count ? icons[source] : kIconNone);
+	}
+	system[0x47c] = 1;
+}
+
+void __attribute__((thiscall)) PromptRefresh(uint8_t* system)
+{
+	g_messageSystem = system;
+	g_refresh(system);
+	ApplyPromptRules(system);
+}
+
+void PromptContext(Context context)
+{
+	if (context != g_promptContext && g_messageSystem && g_refresh) {
+		g_promptContext = context;
+		PromptRefresh(g_messageSystem);
+	}
+}
+
 void __attribute__((thiscall)) PadUpdate(uint8_t* self)
 {
 	g_update(self);
@@ -302,6 +384,7 @@ void __attribute__((thiscall)) PadUpdate(uint8_t* self)
 		}
 	}
 	Context context = CurrentContext(pad);
+	PromptContext(context);
 	const std::vector<Rule>& rules = g_rules[context];
 	uint64_t* sets = (uint64_t*)(self + kSetsOffset);
 	uint64_t before = sets[0];
@@ -352,6 +435,39 @@ bool ControlsTryInstall(unsigned char* base)
 	VirtualProtect(call + 1, 4, old, &old);
 	FlushInstructionCache(GetCurrentProcess(), call + 1, 4);
 	LOG_INFO("pad update hooked at 0x%p (game update 0x%p).", call, (void*)g_update);
+	return true;
+}
+
+bool PromptsTryInstall(unsigned char* base)
+{
+	uint8_t* fn = nullptr;
+	for (const PromptLayout& L : kPromptLayouts) {
+		if (InImage(base, L.refreshRva, sizeof(kRefreshPrologue)) && memcmp(base + L.refreshRva, kRefreshPrologue, sizeof(kRefreshPrologue)) == 0) {
+			fn = base + L.refreshRva;
+			g_prompt = &L;
+			break;
+		}
+	}
+	if (!fn) {
+		return false;
+	}
+	auto* tramp = (uint8_t*)VirtualAlloc(nullptr, 16, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+	if (!tramp) {
+		return false;
+	}
+	memcpy(tramp, kRefreshPrologue, sizeof(kRefreshPrologue));
+	tramp[8] = 0xe9;
+	int32_t back = (int32_t)((fn + 8) - (tramp + 13));
+	memcpy(tramp + 9, &back, 4);
+	FlushInstructionCache(GetCurrentProcess(), tramp, 16);
+	g_refresh = (RefreshFn)tramp;
+	uint8_t patch[8] = {0xe9, 0, 0, 0, 0, 0x90, 0x90, 0x90};
+	int32_t rel = (int32_t)((uint8_t*)&PromptRefresh - (fn + 5));
+	memcpy(patch + 1, &rel, 4);
+	if (!g_host->write_code(fn, patch, sizeof(patch))) {
+		return false;
+	}
+	LOG_INFO("prompts: refresh hooked at 0x%p.", fn);
 	return true;
 }
 

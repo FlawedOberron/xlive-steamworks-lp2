@@ -40,5 +40,7 @@ bool HoldZoomTryInstall(unsigned char* base);
 // Split controls (controls.cpp): true if any rule applies; true once the pad update is hooked.
 bool ControlsLoadRules();
 bool ControlsTryInstall(unsigned char* base);
+// Prompts follow the rules (controls.cpp): true once the prompt refresh is hooked.
+bool PromptsTryInstall(unsigned char* base);
 
 }
