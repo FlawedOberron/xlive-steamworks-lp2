@@ -9,6 +9,8 @@
 // The DLC slots stay as they are.
 #pragma once
 
+#include <stdint.h>
+
 #include <string>
 #include <vector>
 
@@ -24,7 +26,23 @@ struct PartSet {
 	std::wstring source;      // the zip or folder it came from
 	std::wstring models[kPartSlotCount]; // unpacked .rModel per slot, empty = set has no such part
 	std::string templates[kPartSlotCount]; // original part each was built on ("bd2900")
+	int colour = 0;           // which of the template's colour textures (A-D) the part wears
 };
+
+// A generated DLC content package: one custom part in DLC slot `item` (game part id 180+item).
+struct PartPackage {
+	std::string setId;
+	int slot = 0;             // PartSlot
+	int item = 0;             // DLC slot 20-69 (listed one by one in the parts menus)
+	std::wstring root;        // the package folder (holds Content\nativePC\...)
+	std::wstring displayName;
+	uint8_t contentId[20] = {};
+};
+
+// Builds (once; cached in ModCache\parts\pkg\) a DLC package per custom part, cloning the
+// template part's archives with the exported model in place, and returns them for the content
+// scan (api/xcontent.cpp).
+const std::vector<PartPackage>& PartPackages();
 
 // Scans Parts\ (once; thread-safe): <name>.zip or folders, each holding lpc.json and the models
 // the Blender exporter wrote (body.rModel, head.rModel, back.rModel, legs.rModel).

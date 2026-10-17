@@ -233,6 +233,10 @@ bool ConfigLoad()
 			config.modDir = PathSetting(root["mods"]["dir"], config.modDir);
 			config.mapsDir = PathSetting(root["mods"]["maps_dir"], config.mapsDir);
 			config.partsDir = PathSetting(root["mods"]["parts_dir"], config.partsDir);
+			config.partsFirstSlot = (int)root["mods"]["parts_first_slot"].GetInt(20);
+			if (config.partsFirstSlot < 20 || config.partsFirstSlot > 69) {
+				config.partsFirstSlot = 20;
+			}
 			config.modCacheDir = PathSetting(root["mods"]["cache_dir"], config.modCacheDir);
 			for (const Json& name : root["mods"]["disabled"].Elements()) {
 				if (name.IsString() && !name.GetString(std::string()).empty()) {

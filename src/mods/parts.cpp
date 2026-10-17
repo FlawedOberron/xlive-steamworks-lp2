@@ -8,6 +8,9 @@
 
 #include <windows.h>
 
+#include <stdio.h>
+#include <string.h>
+
 #include <algorithm>
 #include <mutex>
 
@@ -65,6 +68,8 @@ bool ParseManifest(const Bytes& text, const std::wstring& source, PartSet* set)
 		XLS_LOG_WARN("mods: parts %ls: \"name\" must be 1-%zu bytes.", source.c_str(), kNameMaxBytes);
 		return false;
 	}
+	std::string colour = root["colour"].GetString("A");
+	set->colour = colour.size() == 1 && toupper((unsigned char)colour[0]) >= 'A' && toupper((unsigned char)colour[0]) <= 'D' ? toupper((unsigned char)colour[0]) - 'A' : 0;
 	set->factionIndex = -1;
 	if (_stricmp(set->faction.c_str(), "ALL") != 0) {
 		for (int i = 0; i < (int)(sizeof(kFactions) / sizeof(kFactions[0])); i++) {
@@ -220,6 +225,195 @@ void Load()
 	XLS_LOG_INFO("mods: parts: %zu custom part set(s) registered.", g_sets.size());
 }
 
+// --- Generated DLC packages (the C++ side of lp2-tools/dlcpart.py).
+//
+// The game shows DLC part slots 20-69 one by one in each category's list and loads slot n of a
+// category from <package>\Content\nativePC\arcXmlTmpPC\CustomParts\<pfx>2e<nn>.arc (also seen as
+// 0e) plus the colour archive <pfx>2e<nn>00.arc, with the names in the package's sname.bin. Model
+// paths inside are remapped to model\hm\hmf6\<pfx>f6<nn>\... (FUN_00f664b0), and DLC parts always
+// wear colour A. A package per part keeps sname.bin under the 1024 bytes the game reads.
+
+const char* const kPrefixes[kPartSlotCount] = {"hd", "bd", "bk", "lg"};
+const int kSnameCategory[kPartSlotCount] = {1, 2, 3, 4};  // head, body, back, legs
+const int kSnameFloats[kPartSlotCount] = {3, 3, 12, 0};
+const int kLastItem = 69;
+const char* const kGenVersion = "lp2-partpkg 1";
+
+std::once_flag g_pkgOnce;
+std::vector<PartPackage> g_packages;
+
+void ReplaceAll(std::string* s, const std::string& from, const std::string& to)
+{
+	for (size_t at = s->find(from); at != std::string::npos; at = s->find(from, at + to.size())) {
+		s->replace(at, from.size(), to);
+	}
+}
+
+void ReplaceAll(Bytes* b, const std::string& from, const std::string& to)
+{
+	if (b->size() < from.size()) {
+		return;
+	}
+	for (size_t i = 0; i + from.size() <= b->size(); i++) {
+		if (memcmp(b->data() + i, from.data(), from.size()) == 0) {
+			memcpy(b->data() + i, to.data(), to.size()); // same length: offsets stay valid
+			i += from.size() - 1;
+		}
+	}
+}
+
+std::string Hex2(int v)
+{
+	char t[4];
+	snprintf(t, sizeof(t), "%02x", v & 0xff);
+	return t;
+}
+
+// Clones one template archive into a DLC one: renames (same length), the exported model in place
+// of the template's, and (colour archives) the chosen colour texture renamed to colour A.
+bool CloneArc(const std::wstring& src, const std::wstring& dst, const std::vector<std::pair<std::string, std::string>>& pairs,
+              const std::string& modelName, const Bytes* model, const std::string& colourFrom)
+{
+	Bytes file;
+	std::vector<ArcEntry> entries;
+	if (!ReadWholeFile(src, &file) || !ArcRead(file, &entries)) {
+		return false;
+	}
+	for (ArcEntry& e : entries) {
+		if (model && e.name == modelName && e.classHash == ClassHash("rModel")) {
+			e.data = *model;
+		}
+		for (const auto& p : pairs) {
+			ReplaceAll(&e.name, p.first, p.second);
+			ReplaceAll(&e.data, p.first, p.second);
+		}
+		if (!colourFrom.empty()) {
+			ReplaceAll(&e.name, colourFrom, "_BM-00_A");
+			ReplaceAll(&e.data, colourFrom, "_BM-00_A");
+		}
+	}
+	return WriteWholeFile(dst, ArcWrite(entries));
+}
+
+std::string SnameBin(int slot, int item, const std::string& name)
+{
+	std::string t = "\xef\xbb\xbf" "01\r\n";
+	char line[16];
+	snprintf(line, sizeof(line), "%02d\r\n%02d\r\n", kSnameCategory[slot], item);
+	t += line;
+	for (int i = 0; i < 7; i++) {
+		t += name + "\r\n";
+	}
+	for (int i = 0; i < kSnameFloats[slot]; i++) {
+		t += "0\r\n";
+	}
+	return t;
+}
+
+std::string FileStamp(const std::wstring& path)
+{
+	WIN32_FILE_ATTRIBUTE_DATA a{};
+	GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &a);
+	char buf[96];
+	snprintf(buf, sizeof(buf), "%lu:%lu %lu:%lu", a.nFileSizeHigh, a.nFileSizeLow, a.ftLastWriteTime.dwHighDateTime, a.ftLastWriteTime.dwLowDateTime);
+	return buf;
+}
+
+bool BuildPackage(const PartSet& set, int slot, int item, PartPackage* out)
+{
+	std::string tmpl = set.templates[slot];
+	size_t dot = tmpl.find('.');
+	if (dot != std::string::npos) {
+		tmpl.resize(dot);
+	}
+	if (tmpl.size() != 6 || _strnicmp(tmpl.c_str(), kPrefixes[slot], 2) != 0) {
+		XLS_LOG_WARN("mods: parts %s: %s: template \"%s\" is not a %s part.", set.id.c_str(), kSlotNames[slot], tmpl.c_str(), kPrefixes[slot]);
+		return false;
+	}
+	for (char& c : tmpl) {
+		c = (char)tolower((unsigned char)c);
+	}
+	std::string pfx = tmpl.substr(0, 2), sset = tmpl.substr(2, 2), svar = tmpl.substr(4, 2);
+	std::wstring srcDir = ExeDirectory() + L"nativePC\\arcXmlTmpPC\\CustomParts\\";
+	std::wstring root = Cfg().modCacheDir + L"parts\\pkg\\" + Utf8ToWide(set.id.c_str()) + L"_" + Utf8ToWide(kSlotNames[slot]) + L"\\";
+	std::wstring dstDir = root + L"Content\\nativePC\\arcXmlTmpPC\\CustomParts\\";
+	char stampBuf[256];
+	snprintf(stampBuf, sizeof(stampBuf), "%s item %d colour %d template %s model %s", kGenVersion, item, set.colour, tmpl.c_str(), FileStamp(set.models[slot]).c_str());
+	std::string stamp = stampBuf;
+	Bytes old;
+	bool fresh = ReadWholeFile(root + L"stamp.txt", &old) && std::string(old.begin(), old.end()) == stamp;
+	if (!fresh) {
+		Bytes model;
+		if (!ReadWholeFile(set.models[slot], &model)) {
+			return false;
+		}
+		std::string modelName = "model\\hm\\hm" + sset + "\\" + tmpl + "\\" + tmpl;
+		static const char kColours[] = "ABCD";
+		for (int dset : {0x0e, 0x2e}) {
+			std::string d = Hex2(dset), dv = Hex2(item);
+			std::vector<std::pair<std::string, std::string>> pairs = {
+				{modelName, "model\\hm\\hmf6\\" + pfx + "f6" + dv + "\\" + pfx + "f6" + dv},
+				{"hm" + sset + "\\" + tmpl, "hm" + d + "\\" + pfx + d + dv},
+				{tmpl, pfx + d + dv},
+			};
+			std::wstring tag = Utf8ToWide((pfx + d + dv).c_str());
+			if (!CloneArc(srcDir + Utf8ToWide(tmpl.c_str()) + L".arc", dstDir + tag + L".arc", pairs, modelName, &model, std::string())) {
+				XLS_LOG_WARN("mods: parts %s: %s: cannot clone %s.arc.", set.id.c_str(), kSlotNames[slot], tmpl.c_str());
+				return false;
+			}
+			// colour: the chosen variant's texture archive becomes colour A
+			std::wstring colourSrc = srcDir + Utf8ToWide(tmpl.c_str()) + Utf8ToWide(Hex2(set.colour).c_str()) + L".arc";
+			std::string from = std::string("_BM-00_") + kColours[set.colour];
+			if (!CloneArc(colourSrc, dstDir + tag + L"00.arc", pairs, std::string(), nullptr, set.colour ? from : std::string())) {
+				XLS_LOG_WARN("mods: parts %s: %s: no colour %c archive for %s.", set.id.c_str(), kSlotNames[slot], kColours[set.colour], tmpl.c_str());
+			}
+		}
+		std::string sname = SnameBin(slot, item, set.name);
+		WriteWholeFile(root + L"Content\\nativePC\\sname.bin", Bytes(sname.begin(), sname.end()));
+		WriteWholeFile(root + L"stamp.txt", Bytes(stamp.begin(), stamp.end()));
+		XLS_LOG_INFO("mods: parts %s: %s built as DLC slot %d (template %s, colour %c).", set.id.c_str(), kSlotNames[slot], item, tmpl.c_str(), kColours[set.colour]);
+	}
+	out->setId = set.id;
+	out->slot = slot;
+	out->item = item;
+	out->root = root;
+	out->displayName = Utf8ToWide((set.name + " (" + kSlotNames[slot] + ")").c_str());
+	std::string key = std::string("lpc:") + set.id + ":" + kSlotNames[slot];
+	uint64_t h = Fnv1a64(key.data(), key.size());
+	uint32_t h2 = Fnv1a32(key.data(), key.size());
+	memcpy(out->contentId, "LPC", 3);
+	memcpy(out->contentId + 4, &h, 8);
+	memcpy(out->contentId + 12, &h2, 4);
+	return true;
+}
+
+void BuildPackages()
+{
+	PartsLoad();
+	// Sets in id order, one DLC slot each (all of a set's parts share it); slots stay stable
+	// while the folder doesn't change (multiplayer will need them agreed between players).
+	std::vector<const PartSet*> order;
+	for (const PartSet& s : g_sets) {
+		order.push_back(&s);
+	}
+	std::sort(order.begin(), order.end(), [](const PartSet* a, const PartSet* b) { return _stricmp(a->id.c_str(), b->id.c_str()) < 0; });
+	int item = Cfg().partsFirstSlot;
+	for (const PartSet* set : order) {
+		if (item > kLastItem) {
+			XLS_LOG_WARN("mods: parts: more sets than DLC slots %d-%d, \"%s\" and later are left out.", Cfg().partsFirstSlot, kLastItem, set->id.c_str());
+			break;
+		}
+		for (int s = 0; s < kPartSlotCount; s++) {
+			PartPackage pkg;
+			if (!set->models[s].empty() && BuildPackage(*set, s, item, &pkg)) {
+				g_packages.push_back(pkg);
+			}
+		}
+		item++;
+	}
+	XLS_LOG_INFO("mods: parts: %zu part package(s) ready.", g_packages.size());
+}
+
 }
 
 void PartsLoad()
@@ -231,6 +425,12 @@ const std::vector<PartSet>& PartSets()
 {
 	PartsLoad();
 	return g_sets;
+}
+
+const std::vector<PartPackage>& PartPackages()
+{
+	std::call_once(g_pkgOnce, BuildPackages);
+	return g_packages;
 }
 
 }

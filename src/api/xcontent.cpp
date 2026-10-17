@@ -11,6 +11,7 @@
 #include "core/steam.h"
 #include "core/users.h"
 #include "core/utils.h"
+#include "mods/parts.h"
 
 #include <mutex>
 
@@ -39,6 +40,17 @@ void Scan()
 		}
 		content.installed = xls::SteamReady() && mapping.appId ? xls::SteamApps()->BIsDlcInstalled(mapping.appId) : true;
 		content.owned = xls::SteamReady() && mapping.appId ? xls::SteamApps()->BIsSubscribedApp(mapping.appId) : true;
+		g_content.push_back(content);
+	}
+	// Custom parts from the Parts folder, built into DLC packages (mods/parts.cpp).
+	for (const xls::mods::PartPackage& pkg : xls::mods::PartPackages()) {
+		Content content;
+		memcpy(content.mapping.contentId, pkg.contentId, sizeof(pkg.contentId));
+		content.mapping.contentType = XCONTENTTYPE_MARKETPLACE;
+		content.mapping.displayName = pkg.displayName;
+		content.mapping.path = pkg.root;
+		content.installed = true;
+		content.owned = true;
 		g_content.push_back(content);
 	}
 	if (config.dlcAutoDiscover && xls::SteamReady()) {
