@@ -63,7 +63,7 @@ Row g_table[kRowCount + 8]; // padding: the original table was followed by more 
 // LP2DX11.exe addresses.
 const uint32_t kTableSlot = 0x1636c74;
 const uint32_t kTableRefs[] = {0xf0522c, 0xf05b07, 0xf05dc9, 0xf06955, 0xf06a0a, 0xf06be1, 0xf07283, 0xf074d0};
-const uint32_t kCountMov = 0xf06f82; // mov ecx,0x23
+const uint32_t kCountMov = 0xf06f82; // mov ecx,0x23; lea edx,[ecx-0x1f] (edx = 4, the capture state!)
 const uint32_t kCountCmp = 0xf06a46; // cmp edx,0x23
 const uint32_t kDraw = 0xf056a0;
 const uint32_t kStateList = 0xf074b0;
@@ -216,6 +216,7 @@ void __attribute__((thiscall)) NumberState(uint8_t* screen)
 void __attribute__((thiscall)) StartCapture(uint8_t* screen, int state)
 {
 	const Row* row = RowAt(Cursor(screen));
+	LOG_INFO("menu: state %d requested at row %d (slot 0x%x), from state %d.", state, Cursor(screen), row ? row->slot : 0xffff, State(screen));
 	if (state == 4 && row && (row->slot >= kSlotHeader || row->slot == kSlotHoldToAim)) {
 		if (row->slot == kSlotHoldToAim) {
 			ToggleHoldToAim(screen);
@@ -268,7 +269,7 @@ bool MenuTryInstall(unsigned char* base)
 			return false;
 		}
 	}
-	const uint8_t mov23[] = {0xb9, 0x23, 0x00, 0x00, 0x00};
+	const uint8_t mov23[] = {0xb9, 0x23, 0x00, 0x00, 0x00, 0x8d, 0x51, 0xe1};
 	const uint8_t cmp23[] = {0x83, 0xfa, 0x23};
 	if (memcmp(at(kCountMov), mov23, sizeof(mov23)) != 0 || memcmp(at(kCountCmp), cmp23, sizeof(cmp23)) != 0 ||
 	    memcmp(at(kDraw), kDrawPrologue, sizeof(kDrawPrologue)) != 0 || memcmp(at(kStateList), kListPrologue, sizeof(kListPrologue)) != 0 ||
@@ -293,6 +294,9 @@ bool MenuTryInstall(unsigned char* base)
 	uint32_t count = (uint32_t)kRowCount;
 	uint8_t count8 = (uint8_t)kRowCount;
 	g_host->write_code(at(kCountMov) + 1, &count, 4);
+	// The compiler derives the key capture state (4) from the count: keep edx = 4.
+	int8_t stateFromCount = (int8_t)(4 - (int)kRowCount);
+	g_host->write_code(at(kCountMov) + 7, &stateFromCount, 1);
 	g_host->write_code(at(kCountCmp) + 2, &count8, 1);
 	uint8_t jmp[8] = {0xe9, 0, 0, 0, 0, 0x90, 0x90, 0x90};
 	int32_t rel = (int32_t)((uint8_t*)&Draw - (at(kDraw) + 5));
