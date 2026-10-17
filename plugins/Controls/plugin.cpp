@@ -22,6 +22,7 @@ bool g_zoomPending = false;
 bool g_controlsPending = false;
 bool g_promptsPending = false;
 bool g_menuPending = false;
+bool g_hadScoped = false; // controls.json has a "scoped" section (else the wheel zooms by default)
 
 void LoadSettings()
 {
@@ -52,7 +53,8 @@ void LoadSettings()
 			g_settings.flyTypes.push_back((int)t.GetInt(0));
 		}
 	}
-	for (const char* context : {"foot", "vs", "fly"}) {
+	g_hadScoped = root["scoped"].IsObject();
+	for (const char* context : {"foot", "vs", "fly", "scoped"}) {
 		for (const auto& remap : root[context].Items()) {
 			std::string source = remap.second.GetString(std::string());
 			if (!source.empty()) {
@@ -80,9 +82,11 @@ void SaveSettings()
 		"\t//   quick_turn, zoom, melee, gesture, teng, dodge\n"
 		"\t// VS actions: fire, secondary, zoom, get_out, brake, reload, quick_turn, dash, boost\n"
 		"\t// Flying VS (inherits vs unless set here): the VS actions plus ascend, descend.\n"
+		"\t// Scoped (on foot while zoomed, inherits foot): the foot actions plus zoom_in, zoom_out\n"
+		"\t//   (\"key:MOUSE_WUP\" / \"key:MOUSE_WDOWN\" = the mouse wheel).\n"
 		"\t// fly_types: VS types (unit id byte 2) that fly. log: log on-foot / VS changes.\n";
 	text += std::string("\t\"hold_to_aim\": ") + (g_settings.holdToAim ? "true" : "false") + ",\n";
-	for (const char* context : {"foot", "vs", "fly"}) {
+	for (const char* context : {"foot", "vs", "fly", "scoped"}) {
 		text += std::string("\t\"") + context + "\": {";
 		bool first = true;
 		for (const Remap& r : g_settings.remaps) {
@@ -122,6 +126,10 @@ extern "C" __declspec(dllexport) int lp2mod_load(const LP2ModHost* host)
 	}
 	g_host = host;
 	LoadSettings();
+	if (!g_hadScoped) {
+		g_settings.remaps.push_back({"scoped", "zoom_in", "key:MOUSE_WUP"});
+		g_settings.remaps.push_back({"scoped", "zoom_out", "key:MOUSE_WDOWN"});
+	}
 	g_zoomPending = true; // installed even when off, so the menu can switch it on
 	g_menuPending = true;
 	bool rules = ControlsLoadRules();

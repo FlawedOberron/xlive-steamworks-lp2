@@ -49,6 +49,8 @@ const RemapRow kRemapRows[] = {
 	{"vs", "get_out", "VS Get out"},
 	{"fly", "ascend", "Ascend"},
 	{"fly", "descend", "Descend"},
+	{"scoped", "zoom_in", "Zoom in"},
+	{"scoped", "zoom_out", "Zoom out"},
 };
 
 struct Row {
@@ -70,7 +72,8 @@ const Row kRows[] = {
 	{27, 0x20}, {28, 0x21}, {44, 0x23},                       // night vision, harmonizer, merged/support
 	{18, 0x14}, {19, 0x15}, {20, 0x16}, {21, 0x17}, {22, 0x18}, {23, 0x19}, {24, 0x1a}, {25, 0x1b}, // emotes
 	{0, kSlotHeader + 2},
-	{43, 0x1d}, {0, kSlotHoldToAim},                          // zoom in, hold to aim
+	{43, 0x1d}, {0, kSlotHoldToAim},                          // aim (the game's zoom in), hold to aim
+	{0, kSlotRemap + 5}, {0, kSlotRemap + 6},                 // zoom in / out steps
 	{0, kSlotHeader + 3},
 	{0, kSlotRemap + 0}, {0, kSlotRemap + 1}, {0, kSlotRemap + 2}, // VS secondary, zoom, get out
 	{42, 0x26}, {41, 0x27},                                   // reload VS right / left
@@ -169,7 +172,7 @@ bool g_captureArmed = false; // all keys were up since the capture started
 // The keycap text for a virtual key: the game's own tag when it knows the key, else its name.
 std::string KeyText(int vk)
 {
-	int mouse = vk == VK_LBUTTON ? 3 : vk == VK_RBUTTON ? 4 : vk == VK_MBUTTON ? 5 : -1;
+	int mouse = vk == VK_LBUTTON ? 3 : vk == VK_RBUTTON ? 4 : vk == VK_MBUTTON ? 5 : vk == 0x10c ? 12 : vk == 0x10d ? 13 : -1;
 	const uint8_t* records = (const uint8_t*)(uintptr_t)kKeyNames;
 	for (int i = 0; i < 100; i++) {
 		int recordVk = *(const int*)(records + i * 12 + 4);
@@ -332,6 +335,9 @@ void PollCapture(uint8_t* screen)
 			pressed = vk;
 			break;
 		}
+	}
+	if (!pressed && front) {
+		pressed = ControlsMousePressed(12) ? 0x10c : ControlsMousePressed(13) ? 0x10d : 0; // wheel
 	}
 	if (!g_captureArmed) {
 		g_captureArmed = pressed == 0;

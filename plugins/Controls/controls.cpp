@@ -49,8 +49,8 @@ const int kSetCount = 5;
 
 constexpr uint64_t W2(uint32_t bits) { return (uint64_t)bits << 32; }
 
-enum Context { kFoot, kVs, kFly, kContextCount };
-const char* const kContextNames[kContextCount] = {"foot", "vs", "fly"};
+enum Context { kFoot, kVs, kFly, kScoped, kContextCount };
+const char* const kContextNames[kContextCount] = {"foot", "vs", "fly", "scoped"};
 
 // An action as the pad shows it: any bit of test means the button is down; set is what the game
 // itself produces for it; clear is what a rule removes (bits shared with other actions are left
@@ -104,6 +104,17 @@ const Action kFlyActions[] = {
 	{"descend", W2(0x40000), W2(0x40000), W2(0x40000), 16},
 };
 
+// Scoped (on foot, zoomed in): the foot actions plus zoom steps (no pad bits: they step the zoom
+// level through zoom.cpp).
+const Action kScopedActions[] = {
+	{"zoom_in", 0, 0, 0, -1},
+	{"zoom_out", 0, 0, 0, -1},
+};
+
+// Mouse wheel "keys" (not virtual keys: read from the game's input, one pulse per notch).
+const int kVkWheelUp = 0x10c;
+const int kVkWheelDown = 0x10d;
+
 struct Rule {
 	const Action* dest;
 	const Action* source; // nullptr when the source is a key
@@ -116,6 +127,18 @@ std::vector<Rule> g_rules[kContextCount];
 using UpdateFn = void(__attribute__((thiscall)) *)(void*);
 UpdateFn g_update = nullptr;
 uint32_t g_optionsPtr = 0;
+uint32_t g_inputPtr = 0;   // input manager (FUN_00860f70 reads mouse codes from it), DX11 only for now
+uint32_t g_mouseFn = 0;
+
+// The game's "mouse code pressed this frame" (codes 12 / 13 = wheel up / down).
+bool MousePressed(int code)
+{
+	uint8_t* input = g_inputPtr ? *(uint8_t**)(uintptr_t)g_inputPtr : nullptr;
+	if (!input || !g_mouseFn) {
+		return false;
+	}
+	return ((bool(__attribute__((thiscall)) *)(uint8_t*, int))(uintptr_t)g_mouseFn)(input, code);
+}
 
 const Action* FindAction(Context context, const std::string& name)
 {
@@ -126,6 +149,14 @@ const Action* FindAction(Context context, const std::string& name)
 			}
 		}
 		context = kVs;
+	}
+	if (context == kScoped) {
+		for (const Action& a : kScopedActions) {
+			if (_stricmp(a.name, name.c_str()) == 0) {
+				return &a;
+			}
+		}
+		context = kFoot;
 	}
 	const Action* list = context == kVs ? kVsActions : kFootActions;
 	size_t count = context == kVs ? sizeof(kVsActions) / sizeof(kVsActions[0]) : sizeof(kFootActions) / sizeof(kFootActions[0]);
@@ -151,6 +182,7 @@ const KeyName kKeyNames[] = {
 	{"UP", VK_UP}, {"DOWN", VK_DOWN}, {"LEFT", VK_LEFT}, {"RIGHT", VK_RIGHT},
 	{"MOUSE_L", VK_LBUTTON}, {"MOUSE_R", VK_RBUTTON}, {"MOUSE_M", VK_MBUTTON},
 	{"MOUSE_X1", VK_XBUTTON1}, {"MOUSE4", VK_XBUTTON1}, {"MOUSE_X2", VK_XBUTTON2}, {"MOUSE5", VK_XBUTTON2},
+	{"MOUSE_WUP", kVkWheelUp}, {"WHEEL_UP", kVkWheelUp}, {"MOUSE_WDOWN", kVkWheelDown}, {"WHEEL_DOWN", kVkWheelDown},
 	{",", VK_OEM_COMMA}, {".", VK_OEM_PERIOD}, {"-", VK_OEM_MINUS}, {"=", VK_OEM_PLUS},
 	{";", VK_OEM_1}, {"/", VK_OEM_2}, {"`", VK_OEM_3}, {"[", VK_OEM_4}, {"\\", VK_OEM_5},
 	{"]", VK_OEM_6}, {"'", VK_OEM_7},
@@ -205,6 +237,10 @@ uint32_t BindingCode(int vk)
 		return 0x80000004;
 	case VK_MBUTTON:
 		return 0x80000005;
+	case kVkWheelUp:
+		return 0x8000000c;
+	case kVkWheelDown:
+		return 0x8000000d;
 	}
 	return (uint32_t)vk;
 }
@@ -229,7 +265,7 @@ uint64_t NativeClear(Context context, int vk)
 	if (context == kFly) {
 		scan(kFlyActions, sizeof(kFlyActions) / sizeof(kFlyActions[0]));
 	}
-	if (context == kFoot) {
+	if (context == kFoot || context == kScoped) {
 		scan(kFootActions, sizeof(kFootActions) / sizeof(kFootActions[0]));
 	}
 	else {
@@ -278,16 +314,20 @@ bool ControlsLoadRules()
 		}
 		any = true;
 	}
-	// Flying VSs inherit the VS rules whose action the fly section does not set itself.
-	for (const Rule& r : g_rules[kVs]) {
-		bool overridden = false;
-		for (const Rule& f : g_rules[kFly]) {
-			overridden |= _stricmp(f.dest->name, r.dest->name) == 0;
+	// Flying VSs inherit the VS rules, scoped the foot rules, unless they set the action themselves.
+	auto inherit = [](Context from, Context to) {
+		for (const Rule& r : g_rules[from]) {
+			bool overridden = false;
+			for (const Rule& f : g_rules[to]) {
+				overridden |= _stricmp(f.dest->name, r.dest->name) == 0;
+			}
+			if (!overridden) {
+				g_rules[to].push_back(r);
+			}
 		}
-		if (!overridden) {
-			g_rules[kFly].push_back(r);
-		}
-	}
+	};
+	inherit(kVs, kFly);
+	inherit(kFoot, kScoped);
 	return any;
 }
 
@@ -315,6 +355,9 @@ Context CurrentContext(uint8_t* pad)
 		}
 	}
 	Context context = fly ? kFly : vs ? kVs : kFoot;
+	if (context == kFoot && Alive(ride) && ZoomLevelOf(ride) > 0) {
+		context = kScoped;
+	}
 	if (g_settings.log) {
 		static uint8_t* lastUnit = nullptr;
 		static uint8_t* lastRide = nullptr;
@@ -460,7 +503,7 @@ void __attribute__((thiscall)) PadUpdate(uint8_t* self)
 		for (Rule& r : list) {
 			if (r.vk) {
 				r.wasDown = r.down;
-				r.down = front && (GetAsyncKeyState(r.vk) & 0x8000) != 0;
+				r.down = front && (r.vk >= 0x100 ? MousePressed(r.vk - 0x100) : (GetAsyncKeyState(r.vk) & 0x8000) != 0);
 			}
 		}
 	}
@@ -469,6 +512,17 @@ void __attribute__((thiscall)) PadUpdate(uint8_t* self)
 	const std::vector<Rule>& rules = g_rules[context];
 	uint64_t* sets = (uint64_t*)(self + kSetsOffset);
 	uint64_t before = sets[0];
+	// Zoom steps (scoped): a press of the source, before the rules clear its bits.
+	for (const Rule& r : rules) {
+		bool in = strcmp(r.dest->name, "zoom_in") == 0;
+		if (!in && strcmp(r.dest->name, "zoom_out") != 0) {
+			continue;
+		}
+		bool pressed = r.source ? (sets[1] & r.source->test) != 0 : r.vk >= 0x100 ? r.down : (r.down && !r.wasDown);
+		if (pressed) {
+			ZoomRequest(in ? 1 : -1);
+		}
+	}
 	if (!rules.empty()) {
 		uint64_t extraClear = 0;
 		for (const Rule& r : rules) {
@@ -514,6 +568,10 @@ bool ControlsTryInstall(unsigned char* base)
 	uint8_t* call = site + 6;
 	g_update = (UpdateFn)(call + 5 + *(int32_t*)(call + 1));
 	g_optionsPtr = site == base + kSiteRvas[0] ? kOptionsPtrs[0] : kOptionsPtrs[1];
+	if (site == base + kSiteRvas[0]) {
+		g_inputPtr = 0x18de7f4; // LP2DX11.exe
+		g_mouseFn = 0x860f70;
+	}
 	int32_t rel = (int32_t)((uint8_t*)&PadUpdate - (call + 5));
 	DWORD old = 0;
 	if (!VirtualProtect(call + 1, 4, PAGE_EXECUTE_READWRITE, &old)) {
@@ -631,6 +689,11 @@ void ControlsSetKey(const char* context, const char* dest, int vk)
 	if (g_messageSystem && g_refresh) {
 		PromptRefresh(g_messageSystem);
 	}
+}
+
+bool ControlsMousePressed(int code)
+{
+	return MousePressed(code);
 }
 
 }

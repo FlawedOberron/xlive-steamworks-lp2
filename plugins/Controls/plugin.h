@@ -38,6 +38,10 @@ inline bool InImage(const unsigned char* base, unsigned rva, unsigned size)
 
 // hold to aim (zoom.cpp): true once the zoom check is hooked.
 bool HoldZoomTryInstall(unsigned char* base);
+// The character's zoom level (0 = not zoomed, -1 = no zoomable weapon) and a zoom step request
+// (+1 in, -1 out) that the zoom check carries out through the game's own step.
+int ZoomLevelOf(unsigned char* character);
+void ZoomRequest(int step);
 // Split controls (controls.cpp): true if any rule applies; true once the pad update is hooked.
 bool ControlsLoadRules();
 bool ControlsTryInstall(unsigned char* base);
@@ -53,6 +57,8 @@ int ControlsRuleFor(const char* context, const char* dest, int* sourceSlot);
 // Puts dest on a key in context (0 removes the rule), saves and applies it.
 void ControlsSetKey(const char* context, const char* dest, int vk);
 std::string ControlsKeyName(int vk);
+// The game's mouse code pressed this frame (12 / 13 = wheel up / down); false where unmapped.
+bool ControlsMousePressed(int code);
 // Prompts follow the rules (controls.cpp): true once the prompt refresh is hooked.
 bool PromptsTryInstall(unsigned char* base);
 

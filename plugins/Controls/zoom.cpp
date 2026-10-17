@@ -49,42 +49,87 @@ const Layout* g_layout = nullptr;
 using CheckFn = bool(__attribute__((thiscall)) *)(void*);
 using OwnerFn = uint8_t*(__attribute__((thiscall)) *)(void*);
 
+int g_zoomRequest = 0; // scoped zoom in (+1) / out (-1), from the Controls rules; taken by ZoomCheck
+
+// The character's zoom state: its current level (0 = not zoomed), the weapon's level count and the
+// object holding the level; -1 when the character has no zoomable weapon.
+int ZoomState(uint8_t* character, uint8_t** ownerOut, int* levelsOut)
+{
+	if (!g_layout || !character) {
+		return -1;
+	}
+	const Layout& L = *g_layout;
+	uint8_t* owner = ((OwnerFn)(uintptr_t)L.ownerFn)(character);
+	if (!owner) {
+		return -1;
+	}
+	uint32_t kind = *(uint32_t*)(owner + 4) & 7;
+	uint8_t* weapon = *(uint8_t**)(owner + L.weapon);
+	if ((kind != 1 && kind != 2) || !weapon) {
+		return -1;
+	}
+	int levels = ((uint8_t*)(uintptr_t)L.zoomLevels)[weapon[0x4b] * 8];
+	if (levels < 1) {
+		return -1;
+	}
+	*ownerOut = owner;
+	*levelsOut = levels;
+	return owner[L.level];
+}
+
 bool __attribute__((thiscall)) ZoomCheck(uint8_t* self, uint8_t* character)
 {
 	auto check = (CheckFn)(*(void***)self)[0x104 / 4];
 	if (check(self)) {
+		g_zoomRequest = 0;
 		return true;
 	}
-	if (!g_settings.holdToAim) {
-		return false; // toggled off in the menu: the game's own toggle zoom
+	const Layout& L = *g_layout;
+	uint8_t* owner = nullptr;
+	int levels = 0;
+	int level = ZoomState(character, &owner, &levels);
+	// Zoom steps: levels run 1..levels-1 and the game's step adds one (wrapping to 0), so zoom in is
+	// a reported press below the top level and zoom out sets the level two lower first.
+	int request = g_zoomRequest;
+	g_zoomRequest = 0;
+	if (request && level > 0) {
+		if (request > 0 && level < levels - 1) {
+			return true;
+		}
+		if (request < 0 && level > 1) {
+			owner[L.level] = (uint8_t)(level - 2);
+			return true;
+		}
+	}
+	if (!g_settings.holdToAim || level <= 0) {
+		return false; // toggle zoom (hold to aim off), or not zoomed
 	}
 	uint8_t index = self[0x84];
-	if (index >= 16 || !character) {
+	if (index >= 16) {
 		return false;
 	}
-	const Layout& L = *g_layout;
 	uint8_t* pad = ((uint8_t**)(uintptr_t)L.pads)[index];
 	if (!pad || (*(uint32_t*)(pad + 0x3b8) & kZoomHeld)) {
 		return false; // no pad, or the button is still held
-	}
-	uint8_t* owner = ((OwnerFn)(uintptr_t)L.ownerFn)(character);
-	if (!owner) {
-		return false;
-	}
-	uint32_t kind = *(uint32_t*)(owner + 4) & 7;
-	uint8_t* weapon = *(uint8_t**)(owner + L.weapon);
-	if ((kind != 1 && kind != 2) || !weapon || owner[L.level] == 0) {
-		return false;
-	}
-	uint8_t levels = ((uint8_t*)(uintptr_t)L.zoomLevels)[weapon[0x4b] * 8];
-	if (levels < 1) {
-		return false;
 	}
 	owner[L.level] = (uint8_t)(levels - 1); // the step from the last level wraps to 0
 	return true;
 }
 
 }
+
+int ZoomLevelOf(unsigned char* character)
+{
+	uint8_t* owner = nullptr;
+	int levels = 0;
+	return ZoomState(character, &owner, &levels);
+}
+
+void ZoomRequest(int step)
+{
+	g_zoomRequest = step;
+}
+
 
 bool HoldZoomTryInstall(unsigned char* base)
 {
