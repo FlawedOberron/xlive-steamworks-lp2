@@ -43,8 +43,16 @@ bool ControlsLoadRules();
 bool ControlsTryInstall(unsigned char* base);
 // Key config menu (menu.cpp): true once done (or not mapped for this exe).
 bool MenuTryInstall(unsigned char* base);
-// Writes g_settings.holdToAim into controls.json (plugin.cpp).
-void SaveHoldToAim();
+// Writes g_settings to controls.json (plugin.cpp).
+void SaveSettings();
+// For the menu (controls.cpp). Slot = key config slot of an action in a context (-1: none).
+int ControlsActionSlot(const char* context, const char* name);
+// The rule for dest in context: returns its key (> 0), 0 when it borrows an action (*sourceSlot =
+// that action's slot), -1 when there is none.
+int ControlsRuleFor(const char* context, const char* dest, int* sourceSlot);
+// Puts dest on a key in context (0 removes the rule), saves and applies it.
+void ControlsSetKey(const char* context, const char* dest, int vk);
+std::string ControlsKeyName(int vk);
 // Prompts follow the rules (controls.cpp): true once the prompt refresh is hooked.
 bool PromptsTryInstall(unsigned char* base);
 

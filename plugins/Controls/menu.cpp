@@ -6,10 +6,12 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <string>
 #include <vector>
 
 // Key configuration menu: the "Controls" page is regrouped under headers (Shared, On Foot, Scoped,
-// VS) and gains a "Hold to aim" On/Off row. LP2DX11.exe only for now.
+// VS, Flying VS) and gains a "Hold to aim" On/Off row and key rows for the Controls rules (VS
+// secondary / zoom / get out, ascend, descend) with their own key capture. LP2DX11.exe only for now.
 //
 // The page (flash\option\id501) is driven by a table of {u32 label, u32 slot} rows at 0x1636c70
 // (35 rows; label = index into the u32 message id table 0x1636dd0, slot = key binding slot, 0x2e and
@@ -33,13 +35,28 @@ namespace {
 
 const uint32_t kSlotHeader = 0x40; // + header index
 const uint32_t kSlotHoldToAim = 0x50;
+const uint32_t kSlotRemap = 0x60; // + index into kRemapRows
+
+// Rows that set a Controls rule: the action dest in context goes on a key (our own capture).
+struct RemapRow {
+	const char* context;
+	const char* dest;
+	const char* label;
+};
+const RemapRow kRemapRows[] = {
+	{"vs", "secondary", "VS Secondary weapon"},
+	{"vs", "zoom", "VS Zoom"},
+	{"vs", "get_out", "VS Get out"},
+	{"fly", "ascend", "Ascend"},
+	{"fly", "descend", "Descend"},
+};
 
 struct Row {
 	uint32_t label; // game label index, or text index for ours
 	uint32_t slot;
 };
 
-const char* const kHeaders[] = {"- SHARED -", "- ON FOOT -", "- SCOPED -", "- VS -"};
+const char* const kHeaders[] = {"- SHARED -", "- ON FOOT -", "- SCOPED -", "- VS -", "- FLYING VS -"};
 
 // Game rows: label index (into 0x1636dd0), slot. From the original table.
 const Row kRows[] = {
@@ -55,7 +72,10 @@ const Row kRows[] = {
 	{0, kSlotHeader + 2},
 	{43, 0x1d}, {0, kSlotHoldToAim},                          // zoom in, hold to aim
 	{0, kSlotHeader + 3},
+	{0, kSlotRemap + 0}, {0, kSlotRemap + 1}, {0, kSlotRemap + 2}, // VS secondary, zoom, get out
 	{42, 0x26}, {41, 0x27},                                   // reload VS right / left
+	{0, kSlotHeader + 4},
+	{0, kSlotRemap + 3}, {0, kSlotRemap + 4},                 // ascend, descend
 };
 const size_t kRowCount = sizeof(kRows) / sizeof(kRows[0]);
 Row g_table[kRowCount + 8]; // padding: the original table was followed by more rows
@@ -74,6 +94,7 @@ const uint32_t kMsgPc = 0x1373294;  // "MsgPC" message file name
 const uint32_t kMsgMgr = 0x18e0860; // message / input manager pointer
 const uint32_t kSetList = 0xf04d90, kSetListData = 0xf04e10, kSetArrowState = 0xf04f40;
 const uint32_t kMessage = 0x77b280, kKeyName = 0xf04b60;
+const uint32_t kKeyNames = 0x17fd228; // 100 x {char* "<KEY_..>", i32 virtual key, i32 mouse code}
 
 const uint8_t kDrawPrologue[] = {0x83, 0xec, 0x20, 0x53, 0x55, 0x56, 0x8b, 0xf1};
 const uint8_t kListPrologue[] = {0x83, 0xec, 0x0c, 0x56, 0x6a, 0x16, 0x6a, 0x4a, 0x8b, 0xf1};
@@ -105,6 +126,46 @@ const Row* RowAt(int row)
 	return row >= 0 && row < (int)kRowCount ? &g_table[row] : nullptr;
 }
 
+int g_captureRow = -1;   // row whose key is being captured
+bool g_captureArmed = false; // all keys were up since the capture started
+
+// The keycap text for a virtual key: the game's own tag when it knows the key, else its name.
+std::string KeyText(int vk)
+{
+	int mouse = vk == VK_LBUTTON ? 3 : vk == VK_RBUTTON ? 4 : vk == VK_MBUTTON ? 5 : -1;
+	const uint8_t* records = (const uint8_t*)(uintptr_t)kKeyNames;
+	for (int i = 0; i < 100; i++) {
+		int recordVk = *(const int*)(records + i * 12 + 4);
+		int recordMouse = *(const int*)(records + i * 12 + 8);
+		if ((mouse < 0 && recordVk == vk) || (mouse >= 0 && recordMouse == mouse)) {
+			return *(const char* const*)(records + i * 12);
+		}
+	}
+	return ControlsKeyName(vk).substr(4);
+}
+
+std::string BindingText(uint8_t* screen, int slot)
+{
+	if (slot < 0 || slot >= 45) {
+		return "-";
+	}
+	const char* key = ((KeyNameFn)(uintptr_t)kKeyName)((uint32_t*)(screen + 0x1e0 + slot * 4));
+	return key ? key : "";
+}
+
+std::string RemapText(uint8_t* screen, const RemapRow& r)
+{
+	int sourceSlot = -1;
+	int vk = ControlsRuleFor(r.context, r.dest, &sourceSlot);
+	if (vk > 0) {
+		return KeyText(vk);
+	}
+	if (vk == 0) {
+		return BindingText(screen, sourceSlot);
+	}
+	return BindingText(screen, ControlsActionSlot(r.context, r.dest)); // the game's own key
+}
+
 void __attribute__((thiscall)) Draw(uint8_t* screen)
 {
 	auto setList = (RowTextFn)(uintptr_t)kSetList;
@@ -122,6 +183,14 @@ void __attribute__((thiscall)) Draw(uint8_t* screen)
 		if (row->slot >= kSlotHeader && row->slot < kSlotHeader + 0x10) {
 			setList(screen, r, kHeaders[row->slot - kSlotHeader], 1);
 			setData(screen, r, "", 0);
+			setArrow(screen, r, 0, 0);
+			continue;
+		}
+		if (row->slot >= kSlotRemap && row->slot < kSlotRemap + sizeof(kRemapRows) / sizeof(kRemapRows[0])) {
+			const RemapRow& remap = kRemapRows[row->slot - kSlotRemap];
+			setList(screen, r, remap.label, 1);
+			std::string text = first + r == g_captureRow ? std::string("?") : RemapText(screen, remap);
+			setData(screen, r, text.c_str(), 1);
 			setArrow(screen, r, 0, 0);
 			continue;
 		}
@@ -158,7 +227,7 @@ void __attribute__((thiscall)) Draw(uint8_t* screen)
 void ToggleHoldToAim(uint8_t* screen)
 {
 	g_settings.holdToAim = !g_settings.holdToAim;
-	SaveHoldToAim();
+	SaveSettings();
 	Draw(screen);
 	LOG_INFO("menu: hold to aim %s.", g_settings.holdToAim ? "on" : "off");
 }
@@ -204,8 +273,54 @@ bool LeftOrRight()
 	return input && (*(uint32_t*)(input + 0x330) & 0x300) != 0;
 }
 
+bool GameInFront()
+{
+	DWORD pid = 0;
+	GetWindowThreadProcessId(GetForegroundWindow(), &pid);
+	return pid == GetCurrentProcessId();
+}
+
+// Our key capture: waits until every key is up, then takes the next key or mouse button.
+// Esc cancels, Delete puts the action back on the game's own key.
+void PollCapture(uint8_t* screen)
+{
+	bool front = GameInFront();
+	int pressed = 0;
+	for (int vk = 1; vk < 0xff; vk++) {
+		if (vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_MENU) {
+			continue; // the left/right variants are reported too
+		}
+		if (front && (GetAsyncKeyState(vk) & 0x8000)) {
+			pressed = vk;
+			break;
+		}
+	}
+	if (!g_captureArmed) {
+		g_captureArmed = pressed == 0;
+		return;
+	}
+	if (!pressed) {
+		return;
+	}
+	const RemapRow& remap = kRemapRows[g_table[g_captureRow].slot - kSlotRemap];
+	g_captureRow = -1;
+	if (pressed == VK_DELETE) {
+		ControlsSetKey(remap.context, remap.dest, 0);
+		LOG_INFO("menu: %s %s back on the game's key.", remap.context, remap.dest);
+	}
+	else if (pressed != VK_ESCAPE) {
+		ControlsSetKey(remap.context, remap.dest, pressed);
+		LOG_INFO("menu: %s %s on %s.", remap.context, remap.dest, ControlsKeyName(pressed).c_str());
+	}
+	Draw(screen);
+}
+
 void __attribute__((thiscall)) ListState(uint8_t* screen)
 {
+	if (g_captureRow >= 0) {
+		PollCapture(screen);
+		return; // the menu ignores input while we capture
+	}
 	const Row* row = RowAt(Cursor(screen));
 	if (row && row->slot == kSlotHoldToAim && LeftOrRight()) {
 		ToggleHoldToAim(screen);
@@ -223,9 +338,14 @@ void __attribute__((thiscall)) StartCapture(uint8_t* screen, int state)
 {
 	const Row* row = RowAt(Cursor(screen));
 	LOG_INFO("menu: state %d requested at row %d (slot 0x%x), from state %d.", state, Cursor(screen), row ? row->slot : 0xffff, State(screen));
-	if (state == 4 && row && (row->slot >= kSlotHeader || row->slot == kSlotHoldToAim)) {
+	if (state == 4 && row && row->slot >= kSlotHeader) {
 		if (row->slot == kSlotHoldToAim) {
 			ToggleHoldToAim(screen);
+		}
+		else if (row->slot >= kSlotRemap) {
+			g_captureRow = Cursor(screen);
+			g_captureArmed = false;
+			Draw(screen);
 		}
 		return; // headers: nothing to bind
 	}

@@ -4,6 +4,8 @@
 
 #include <windows.h>
 
+#include <stdio.h>
+
 #include <string>
 
 // Settings: controls.json next to Controls.dll. Defaults when the file is missing:
@@ -63,41 +65,45 @@ void LoadSettings()
 }
 
 
-void SaveHoldToAim()
+void SaveSettings()
 {
+	std::string text =
+		"{\n"
+		"\t// Written by the Controls plugin (the key config menu saves here too). Hand edits are kept\n"
+		"\t// as values, comments are rewritten.\n"
+		"\t//\n"
+		"\t// hold_to_aim: zoom while the zoom button is held; release to unzoom (on foot).\n"
+		"\t// foot / vs / fly: an action takes the button of another action, or a key:\n"
+		"\t//   \"key:F\", \"key:5\", \"key:F13\", \"key:NUM5\", \"key:MOUSE_X1\", \"key:MOUSE_R\", \"key:0x52\".\n"
+		"\t//   A key takes over that key in its context (what the game puts on it there is dropped).\n"
+		"\t// Foot actions: jump, grapple, next_weapon, crouch, fire, grenade, reload, action,\n"
+		"\t//   quick_turn, zoom, melee, gesture, teng, dodge\n"
+		"\t// VS actions: fire, secondary, zoom, get_out, brake, reload, quick_turn, dash, boost\n"
+		"\t// Flying VS (inherits vs unless set here): the VS actions plus ascend, descend.\n"
+		"\t// fly_types: VS types (unit id byte 2) that fly. log: log on-foot / VS changes.\n";
+	text += std::string("\t\"hold_to_aim\": ") + (g_settings.holdToAim ? "true" : "false") + ",\n";
+	for (const char* context : {"foot", "vs", "fly"}) {
+		text += std::string("\t\"") + context + "\": {";
+		bool first = true;
+		for (const Remap& r : g_settings.remaps) {
+			if (r.context == context) {
+				text += std::string(first ? "\n" : ",\n") + "\t\t\"" + r.dest + "\": \"" + r.source + "\"";
+				first = false;
+			}
+		}
+		text += first ? "},\n" : "\n\t},\n";
+	}
+	text += "\t\"fly_types\": [";
+	for (size_t i = 0; i < g_settings.flyTypes.size(); i++) {
+		char n[16];
+		snprintf(n, sizeof(n), "%s%d", i ? ", " : "", g_settings.flyTypes[i]);
+		text += n;
+	}
+	text += std::string("],\n\t\"log\": ") + (g_settings.log ? "true" : "false") + "\n}\n";
 	std::wstring path = std::wstring(g_host->mod_dir) + L"controls.json";
-	std::string text;
-	HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
-	if (file != INVALID_HANDLE_VALUE) {
-		char buffer[4096];
-		DWORD read = 0;
-		while (ReadFile(file, buffer, sizeof(buffer), &read, nullptr) && read > 0) {
-			text.append(buffer, read);
-		}
-		CloseHandle(file);
-	}
-	const char* value = g_settings.holdToAim ? "true" : "false";
-	size_t key = text.find("\"hold_to_aim\"");
-	if (key != std::string::npos) {
-		size_t colon = text.find(':', key);
-		size_t start = text.find_first_not_of(" \t", colon + 1);
-		size_t end = text.find_first_of(",\r\n}", start);
-		if (colon == std::string::npos || start == std::string::npos || end == std::string::npos) {
-			return;
-		}
-		text.replace(start, end - start, value);
-	}
-	else {
-		size_t brace = text.find('{');
-		if (brace == std::string::npos) {
-			text = "{\n}\n";
-			brace = 0;
-		}
-		text.insert(brace + 1, std::string("\n\t\"hold_to_aim\": ") + value + (text.find(':', brace) != std::string::npos ? "," : ""));
-	}
-	file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+	HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
 	if (file == INVALID_HANDLE_VALUE) {
-		LOG_WARN("menu: could not save controls.json (%lu).", GetLastError());
+		LOG_WARN("could not save controls.json (%lu).", GetLastError());
 		return;
 	}
 	DWORD written = 0;

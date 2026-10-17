@@ -41,6 +41,9 @@ namespace {
 const uint8_t kSiteBytes[] = {0x8d, 0x8e, 0xb0, 0x03, 0x00, 0x00, 0xe8, 0, 0, 0, 0, 0xe8};
 const uint8_t kSiteMask[] = {1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1};
 const uint32_t kSiteRvas[] = {0xb8d96c /* DX11 */, 0xb7d9cc /* DX9 */};
+// Pointer to the options object; its +0x68 holds the 45 key bindings (u32: virtual-key code, or
+// mouse code | 0x80000000), copied there when the key config menu closes.
+const uint32_t kOptionsPtrs[] = {0x1852238 /* DX11 */, 0x1842198 /* DX9 */};
 const uint32_t kSetsOffset = 0x3b8 - 0x3b0; // from ecx (pad+0x3b0)
 const int kSetCount = 5;
 
@@ -80,11 +83,11 @@ const Action kFootActions[] = {
 };
 const Action kVsActions[] = {
 	{"fire", 0x100, 0x100, 0x100, 7},
-	{"secondary", 0x200, 0x200 | W2(0x400000), 0x200 | W2(0x400000), 8},
+	{"secondary", 0x200, 0x200 | W2(0x400000), 0x200 | W2(0x400000), -1}, // native button unknown
 	{"grenade", 0x200, 0x200 | W2(0x400000), 0x200 | W2(0x400000), 8}, // same button as secondary
 	{"zoom", 0x100000, 0x100000, 0x100000, 29},
 	// In a VS the grenade button gives 0x1 (get out), not the grenade bits (2026-10-17 bit log).
-	{"get_out", 0x1, 0x1, 0x1, -1},
+	{"get_out", 0x1, 0x1, 0x1, 8},
 	{"brake", 0x20, 0x20, 0x20, 9},
 	{"crouch", 0x20, 0x20, 0x20, 9},
 	{"reload", 0x400, 0x400 | 0x800 | W2(0x200000), 0x400 | 0x800 | W2(0x200000), 28},
@@ -112,6 +115,7 @@ std::vector<Rule> g_rules[kContextCount];
 
 using UpdateFn = void(__attribute__((thiscall)) *)(void*);
 UpdateFn g_update = nullptr;
+uint32_t g_optionsPtr = 0;
 
 const Action* FindAction(Context context, const std::string& name)
 {
@@ -189,6 +193,49 @@ bool GameInFront()
 	DWORD pid = 0;
 	GetWindowThreadProcessId(GetForegroundWindow(), &pid);
 	return pid == GetCurrentProcessId();
+}
+
+// The game's binding code for a virtual key (mouse buttons have their own codes).
+uint32_t BindingCode(int vk)
+{
+	switch (vk) {
+	case VK_LBUTTON:
+		return 0x80000003;
+	case VK_RBUTTON:
+		return 0x80000004;
+	case VK_MBUTTON:
+		return 0x80000005;
+	}
+	return (uint32_t)vk;
+}
+
+// A key source takes its key over in its context: the actions the game itself puts on that key
+// there are dropped (e.g. right click no longer zooms in a VS once it fires the second weapon).
+uint64_t NativeClear(Context context, int vk)
+{
+	uint8_t* options = g_optionsPtr ? *(uint8_t**)(uintptr_t)g_optionsPtr : nullptr;
+	if (!options) {
+		return 0;
+	}
+	uint32_t code = BindingCode(vk);
+	uint64_t clear = 0;
+	auto scan = [&](const Action* list, size_t count) {
+		for (size_t i = 0; i < count; i++) {
+			if (list[i].slot >= 0 && *(uint32_t*)(options + 0x68 + list[i].slot * 4) == code) {
+				clear |= list[i].clear;
+			}
+		}
+	};
+	if (context == kFly) {
+		scan(kFlyActions, sizeof(kFlyActions) / sizeof(kFlyActions[0]));
+	}
+	if (context == kFoot) {
+		scan(kFootActions, sizeof(kFootActions) / sizeof(kFootActions[0]));
+	}
+	else {
+		scan(kVsActions, sizeof(kVsActions) / sizeof(kVsActions[0]));
+	}
+	return clear;
 }
 
 }
@@ -282,12 +329,12 @@ Context CurrentContext(uint8_t* pad)
 	return context;
 }
 
-void Remap(uint64_t* sets, const std::vector<Rule>& rules)
+void ApplyRules(uint64_t* sets, const std::vector<Rule>& rules, uint64_t extraClear)
 {
 	uint64_t snap[kSetCount];
 	memcpy(snap, sets, sizeof(snap));
 	for (int k = 0; k < kSetCount; k++) {
-		uint64_t clear = 0;
+		uint64_t clear = extraClear;
 		for (const Rule& r : rules) {
 			for (const Action* a : {r.dest, r.source}) {
 				if (!a) {
@@ -423,7 +470,13 @@ void __attribute__((thiscall)) PadUpdate(uint8_t* self)
 	uint64_t* sets = (uint64_t*)(self + kSetsOffset);
 	uint64_t before = sets[0];
 	if (!rules.empty()) {
-		Remap(sets, rules);
+		uint64_t extraClear = 0;
+		for (const Rule& r : rules) {
+			if (r.vk) {
+				extraClear |= NativeClear(context, r.vk);
+			}
+		}
+		ApplyRules(sets, rules, extraClear);
 	}
 	// With "log": true, every change of the held bits in a VS (game's, then after the rules), to
 	// map buttons that are not known yet.
@@ -460,6 +513,7 @@ bool ControlsTryInstall(unsigned char* base)
 	}
 	uint8_t* call = site + 6;
 	g_update = (UpdateFn)(call + 5 + *(int32_t*)(call + 1));
+	g_optionsPtr = site == base + kSiteRvas[0] ? kOptionsPtrs[0] : kOptionsPtrs[1];
 	int32_t rel = (int32_t)((uint8_t*)&PadUpdate - (call + 5));
 	DWORD old = 0;
 	if (!VirtualProtect(call + 1, 4, PAGE_EXECUTE_READWRITE, &old)) {
@@ -503,6 +557,80 @@ bool PromptsTryInstall(unsigned char* base)
 	}
 	LOG_INFO("prompts: refresh hooked at 0x%p.", fn);
 	return true;
+}
+
+// --- For the menu.
+
+int ControlsActionSlot(const char* context, const char* name)
+{
+	for (int c = 0; c < kContextCount; c++) {
+		if (_stricmp(context, kContextNames[c]) == 0) {
+			const Action* a = FindAction((Context)c, name);
+			return a ? a->slot : -1;
+		}
+	}
+	return -1;
+}
+
+int ControlsRuleFor(const char* context, const char* dest, int* sourceSlot)
+{
+	for (const Remap& r : g_settings.remaps) {
+		if (_stricmp(r.context.c_str(), context) == 0 && _stricmp(r.dest.c_str(), dest) == 0) {
+			int vk = ParseKey(r.source);
+			if (vk > 0) {
+				return vk;
+			}
+			*sourceSlot = ControlsActionSlot(context, r.source.c_str());
+			return 0;
+		}
+	}
+	return -1;
+}
+
+std::string ControlsKeyName(int vk)
+{
+	char text[16];
+	if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) {
+		snprintf(text, sizeof(text), "key:%c", vk);
+		return text;
+	}
+	if (vk >= VK_F1 && vk <= VK_F24) {
+		snprintf(text, sizeof(text), "key:F%d", vk - VK_F1 + 1);
+		return text;
+	}
+	if (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9) {
+		snprintf(text, sizeof(text), "key:NUM%d", vk - VK_NUMPAD0);
+		return text;
+	}
+	for (const KeyName& k : kKeyNames) {
+		if (k.vk == vk) {
+			return std::string("key:") + k.name;
+		}
+	}
+	snprintf(text, sizeof(text), "key:0x%02X", vk);
+	return text;
+}
+
+void ControlsSetKey(const char* context, const char* dest, int vk)
+{
+	auto& remaps = g_settings.remaps;
+	for (size_t i = 0; i < remaps.size(); i++) {
+		if (_stricmp(remaps[i].context.c_str(), context) == 0 && _stricmp(remaps[i].dest.c_str(), dest) == 0) {
+			remaps.erase(remaps.begin() + i);
+			break;
+		}
+	}
+	if (vk > 0) {
+		remaps.push_back({context, dest, ControlsKeyName(vk)});
+	}
+	for (std::vector<Rule>& list : g_rules) {
+		list.clear();
+	}
+	ControlsLoadRules();
+	SaveSettings();
+	if (g_messageSystem && g_refresh) {
+		PromptRefresh(g_messageSystem);
+	}
 }
 
 }
