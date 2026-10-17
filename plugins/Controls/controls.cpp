@@ -82,7 +82,8 @@ const Action kVsActions[] = {
 	{"fire", 0x100, 0x100, 0x100},
 	{"secondary", 0x200, 0x200 | W2(0x400000), 0x200 | W2(0x400000)},
 	{"grenade", 0x200, 0x200 | W2(0x400000), 0x200 | W2(0x400000)}, // same button as secondary
-	{"zoom", 0x100000, 0x100000 | 0x1, 0x100000, 0x1, 0x10 | 0x1000},
+	// 0x1 also comes with zoom in a VS, but get out shares it (and may need it held): never cleared.
+	{"zoom", 0x100000, 0x100000 | 0x1, 0x100000},
 	{"brake", 0x20, 0x20, 0x20},
 	{"crouch", 0x20, 0x20, 0x20},
 	{"reload", 0x400, 0x400 | 0x800 | W2(0x200000), 0x400 | 0x800 | W2(0x200000)},
@@ -300,9 +301,19 @@ void __attribute__((thiscall)) PadUpdate(uint8_t* self)
 			}
 		}
 	}
-	const std::vector<Rule>& rules = g_rules[CurrentContext(pad)];
+	Context context = CurrentContext(pad);
+	const std::vector<Rule>& rules = g_rules[context];
+	uint64_t* sets = (uint64_t*)(self + kSetsOffset);
+	uint64_t before = sets[0];
 	if (!rules.empty()) {
-		Remap((uint64_t*)(self + kSetsOffset), rules);
+		Remap(sets, rules);
+	}
+	// With "log": true, every change of the held bits in a VS (game's, then after the rules), to
+	// map buttons that are not known yet.
+	static uint64_t lastHeld = 0;
+	if (g_settings.log && context == kVs && before != lastHeld) {
+		lastHeld = before;
+		LOG_INFO("vs held: game w1 %08x w2 %08x -> w1 %08x w2 %08x.", (uint32_t)before, (uint32_t)(before >> 32), (uint32_t)sets[0], (uint32_t)(sets[0] >> 32));
 	}
 }
 
