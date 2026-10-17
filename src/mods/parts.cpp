@@ -253,7 +253,7 @@ const char* const kPrefixes[kPartSlotCount] = {"hd", "bd", "bk", "lg"};
 const int kSnameCategory[kPartSlotCount] = {1, 2, 3, 4};  // head, body, back, legs
 const int kSnameFloats[kPartSlotCount] = {3, 3, 12, 0};
 const int kLastItem = 69;
-const char* const kGenVersion = "lp2-partpkg 3";
+const char* const kGenVersion = "lp2-partpkg 4";
 
 std::once_flag g_pkgOnce;
 std::vector<PartPackage> g_packages;
@@ -351,7 +351,7 @@ std::string FileStamp(const std::wstring& path)
 
 // The carrier route: the part's model and every texture it names, as loose files under a path of
 // our own (model\hm\lpc\<hash>\<pfx><hash>...), served by the overlay; MT loads a resource from a
-// loose nativePC file when no archive has it. Texture names in the model sit in fixed 64-byte
+// loose nativePC file when no archive has it (loose extensions: .mod models, .tex textures). Texture names in the model sit in fixed 64-byte
 // records, so they can be rewritten to any name that fits.
 std::wstring LooseRoot()
 {
@@ -390,7 +390,7 @@ bool BuildLoose(const std::string& base, const Bytes& modelIn, const std::vector
 		if (!tex) {
 			continue; // not one of the part's own textures: keep the game's path
 		}
-		size_t at = name.find(tmpl);
+		size_t at = name.rfind(tmpl);
 		std::string tail = at == std::string::npos ? "_" + std::to_string(i) : name.substr(at + tmpl.size());
 		if (isColour) {
 			tail = "_BM-00_A";
@@ -401,17 +401,17 @@ bool BuildLoose(const std::string& base, const Bytes& modelIn, const std::vector
 		}
 		memset(rec, 0, 64);
 		memcpy(rec, loose.data(), loose.size());
-		if (!WriteWholeFile(LooseRoot() + L"nativePC\\" + Utf8ToWide(loose.c_str()) + L".rTexture", tex->data)) {
+		if (!WriteWholeFile(LooseRoot() + L"nativePC\\" + Utf8ToWide(loose.c_str()) + L".tex", tex->data)) {
 			return false;
 		}
 	}
 	// the colour map is also asked for on its own (kind 1): always provide it
 	for (const ArcEntry& e : textures) {
 		if (_stricmp(e.name.c_str(), colourName.c_str()) == 0) {
-			WriteWholeFile(LooseRoot() + L"nativePC\\" + Utf8ToWide((base + "_BM-00_A").c_str()) + L".rTexture", e.data);
+			WriteWholeFile(LooseRoot() + L"nativePC\\" + Utf8ToWide((base + "_BM-00_A").c_str()) + L".tex", e.data);
 		}
 	}
-	return WriteWholeFile(LooseRoot() + L"nativePC\\" + Utf8ToWide(base.c_str()) + L".rModel", model);
+	return WriteWholeFile(LooseRoot() + L"nativePC\\" + Utf8ToWide(base.c_str()) + L".mod", model);
 }
 
 bool BuildPackage(const PartSet& set, int slot, int item, PartPackage* out)

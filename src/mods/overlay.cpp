@@ -186,6 +186,13 @@ const std::wstring* Redirect(const std::wstring& path)
 		found = generated;
 	}
 	if (!found) {
+		// custom part loose files (model\hm\lpc\): log misses too, they show the name the game wants
+		if (rel.find(L"\\lpc\\") != std::wstring::npos) {
+			std::lock_guard<std::mutex> lock(g_loggedMutex);
+			if (g_logged.insert(rel).second) {
+				XLS_LOG_WARN("mods: part file not found: %s", WideToUtf8(rel.c_str()).c_str());
+			}
+		}
 		return nullptr;
 	}
 	std::lock_guard<std::mutex> lock(g_loggedMutex);
