@@ -117,6 +117,20 @@ void LoadFolder(const std::wstring& dir, const std::wstring& label)
 		}
 		set.models[s] = path;
 		set.templates[s] = part["template"].GetString(std::string());
+		for (const auto& tex : part["textures"].Items()) {
+			std::string f = tex.second.GetString(std::string());
+			if (f.empty() || f.find_first_of("/\\:") != std::string::npos) {
+				XLS_LOG_WARN("mods: parts %ls: %s: texture %s must be a plain file name.", label.c_str(), kSlotNames[s], tex.first.c_str());
+				continue;
+			}
+			std::wstring tp = dir + Utf8ToWide(f.c_str());
+			Bytes head;
+			if (!ReadWholeFile(tp, &head) || head.size() < 0x14 || memcmp(head.data(), "TEX\0", 4) != 0) {
+				XLS_LOG_WARN("mods: parts %ls: %s: %s is missing or not an rTexture.", label.c_str(), kSlotNames[s], f.c_str());
+				continue;
+			}
+			set.textures[s].push_back({tex.first, tp});
+		}
 		count++;
 	}
 	if (count == 0) {
@@ -237,7 +251,7 @@ const char* const kPrefixes[kPartSlotCount] = {"hd", "bd", "bk", "lg"};
 const int kSnameCategory[kPartSlotCount] = {1, 2, 3, 4};  // head, body, back, legs
 const int kSnameFloats[kPartSlotCount] = {3, 3, 12, 0};
 const int kLastItem = 69;
-const char* const kGenVersion = "lp2-partpkg 1";
+const char* const kGenVersion = "lp2-partpkg 2";
 
 std::once_flag g_pkgOnce;
 std::vector<PartPackage> g_packages;
@@ -271,8 +285,14 @@ std::string Hex2(int v)
 
 // Clones one template archive into a DLC one: renames (same length), the exported model in place
 // of the template's, and (colour archives) the chosen colour texture renamed to colour A.
+bool EndsWith(const std::string& s, const std::string& tail)
+{
+	return s.size() >= tail.size() && _stricmp(s.c_str() + s.size() - tail.size(), tail.c_str()) == 0;
+}
+
 bool CloneArc(const std::wstring& src, const std::wstring& dst, const std::vector<std::pair<std::string, std::string>>& pairs,
-              const std::string& modelName, const Bytes* model, const std::string& colourFrom)
+              const std::string& modelName, const Bytes* model, const std::string& colourFrom,
+              const std::vector<std::pair<std::string, const Bytes*>>& textures = {})
 {
 	Bytes file;
 	std::vector<ArcEntry> entries;
@@ -282,6 +302,13 @@ bool CloneArc(const std::wstring& src, const std::wstring& dst, const std::vecto
 	for (ArcEntry& e : entries) {
 		if (model && e.name == modelName && e.classHash == ClassHash("rModel")) {
 			e.data = *model;
+		}
+		if (e.classHash == ClassHash("rTexture")) {
+			for (const auto& t : textures) {
+				if (EndsWith(e.name, t.first)) {
+					e.data = *t.second; // custom texture in place of the template's (name kept)
+				}
+			}
 		}
 		for (const auto& p : pairs) {
 			ReplaceAll(&e.name, p.first, p.second);
@@ -340,6 +367,9 @@ bool BuildPackage(const PartSet& set, int slot, int item, PartPackage* out)
 	char stampBuf[256];
 	snprintf(stampBuf, sizeof(stampBuf), "%s item %d colour %d template %s model %s", kGenVersion, item, set.colour, tmpl.c_str(), FileStamp(set.models[slot]).c_str());
 	std::string stamp = stampBuf;
+	for (const auto& t : set.textures[slot]) {
+		stamp += " " + t.first + "=" + FileStamp(t.second);
+	}
 	Bytes old;
 	bool fresh = ReadWholeFile(root + L"stamp.txt", &old) && std::string(old.begin(), old.end()) == stamp;
 	if (!fresh) {
@@ -349,6 +379,36 @@ bool BuildPackage(const PartSet& set, int slot, int item, PartPackage* out)
 		}
 		std::string modelName = "model\\hm\\hm" + sset + "\\" + tmpl + "\\" + tmpl;
 		static const char kColours[] = "ABCD";
+		// custom textures: normal map and mask in the main archive, the colour map (the chosen
+		// letter's, else BM_A) in the colour archive; names as in the template (pre-rename)
+		std::vector<Bytes> texData;
+		texData.reserve(8);
+		std::vector<std::pair<std::string, const Bytes*>> mainTex, colourTex;
+		auto find = [&](const char* role) -> const std::wstring* {
+			for (const auto& t : set.textures[slot]) {
+				if (_stricmp(t.first.c_str(), role) == 0) {
+					return &t.second;
+				}
+			}
+			return nullptr;
+		};
+		auto add = [&](const std::wstring* path, std::vector<std::pair<std::string, const Bytes*>>* list, const std::string& tail) {
+			if (!path) {
+				return;
+			}
+			texData.emplace_back();
+			if (ReadWholeFile(*path, &texData.back())) {
+				list->push_back({tail, &texData.back()});
+			}
+		};
+		add(find("NM"), &mainTex, tmpl + "_NM-00");
+		add(find("MM"), &mainTex, tmpl + "_MM-00");
+		{
+			char role[8] = "BM_A";
+			role[3] = kColours[set.colour];
+			const std::wstring* bm = find(role);
+			add(bm ? bm : find("BM_A"), &colourTex, tmpl + "_BM-00_" + kColours[set.colour]);
+		}
 		for (int dset : {0x0e, 0x2e}) {
 			std::string d = Hex2(dset), dv = Hex2(item);
 			std::vector<std::pair<std::string, std::string>> pairs = {
@@ -357,14 +417,14 @@ bool BuildPackage(const PartSet& set, int slot, int item, PartPackage* out)
 				{tmpl, pfx + d + dv},
 			};
 			std::wstring tag = Utf8ToWide((pfx + d + dv).c_str());
-			if (!CloneArc(srcDir + Utf8ToWide(tmpl.c_str()) + L".arc", dstDir + tag + L".arc", pairs, modelName, &model, std::string())) {
+			if (!CloneArc(srcDir + Utf8ToWide(tmpl.c_str()) + L".arc", dstDir + tag + L".arc", pairs, modelName, &model, std::string(), mainTex)) {
 				XLS_LOG_WARN("mods: parts %s: %s: cannot clone %s.arc.", set.id.c_str(), kSlotNames[slot], tmpl.c_str());
 				return false;
 			}
 			// colour: the chosen variant's texture archive becomes colour A
 			std::wstring colourSrc = srcDir + Utf8ToWide(tmpl.c_str()) + Utf8ToWide(Hex2(set.colour).c_str()) + L".arc";
 			std::string from = std::string("_BM-00_") + kColours[set.colour];
-			if (!CloneArc(colourSrc, dstDir + tag + L"00.arc", pairs, std::string(), nullptr, set.colour ? from : std::string())) {
+			if (!CloneArc(colourSrc, dstDir + tag + L"00.arc", pairs, std::string(), nullptr, set.colour ? from : std::string(), colourTex)) {
 				XLS_LOG_WARN("mods: parts %s: %s: no colour %c archive for %s.", set.id.c_str(), kSlotNames[slot], kColours[set.colour], tmpl.c_str());
 			}
 		}

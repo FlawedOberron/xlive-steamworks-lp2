@@ -27,6 +27,8 @@ struct PartSet {
 	std::wstring models[kPartSlotCount]; // unpacked .rModel per slot, empty = set has no such part
 	std::string templates[kPartSlotCount]; // original part each was built on ("bd2900")
 	int colour = 0;           // which of the template's colour textures (A-D) the part wears
+	// Custom textures per slot ("BM_A".."BM_D", "NM", "MM" -> .rTexture file), replacing the template's.
+	std::vector<std::pair<std::string, std::wstring>> textures[kPartSlotCount];
 };
 
 // A generated DLC content package: one custom part in DLC slot `item` (game part id 180+item).
