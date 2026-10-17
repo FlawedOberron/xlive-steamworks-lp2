@@ -79,6 +79,7 @@ plugin mods, so the game stays as vanilla as you want. A plugin mod is a normal 
 | Mod | What it does | Settings | Status |
 |---|---|---|---|
 | `Mods\SkipSplash` | Skip the boot logos, straight to the title screen. | none | Works (was built in) |
+| `Mods\DevTools` | Testing aids: `solo_start` (host a Player Match alone and play it) and `game_log` (the game's debug messages in the log, DX11). | `devtools.json` | Works (was built in) |
 | `Mods\Controls` | Hold to aim (zoom only while held, on foot) and split on-foot / VS controls: in a VS an action can take the button of another action (keyboard, mouse and pad) or any key / mouse button (`"key:F"`, `"key:MOUSE_X1"`). Foot actions: jump, grapple, next_weapon, crouch, fire, grenade, reload, action, quick_turn, zoom, melee, gesture, teng, dodge; VS: fire, secondary (= grenade button), zoom, brake, reload, quick_turn, dash, boost. | `controls.json` | Hold to aim works (DX11); split controls untested |
 | Key config menu rows | "Hold to aim" under Zoom In, separate "VS Zoom" / "VS Secondary" key rows | (planned, in Controls) | Planned |
 
