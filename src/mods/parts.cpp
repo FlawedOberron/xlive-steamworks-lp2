@@ -253,7 +253,7 @@ const char* const kPrefixes[kPartSlotCount] = {"hd", "bd", "bk", "lg"};
 const int kSnameCategory[kPartSlotCount] = {1, 2, 3, 4};  // head, body, back, legs
 const int kSnameFloats[kPartSlotCount] = {3, 3, 12, 0};
 const int kLastItem = 69;
-const char* const kGenVersion = "lp2-partpkg 5";
+const char* const kGenVersion = "lp2-partpkg 6";
 
 std::once_flag g_pkgOnce;
 std::vector<PartPackage> g_packages;
@@ -359,7 +359,7 @@ std::wstring LooseRoot()
 }
 
 bool BuildLoose(const std::string& base, const Bytes& modelIn, const std::vector<ArcEntry>& textures, const std::string& tmpl,
-                const std::string& colourName, const std::string& archiveName)
+                const std::string& colourName, const std::string& archiveName, const std::wstring& archiveDir)
 {
 	std::vector<ArcEntry> archive;
 	Bytes model = modelIn;
@@ -426,7 +426,9 @@ bool BuildLoose(const std::string& base, const Bytes& modelIn, const std::vector
 	archive.push_back(m);
 	// The part lookup only searches loaded archives: the same files as one archive, requested by
 	// the archive hook (arcXmlTmpPC\CustomParts\lpc<hash>).
-	WriteWholeFile(LooseRoot() + L"nativePC\\arcXmlTmpPC\\CustomParts\\" + Utf8ToWide(archiveName.c_str()) + L".arc", ArcWrite(archive));
+	// written into the part's DLC package (a content root the archive loader searches; a file the
+	// overlay only maps is not seen by its existence check)
+	WriteWholeFile(archiveDir + Utf8ToWide(archiveName.c_str()) + L".arc", ArcWrite(archive));
 	return WriteWholeFile(LooseRoot() + L"nativePC\\" + Utf8ToWide(base.c_str()) + L".mod", model);
 }
 
@@ -545,7 +547,7 @@ bool BuildPackage(const PartSet& set, int slot, int item, PartPackage* out)
 				only.push_back(e);
 			}
 			std::string colourName = "model\\hm\\hm" + sset + "\\" + tmpl + "\\" + tmpl + "_BM-00_" + kColours[set.colour];
-			if (!BuildLoose(looseBase, model, only, tmpl, colourName, std::string("lpc") + hash)) {
+			if (!BuildLoose(looseBase, model, only, tmpl, colourName, std::string("lpc") + hash, dstDir)) {
 				XLS_LOG_WARN("mods: parts %s: %s: loose copy failed.", set.id.c_str(), kSlotNames[slot]);
 			}
 		}
@@ -756,6 +758,11 @@ void __attribute__((thiscall)) PartArchives(uint8_t* loader, uint32_t character,
 				EnterCriticalSection((LPCRITICAL_SECTION)(loader + 4));
 			}
 			g_arcRequest(loader, pkg.archive.c_str(), 0);
+			static bool logged[kPartSlotCount] = {};
+			if (!logged[cat]) {
+				logged[cat] = true;
+				XLS_LOG_INFO("mods: parts: requested %s for character %u (%s).", pkg.archive.c_str(), character, kSlotNames[cat]);
+			}
 			if (lock) {
 				LeaveCriticalSection((LPCRITICAL_SECTION)(loader + 4));
 			}
