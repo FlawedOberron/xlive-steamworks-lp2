@@ -41,6 +41,7 @@ struct PartPackage {
 	std::wstring displayName;
 	uint8_t contentId[20] = {};
 	std::string loosePath;    // carrier route: model path (no extension) of the loose copy, model\hm\lpc\...
+	std::string archive;      // carrier route: archive holding it (arcXmlTmpPC\\CustomParts\\lpc<hash>)
 };
 
 // Builds (once; cached in ModCache\parts\pkg\) a DLC package per custom part, cloning the

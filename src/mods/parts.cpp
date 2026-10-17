@@ -253,7 +253,7 @@ const char* const kPrefixes[kPartSlotCount] = {"hd", "bd", "bk", "lg"};
 const int kSnameCategory[kPartSlotCount] = {1, 2, 3, 4};  // head, body, back, legs
 const int kSnameFloats[kPartSlotCount] = {3, 3, 12, 0};
 const int kLastItem = 69;
-const char* const kGenVersion = "lp2-partpkg 4";
+const char* const kGenVersion = "lp2-partpkg 5";
 
 std::once_flag g_pkgOnce;
 std::vector<PartPackage> g_packages;
@@ -359,8 +359,9 @@ std::wstring LooseRoot()
 }
 
 bool BuildLoose(const std::string& base, const Bytes& modelIn, const std::vector<ArcEntry>& textures, const std::string& tmpl,
-                const std::string& colourName)
+                const std::string& colourName, const std::string& archiveName)
 {
+	std::vector<ArcEntry> archive;
 	Bytes model = modelIn;
 	if (model.size() < 0x80) {
 		return false;
@@ -404,13 +405,28 @@ bool BuildLoose(const std::string& base, const Bytes& modelIn, const std::vector
 		if (!WriteWholeFile(LooseRoot() + L"nativePC\\" + Utf8ToWide(loose.c_str()) + L".tex", tex->data)) {
 			return false;
 		}
+		ArcEntry t = *tex;
+		t.name = loose;
+		archive.push_back(t);
 	}
 	// the colour map is also asked for on its own (kind 1): always provide it
 	for (const ArcEntry& e : textures) {
 		if (_stricmp(e.name.c_str(), colourName.c_str()) == 0) {
 			WriteWholeFile(LooseRoot() + L"nativePC\\" + Utf8ToWide((base + "_BM-00_A").c_str()) + L".tex", e.data);
+			ArcEntry c = e;
+			c.name = base + "_BM-00_A";
+			archive.push_back(c);
 		}
 	}
+	ArcEntry m;
+	m.name = base;
+	m.classHash = ClassHash("rModel");
+	m.flags = 0;
+	m.data = model;
+	archive.push_back(m);
+	// The part lookup only searches loaded archives: the same files as one archive, requested by
+	// the archive hook (arcXmlTmpPC\CustomParts\lpc<hash>).
+	WriteWholeFile(LooseRoot() + L"nativePC\\arcXmlTmpPC\\CustomParts\\" + Utf8ToWide(archiveName.c_str()) + L".arc", ArcWrite(archive));
 	return WriteWholeFile(LooseRoot() + L"nativePC\\" + Utf8ToWide(base.c_str()) + L".mod", model);
 }
 
@@ -529,7 +545,7 @@ bool BuildPackage(const PartSet& set, int slot, int item, PartPackage* out)
 				only.push_back(e);
 			}
 			std::string colourName = "model\\hm\\hm" + sset + "\\" + tmpl + "\\" + tmpl + "_BM-00_" + kColours[set.colour];
-			if (!BuildLoose(looseBase, model, only, tmpl, colourName)) {
+			if (!BuildLoose(looseBase, model, only, tmpl, colourName, std::string("lpc") + hash)) {
 				XLS_LOG_WARN("mods: parts %s: %s: loose copy failed.", set.id.c_str(), kSlotNames[slot]);
 			}
 		}
@@ -543,6 +559,7 @@ bool BuildPackage(const PartSet& set, int slot, int item, PartPackage* out)
 	out->item = item;
 	out->root = root;
 	out->loosePath = looseBase;
+	out->archive = std::string("arcXmlTmpPC\\CustomParts\\lpc") + hash;
 	out->displayName = Utf8ToWide((set.name + " (" + kSlotNames[slot] + ")").c_str());
 	std::string key = std::string("lpc:") + set.id + ":" + kSlotNames[slot];
 	uint64_t h = Fnv1a64(key.data(), key.size());
@@ -712,6 +729,43 @@ void __attribute__((thiscall)) PartPath(uint8_t* parts, char* out, int kind, uin
 	}
 }
 
+// --- Archive hook: the part loader (DX11 FUN_007d29b0, thiscall(loader, character, cat, code),
+// code = set | colour << 8 | variant << 16) requests arcXmlTmpPC\CustomParts\<pfx><set><var>
+// and the colour archive through FUN_007d18b0 (thiscall(loader, name, 0)). For a category wearing
+// one of our generated slots, our archive is requested as well.
+using ArcLoadFn = void(__attribute__((thiscall)) *)(uint8_t*, uint32_t, uint32_t, uint32_t);
+using ArcRequestFn = void(__attribute__((thiscall)) *)(uint8_t*, const char*, int);
+ArcLoadFn g_arcLoadOriginal = nullptr;
+ArcRequestFn g_arcRequest = nullptr;
+uint8_t* g_lockFlag = nullptr; // a global the loader also checks before locking
+
+void __attribute__((thiscall)) PartArchives(uint8_t* loader, uint32_t character, uint32_t cat, uint32_t code)
+{
+	g_arcLoadOriginal(loader, character, cat, code);
+	if (character >= 0x20 || !((*(uint32_t*)(loader + character * 0x1ca8 + 0x1ca4) >> 4) & 1) || cat > 3) {
+		return; // the game didn't load anything for this call either
+	}
+	uint8_t set = code & 0xff, variant = (code >> 16) & 0xff;
+	if ((set & 0xdf) != 0x0e) {
+		return;
+	}
+	for (const PartPackage& pkg : g_packages) {
+		if (pkg.slot == (int)cat && pkg.item == variant && !pkg.archive.empty()) {
+			bool lock = loader[0x1c] != 0 || (g_lockFlag && *g_lockFlag != 0);
+			if (lock) {
+				EnterCriticalSection((LPCRITICAL_SECTION)(loader + 4));
+			}
+			g_arcRequest(loader, pkg.archive.c_str(), 0);
+			if (lock) {
+				LeaveCriticalSection((LPCRITICAL_SECTION)(loader + 4));
+			}
+			return;
+		}
+	}
+}
+
+const uint8_t kArcPrologue[] = {0x81, 0xec, 0x18, 0x01, 0x00, 0x00, 0x8b, 0x84, 0x24, 0x1c, 0x01, 0x00, 0x00};
+
 const uint8_t kPathPrologue[] = {0x81, 0xec, 0xd0, 0x00, 0x00, 0x00, 0x53, 0x55, 0x8b, 0xac, 0x24, 0xe4, 0x00, 0x00, 0x00, 0x56, 0x8b, 0xf1, 0xb8};
 const uint32_t kPathRvas[] = {0xb664b0 /* DX11 */, 0xb56650 /* DX9 */};
 
@@ -757,7 +811,41 @@ bool PartsTryInstallPathHook(unsigned char* base)
 	memcpy(fn, patch, len);
 	VirtualProtect(fn, len, old, &old);
 	FlushInstructionCache(GetCurrentProcess(), fn, len);
-	XLS_LOG_INFO("mods: parts: path builder hooked at 0x%p (custom parts load from loose files).", fn);
+	XLS_LOG_INFO("mods: parts: path builder hooked at 0x%p.", fn);
+	// archive hook (LP2DX11.exe for now)
+	uint8_t* arc = base + 0x3d29b0;
+	if (fn == base + kPathRvas[0] && memcmp(arc, kArcPrologue, sizeof(kArcPrologue)) == 0) {
+		auto* t2 = (uint8_t*)VirtualAlloc(nullptr, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+		if (t2) {
+			memcpy(t2, arc, 6); // sub esp,0x118
+			t2[6] = 0xe9;
+			int32_t b2 = (int32_t)((arc + 6) - (t2 + 11));
+			memcpy(t2 + 7, &b2, 4);
+			FlushInstructionCache(GetCurrentProcess(), t2, 32);
+			g_arcLoadOriginal = (ArcLoadFn)t2;
+			g_arcRequest = (ArcRequestFn)(base + 0x3d18b0);
+			g_lockFlag = (uint8_t*)(base + 0x14de3a5);
+			uint8_t p2[6] = {0xe9, 0, 0, 0, 0, 0x90};
+			int32_t r2 = (int32_t)((uint8_t*)&PartArchives - (arc + 5));
+			memcpy(p2 + 1, &r2, 4);
+			if (VirtualProtect(arc, 6, PAGE_EXECUTE_READWRITE, &old)) {
+				memcpy(arc, p2, 6);
+				VirtualProtect(arc, 6, old, &old);
+				FlushInstructionCache(GetCurrentProcess(), arc, 6);
+				XLS_LOG_INFO("mods: parts: part archive loader hooked at 0x%p (custom parts load from their own archives).", arc);
+			}
+		}
+	}
+	else {
+		XLS_LOG_WARN("mods: parts: archive loader not mapped for this exe; custom parts use their DLC packages.");
+		// without our archives the redirected paths would find nothing: undo the path hook
+		memcpy(patch, (const void*)g_pathOriginal, len);
+		if (VirtualProtect(fn, len, PAGE_EXECUTE_READWRITE, &old)) {
+			memcpy(fn, patch, len);
+			VirtualProtect(fn, len, old, &old);
+			FlushInstructionCache(GetCurrentProcess(), fn, len);
+		}
+	}
 	return true;
 }
 
