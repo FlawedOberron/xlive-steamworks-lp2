@@ -1233,7 +1233,7 @@ ColourStepFn g_colourStepOriginal = nullptr;
 ColourStepFn g_colourStepTail = nullptr;
 SwatchFn g_swatchOriginal = nullptr;
 
-void SetChosenColour(const PartPackage& pkg, int colour);
+void SetChosenColour(const PartPackage& pkg, uint32_t code, int colour);
 
 uint32_t MenuCode(uint8_t* menu, uint32_t cat)
 {
@@ -1254,7 +1254,7 @@ void __attribute__((thiscall)) ColourStep(uint8_t* menu, uint32_t cat, uint32_t 
 	int next = pkg->colours[((at + step) % n + n) % n];
 	menu[0x54 + cat] = (uint8_t)(next - step); // the game adds step: lands on next, no wrap
 	XLS_LOG_INFO("mods: parts: %s %s colour %c -> %c.", pkg->setId.c_str(), kSlotNames[cat], 'A' + worn, 'A' + next);
-	SetChosenColour(*pkg, next);
+	SetChosenColour(*pkg, code, next);
 	g_colourStepTail(menu, cat, code, dir);
 }
 
@@ -1352,29 +1352,50 @@ void LoadChosenLocked()
 		line = text.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
 		pos = end == std::string::npos ? text.size() : end + 1;
 		char id[64], cat[16], letter = 0;
-		if (sscanf(line.c_str(), "%63s %15s %c", id, cat, &letter) == 3 && letter >= 'A' && letter <= 'D') {
-			g_chosen[std::string(id) + ":" + cat] = letter - 'A';
+		int item = -1;
+		int n = sscanf(line.c_str(), "%63s %15s %c %d", id, cat, &letter, &item);
+		if (n >= 3 && letter >= 'A' && letter <= 'D') {
+			g_chosen[std::string(id) + ":" + cat + (n == 4 ? ":" + std::to_string(item) : std::string())] = letter - 'A';
 		}
 	}
 }
 
-int ChosenColour(const PartPackage& pkg)
+// Keys: "<set id>:<category>" (the set's last colour, worn by a loadout with no choice yet) and,
+// for a carrier code, "<set id>:<category>:<slot>" (that loadout's: its alias pair's first slot).
+std::string ColourKey(const PartPackage& pkg, uint32_t code)
+{
+	std::string key = pkg.setId + ":" + kSlotNames[pkg.slot];
+	if (IsCarrier(code)) {
+		key += ":" + std::to_string(ChoiceItem((code >> 16) & 0xff));
+	}
+	return key;
+}
+
+int ChosenColour(const PartPackage& pkg, uint32_t code)
 {
 	std::lock_guard<std::mutex> lock(g_coloursMutex);
 	LoadChosenLocked();
-	auto it = g_chosen.find(pkg.setId + ":" + kSlotNames[pkg.slot]);
+	auto it = g_chosen.find(ColourKey(pkg, code));
+	if (it == g_chosen.end()) {
+		it = g_chosen.find(pkg.setId + ":" + kSlotNames[pkg.slot]);
+	}
 	return it == g_chosen.end() ? -1 : it->second;
 }
 
-void SetChosenColour(const PartPackage& pkg, int colour)
+void SetChosenColour(const PartPackage& pkg, uint32_t code, int colour)
 {
 	std::lock_guard<std::mutex> lock(g_coloursMutex);
 	LoadChosenLocked();
 	g_chosen[pkg.setId + ":" + kSlotNames[pkg.slot]] = colour;
+	g_chosen[ColourKey(pkg, code)] = colour;
 	std::string text;
 	for (const auto& c : g_chosen) {
-		size_t colon = c.first.rfind(':');
-		text += c.first.substr(0, colon) + " " + c.first.substr(colon + 1) + " " + (char)('A' + c.second) + "\n";
+		size_t a = c.first.find(':'), b = c.first.find(':', a + 1);
+		text += c.first.substr(0, a) + " " + c.first.substr(a + 1, b == std::string::npos ? std::string::npos : b - a - 1) + " " + (char)('A' + c.second);
+		if (b != std::string::npos) {
+			text += " " + c.first.substr(b + 1);
+		}
+		text += "\n";
 	}
 	WriteWholeFile(ColoursFile(), Bytes(text.begin(), text.end()));
 }
@@ -1391,7 +1412,7 @@ void __attribute__((thiscall)) ApplyPart(uint8_t* menu, uint32_t cat, uint32_t c
 	if (!pkg || pkg->colours.size() < 2 || !g_colourStepTail) {
 		return;
 	}
-	int chosen = ChosenColour(*pkg);
+	int chosen = ChosenColour(*pkg, code);
 	if (chosen < 0) {
 		return;
 	}
@@ -1564,6 +1585,27 @@ uint32_t* __attribute__((thiscall)) PartStep(uint8_t* menu, uint32_t* out, uint3
 	return r;
 }
 
+// Archive request FUN_007d3fd0 thiscall(loader, character, cat, code) (DX9 7c5120): logs which
+// character slot asks for which part (sync groundwork: what `character` is for the menu preview,
+// the local player, remote players and bots). Each (character, cat, code) once, up to 300 lines.
+using PartRequestFn = void(__attribute__((thiscall)) *)(void*, uint32_t, uint32_t, uint32_t);
+PartRequestFn g_partRequestOriginal = nullptr;
+
+void __attribute__((thiscall)) PartRequest(void* loader, uint32_t character, uint32_t cat, uint32_t code)
+{
+	static std::mutex mutex;
+	static std::set<uint64_t> seen;
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		uint64_t key = (uint64_t)character << 40 | (uint64_t)(cat & 0xff) << 32 | code;
+		if (seen.size() < 300 && seen.insert(key).second) {
+			XLS_LOG_INFO("mods: parts: request character %u %s code 0x%08x%s (from 0x%p).", character, cat < kPartSlotCount ? kSlotNames[cat] : "?", code,
+			             IsCarrier(code) ? " carrier" : "", __builtin_return_address(0));
+		}
+	}
+	g_partRequestOriginal(loader, character, cat, code);
+}
+
 // Part id -> code FUN_00f5cae0 cdecl(id, cat). Id 0 of every category is a placeholder
 // (0x0500000f: set 0x0f, faction 5) whose colour archive doesn't exist, so loading it is fatal. A
 // loadout holding id 0 (a DLC part saved with a colour other than A) gets the default part (id 1)
@@ -1589,7 +1631,7 @@ uint32_t __cdecl PartCode(uint32_t id, uint32_t cat)
 		code = g_partCodeOriginal(g_carrierSets[cat].empty() ? 1 : 180 + kCarrierItem, cat);
 	}
 	if (const PartPackage* pkg = FindPackage(cat, code)) {
-		int chosen = ChosenColour(*pkg);
+		int chosen = ChosenColour(*pkg, code);
 		if (chosen >= 0) {
 			code = (code & ~0xff00u) | ((uint32_t)WornColour(*pkg, (uint8_t)chosen) << 8);
 		}
@@ -1652,15 +1694,16 @@ const uint8_t kApplyPrologue[] = {0x56, 0x8b, 0xf1, 0x57, 0x8b, 0x7c, 0x24, 0x0c
 const uint8_t kPartStepPrologue[] = {0x53, 0x8b, 0x5c, 0x24, 0x0c, 0x55, 0x8b, 0xe9};   // push ebx; mov ebx,[esp+0xc]; push ebp; mov ebp,ecx
 const uint8_t kDlcNamePrologue[] = {0x53, 0x8a, 0x5c, 0x24, 0x08, 0x56, 0x8b, 0xf1};    // push ebx; mov bl,[esp+8]; push esi; mov esi,ecx
 const uint8_t kMenuUpdatePrologue[] = {0x83, 0xec, 0x08, 0x53, 0x56, 0x8b, 0xf1};      // sub esp,8; push ebx; push esi; mov esi,ecx
+const uint8_t kPartRequestPrologue[] = {0x81, 0xec, 0x10, 0x01, 0x00, 0x00};       // sub esp,0x110
 const uint8_t kSwatchPrologue[] = {0x83, 0xec, 0x24, 0x8b, 0x54, 0x24, 0x2c};          // sub esp,0x24; mov edx,[esp+0x2c]
 
 // VAs per exe (LP2DX11.exe, LP2DX9.exe); every prologue is checked before patching.
 struct MenuVas {
-	uint32_t step, swatch, locked, apply, descriptorId, partCode, partId, partStep, dlcName, menuUpdate, previewState;
+	uint32_t step, swatch, locked, apply, descriptorId, partCode, partId, partStep, dlcName, menuUpdate, previewState, partRequest;
 };
 const MenuVas kMenuVas[] = {
-	{0xeeb9a0, 0xee5060, 0xee4c40, 0xeed720, 0xf5c860, 0xf5cae0, 0xf5c9a0, 0xee4ac0, 0x8654a0, 0xef0c20, 0x20d4}, // DX11
-	{0xedbb80, 0xed5240, 0xed4e20, 0xedd900, 0xf4cb40, 0xf4cdc0, 0xf4cc80, 0xed4ca0, 0x855df0, 0xee0e00, 0x20c4}, // DX9
+	{0xeeb9a0, 0xee5060, 0xee4c40, 0xeed720, 0xf5c860, 0xf5cae0, 0xf5c9a0, 0xee4ac0, 0x8654a0, 0xef0c20, 0x20d4, 0x7d3fd0}, // DX11
+	{0xedbb80, 0xed5240, 0xed4e20, 0xedd900, 0xf4cb40, 0xf4cdc0, 0xf4cc80, 0xed4ca0, 0x855df0, 0xee0e00, 0x20c4, 0x7c5120}, // DX9
 };
 
 void InstallMenuColours(uint8_t* base, const MenuVas& va)
@@ -1697,10 +1740,11 @@ void InstallMenuColours(uint8_t* base, const MenuVas& va)
 		g_partStepOriginal = (PartStepFn)Detour(at(va.partStep), kPartStepPrologue, sizeof(kPartStepPrologue), (void*)&PartStep);
 	}
 	g_previewState = va.previewState;
+	g_partRequestOriginal = (PartRequestFn)Detour(at(va.partRequest), kPartRequestPrologue, sizeof(kPartRequestPrologue), (void*)&PartRequest);
 	g_menuUpdateTramp = Detour(at(va.menuUpdate), kMenuUpdatePrologue, sizeof(kMenuUpdatePrologue), (void*)&MenuUpdateStub);
 	g_dlcNameOriginal = (DlcNameFn)Detour(at(va.dlcName), kDlcNamePrologue, sizeof(kDlcNamePrologue), (void*)&DlcName);
-	XLS_LOG_INFO("mods: parts: customise menu colours hooked (code %d, id %d, descriptor %d, step %d, swatch %d, arrows %d, apply %d, part step %d, name %d, redraw %d).", !!g_partCodeOriginal,
-	             !!g_partIdOriginal, !!g_descriptorIdOriginal, !!g_colourStepOriginal, !!g_swatchOriginal, !!g_colourLockedOriginal, !!g_applyOriginal, !!g_partStepOriginal, !!g_dlcNameOriginal, !!g_menuUpdateTramp);
+	XLS_LOG_INFO("mods: parts: customise menu colours hooked (code %d, id %d, descriptor %d, step %d, swatch %d, arrows %d, apply %d, part step %d, name %d, redraw %d, request log %d).", !!g_partCodeOriginal,
+	             !!g_partIdOriginal, !!g_descriptorIdOriginal, !!g_colourStepOriginal, !!g_swatchOriginal, !!g_colourLockedOriginal, !!g_applyOriginal, !!g_partStepOriginal, !!g_dlcNameOriginal, !!g_menuUpdateTramp, !!g_partRequestOriginal);
 }
 
 const uint8_t kPathPrologue[] = {0x81, 0xec, 0xd0, 0x00, 0x00, 0x00, 0x53, 0x55, 0x8b, 0xac, 0x24, 0xe4, 0x00, 0x00, 0x00, 0x56, 0x8b, 0xf1, 0xb8};
