@@ -156,6 +156,7 @@ void BuildIndex()
 	}
 	size_t before = g_index.size();
 	PackagesIndex(&g_index);
+	PartsIndex(&g_index);
 	if (g_index.size() != before) {
 		XLS_LOG_INFO("mods: map packages: %u files.", (unsigned)(g_index.size() - before));
 	}
@@ -246,16 +247,55 @@ DWORD WINAPI HookGetFileAttributesA(LPCSTR path)
 	return g_getFileAttributesA(path);
 }
 
+// The game's fatal errors ("Failed open file. %s %d") are plain MessageBoxA OK boxes: log them, and
+// offer to copy the text (Yes = copy) so a path can be pasted into a bug report.
+using MessageBoxAFn = int(WINAPI*)(HWND, LPCSTR, LPCSTR, UINT);
+MessageBoxAFn g_messageBoxA = nullptr;
+
+// Under Proton the clipboard needs an owning window, and its contents live only as long as the
+// game process unless a clipboard manager keeps them; the log line is the dependable copy.
+void CopyToClipboard(HWND owner, const std::wstring& text)
+{
+	if (!OpenClipboard(owner ? owner : GetForegroundWindow())) {
+		XLS_LOG_WARN("game message box: clipboard unavailable (%lu).", GetLastError());
+		return;
+	}
+	EmptyClipboard();
+	if (HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, (text.size() + 1) * sizeof(wchar_t))) {
+		memcpy(GlobalLock(mem), text.c_str(), (text.size() + 1) * sizeof(wchar_t));
+		GlobalUnlock(mem);
+		if (!SetClipboardData(CF_UNICODETEXT, mem)) {
+			GlobalFree(mem);
+		}
+	}
+	CloseClipboard();
+}
+
+int WINAPI HookMessageBoxA(HWND owner, LPCSTR text, LPCSTR caption, UINT type)
+{
+	XLS_LOG_ERROR("game message box \"%s\": %s", caption ? caption : "", text ? text : "");
+	if (!text || (type & MB_TYPEMASK) != MB_OK) {
+		return g_messageBoxA(owner, text, caption, type);
+	}
+	std::wstring body = Widen(text);
+	std::wstring prompt = body + L"\n\nCopy this message to the clipboard?";
+	std::wstring title = caption ? Widen(caption) : L"";
+	if (MessageBoxW(owner, prompt.c_str(), title.c_str(), (type & ~MB_TYPEMASK) | MB_YESNO) == IDYES) {
+		CopyToClipboard(owner, (title.empty() ? L"" : title + L": ") + body);
+	}
+	return IDOK;
+}
+
 struct Hooked {
 	const char* name;
 	void** slot;
 	void* hook;
 };
-Hooked g_hooked[3];
+Hooked g_hooked[4];
 int g_hookedCount = 0;
 
-// Points the game module's KERNEL32 import of name at hook; returns the original.
-void* HookImport(HMODULE module, const char* name, void* hook)
+// Points the game module's import of name (from dll) at hook; returns the original.
+void* HookImport(HMODULE module, const char* name, void* hook, const char* dll = "kernel32.dll")
 {
 	auto* base = (uint8_t*)module;
 	auto* nt = (IMAGE_NT_HEADERS*)(base + ((IMAGE_DOS_HEADER*)base)->e_lfanew);
@@ -264,7 +304,7 @@ void* HookImport(HMODULE module, const char* name, void* hook)
 		return nullptr;
 	}
 	for (auto* desc = (IMAGE_IMPORT_DESCRIPTOR*)(base + dir.VirtualAddress); desc->Name; desc++) {
-		if (_stricmp((const char*)(base + desc->Name), "kernel32.dll") != 0 || !desc->OriginalFirstThunk) {
+		if (_stricmp((const char*)(base + desc->Name), dll) != 0 || !desc->OriginalFirstThunk) {
 			continue;
 		}
 		auto* names = (IMAGE_THUNK_DATA*)(base + desc->OriginalFirstThunk);
@@ -284,7 +324,7 @@ void* HookImport(HMODULE module, const char* name, void* hook)
 			}
 			slots->u1.Function = (ULONG_PTR)hook;
 			VirtualProtect(&slots->u1.Function, sizeof(void*), old, &old);
-			if (g_hookedCount < 3) {
+			if (g_hookedCount < 4) {
 				g_hooked[g_hookedCount++] = {name, (void**)&slots->u1.Function, hook};
 			}
 			return original;
@@ -322,6 +362,10 @@ void OverlayInstall()
 	HookImport(game, "CreateFileA", (void*)HookCreateFileA);
 	HookImport(game, "CreateFileW", (void*)HookCreateFileW);
 	HookImport(game, "GetFileAttributesA", (void*)HookGetFileAttributesA);
+	g_messageBoxA = (MessageBoxAFn)GetProcAddress(GetModuleHandleW(L"user32.dll"), "MessageBoxA");
+	if (g_messageBoxA) {
+		HookImport(game, "MessageBoxA", (void*)HookMessageBoxA, "user32.dll");
+	}
 }
 
 void OverlayVerify()

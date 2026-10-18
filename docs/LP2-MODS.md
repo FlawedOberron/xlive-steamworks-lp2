@@ -125,7 +125,7 @@ Drop the exporter's `LPC_<id>` folder in as is, or zip it:
 ```
 Parts\
 └─ LPC_scav01\             (or LPC_scav01.zip)
-   ├─ lpc.json              {"id", "name", "faction", "colour", "parts": {"body": {"file", "template"}, ...}}
+   ├─ lpc.json              {"id", "name", "faction", "colours", "parts": {"body": {"file", "template"}, ...}}
    ├─ body.rModel
    ├─ head.rModel
    ├─ back.rModel
@@ -135,8 +135,11 @@ Parts\
 Factions: `RND` Rounders, `FJ` Fight Junkies, `SPE` Snow Pirate Elites, `NEV` NEVEC Black Ops,
 `FF` Femmes Fatales, `ALL` everyone.
 
-`colour` (optional, `"A"`–`"D"`, default `"A"`): which of the template part's four colour maps the
-set wears (the A–D swatch of stock parts; skin stays the same, the cloth changes).
+`colours` (optional, default `"A"`): the colour letters the set offers, e.g. `"ACD"` or
+`["A", "C"]`. With two or more, players step through them on the part's swatch like a stock part;
+with one, the swatch is locked. Each letter wears the part's own colour map for it, else its `_A`,
+else the template part's. The choice is remembered per set and part in `ModCache\parts\colours.txt`.
+(Older `"colour": "B"` still works: that colour only.)
 
 **How they appear:** at start, each part of each set is built into a small DLC content package in
 `ModCache\parts\pkg\` (the template part's archives with the custom model in place; rebuilt only
@@ -144,8 +147,7 @@ when something changes) and listed in each category's part list under the set's 
 stock parts. Sets take DLC slots from 20 upward in `id` order (50 sets at most for now), and the
 loader keeps them unlocked in the profile, so a fresh save sees them too.
 
-Limits for now: one colour per set (DLC slots always load colour A; the loader copies your choice
-there), no custom textures yet (the template's are used), and everyone in a match needs the same
+Limits for now: colours are remembered per set and part (not per loadout), and everyone in a match needs the same
 `Parts\` content (see Multiplayer rules). Making parts: `README-parts.md` in the creator tools.
 
 ## Troubleshooting

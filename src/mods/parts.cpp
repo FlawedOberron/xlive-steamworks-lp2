@@ -14,6 +14,7 @@
 #include <string.h>
 
 #include <algorithm>
+#include <map>
 #include <mutex>
 
 // Part sets come from the Blender exporter (lp2-tools/lp2_blender_export.py): a folder
@@ -70,8 +71,27 @@ bool ParseManifest(const Bytes& text, const std::wstring& source, PartSet* set)
 		XLS_LOG_WARN("mods: parts %ls: \"name\" must be 1-%zu bytes.", source.c_str(), kNameMaxBytes);
 		return false;
 	}
-	std::string colour = root["colour"].GetString("A");
-	set->colour = colour.size() == 1 && toupper((unsigned char)colour[0]) >= 'A' && toupper((unsigned char)colour[0]) <= 'D' ? toupper((unsigned char)colour[0]) - 'A' : 0;
+	// "colours": "ABD" or ["A", "B", "D"] (menu order); older "colour": "B" = that one only
+	std::string letters;
+	const Json& cs = root["colours"];
+	if (cs.IsArray()) {
+		for (size_t i = 0; i < cs.Size(); i++) {
+			letters += cs.At(i).GetString("");
+		}
+	}
+	else {
+		letters = cs.GetString(root["colour"].GetString("A"));
+	}
+	for (char c : letters) {
+		int v = toupper((unsigned char)c) - 'A';
+		if (v >= 0 && v < 4 && std::find(set->colours.begin(), set->colours.end(), v) == set->colours.end()) {
+			set->colours.push_back(v);
+		}
+	}
+	if (set->colours.empty()) {
+		set->colours.push_back(0);
+	}
+	set->colour = set->colours[0];
 	set->factionIndex = -1;
 	if (_stricmp(set->faction.c_str(), "ALL") != 0) {
 		for (int i = 0; i < (int)(sizeof(kFactions) / sizeof(kFactions[0])); i++) {
@@ -253,7 +273,7 @@ const char* const kPrefixes[kPartSlotCount] = {"hd", "bd", "bk", "lg"};
 const int kSnameCategory[kPartSlotCount] = {1, 2, 3, 4};  // head, body, back, legs
 const int kSnameFloats[kPartSlotCount] = {3, 3, 12, 0};
 const int kLastItem = 69;
-const char* const kGenVersion = "lp2-partpkg 8";
+const char* const kGenVersion = "lp2-partpkg 10";
 
 std::once_flag g_pkgOnce;
 std::vector<PartPackage> g_packages;
@@ -502,6 +522,15 @@ bool BuildPackage(const PartSet& set, int slot, int item, PartPackage* out)
 			if (!CloneArc(colourSrc, dstDir + tag + L"00.arc", pairs, std::string(), nullptr, set.colour ? from : std::string(), colourTex)) {
 				XLS_LOG_WARN("mods: parts %s: %s: no colour %c archive for %s.", set.id.c_str(), kSlotNames[slot], kColours[set.colour], tmpl.c_str());
 			}
+			// the game opens <tag><colour>.arc for the colour worn (a missing one is a fatal error);
+			// the textures come from the lpc copy, so these only have to exist: the template's
+			// colour c, else a copy of colour A's
+			for (int c = 1; c < 4; c++) {
+				std::wstring dst = dstDir + tag + Utf8ToWide(Hex2(c).c_str()) + L".arc";
+				if (!CloneArc(srcDir + Utf8ToWide((tmpl + Hex2(c)).c_str()) + L".arc", dst, pairs, std::string(), nullptr, std::string())) {
+					CopyFileW((dstDir + tag + L"00.arc").c_str(), dst.c_str(), FALSE);
+				}
+			}
 		}
 		{
 			// lpc copy: the template's textures (main + chosen colour archive) with ours in place
@@ -537,6 +566,34 @@ bool BuildPackage(const PartSet& set, int slot, int item, PartPackage* out)
 				XLS_LOG_WARN("mods: parts %s: %s: lpc resources failed.", set.id.c_str(), kSlotNames[slot]);
 			}
 			else {
+				// every colour as <lpc>_BM-00_A..D (the path hook picks one): the part's own BM_<c>,
+				// else its BM_A (a retextured part's UVs don't fit the template's colours), else the
+				// template's colour c
+				lpc.erase(std::remove_if(lpc.begin(), lpc.end(), [&](const ArcEntry& e) { return e.name == lpcBase + "_BM-00_A"; }), lpc.end());
+				for (int c = 0; c < 4; c++) {
+					std::string tail = tmpl + "_BM-00_" + kColours[c];
+					char role[8] = "BM_A";
+					role[3] = kColours[c];
+					const std::wstring* own = find(role);
+					if (!own) {
+						own = find("BM_A");
+					}
+					std::vector<ArcEntry> ce;
+					if (ReadWholeFile(srcDir + Utf8ToWide((tmpl + Hex2(c)).c_str()) + L".arc", &file)) {
+						ArcRead(file, &ce);
+					}
+					for (ArcEntry& e : ce) {
+						if (e.classHash == ClassHash("rTexture") && EndsWith(e.name, tail)) {
+							Bytes data;
+							if (own && ReadWholeFile(*own, &data)) {
+								e.data = data;
+							}
+							e.name = lpcBase + "_BM-00_" + kColours[c];
+							lpc.push_back(e);
+							break;
+						}
+					}
+				}
 				// into the slot's own archives, which the game loads for a DLC part
 				for (int dset : {0x0e, 0x2e}) {
 					std::wstring arcPath = dstDir + Utf8ToWide((pfx + Hex2(dset) + Hex2(item)).c_str()) + L".arc";
@@ -560,6 +617,7 @@ bool BuildPackage(const PartSet& set, int slot, int item, PartPackage* out)
 	out->item = item;
 	out->root = root;
 	out->lpcPath = lpcBase;
+	out->colours = set.colours;
 	out->displayName = Utf8ToWide((set.name + " (" + kSlotNames[slot] + ")").c_str());
 	std::string key = std::string("lpc:") + set.id + ":" + kSlotNames[slot];
 	uint64_t h = Fnv1a64(key.data(), key.size());
@@ -697,6 +755,31 @@ void PartsStartUnlocker()
 
 namespace {
 
+// The colour a part wears for a code's colour byte: that one when the set has it, else its first.
+int WornColour(const PartPackage& pkg, uint8_t colour)
+{
+	for (int c : pkg.colours) {
+		if (c == colour) {
+			return c;
+		}
+	}
+	return pkg.colours.empty() ? 0 : pkg.colours[0];
+}
+
+// Our generated part a code (set | colour << 8 | variant << 16) names in category cat, or nullptr.
+const PartPackage* FindPackage(uint32_t cat, uint32_t code)
+{
+	if (cat >= kPartSlotCount || ((code & 0xff) & 0xdf) != 0x0e) {
+		return nullptr;
+	}
+	for (const PartPackage& pkg : g_packages) {
+		if (pkg.slot == (int)cat && pkg.item == (int)((code >> 16) & 0xff)) {
+			return &pkg;
+		}
+	}
+	return nullptr;
+}
+
 // --- Path hook: after the game builds a part's resource path (thiscall(parts, out, kind, cat)),
 // a category wearing one of our generated DLC slots gets its model (kind 0) and colour texture
 // (kind 1) from the lpc copy in the slot archives. parts+0x44+cat*4: set byte (DLC = 0x0e / 0x2e), +0x46: variant
@@ -717,7 +800,13 @@ void __attribute__((thiscall)) PartPath(uint8_t* parts, char* out, int kind, uin
 	}
 	for (const PartPackage& pkg : g_packages) {
 		if (pkg.slot == (int)cat && pkg.item == variant && !pkg.lpcPath.empty()) {
-			std::string path = pkg.lpcPath + (kind == 1 ? "_BM-00_A" : "");
+			char letter = (char)('A' + WornColour(pkg, parts[0x45 + cat * 4]));
+			static uint8_t seen[kPartSlotCount] = {0xff, 0xff, 0xff, 0xff};
+			if (kind == 1 && seen[cat] != parts[0x45 + cat * 4]) {
+				seen[cat] = parts[0x45 + cat * 4];
+				XLS_LOG_INFO("mods: parts: %s %s colour byte %u -> %c.", pkg.setId.c_str(), kSlotNames[cat], seen[cat], letter);
+			}
+			std::string path = pkg.lpcPath + (kind == 1 ? std::string("_BM-00_") + letter : "");
 			if (path.size() < 64) {
 				memcpy(out, path.c_str(), path.size() + 1);
 			}
@@ -726,9 +815,320 @@ void __attribute__((thiscall)) PartPath(uint8_t* parts, char* out, int kind, uin
 	}
 }
 
+// --- Customise menu colours (DX11; notes: lp2-tools/notes/parts-menu.md). The game won't step a
+// DLC part's colour and shows its swatch as "" ("LOST PLANET 2"). For our parts with more than
+// one colour: the colour step moves through the set's colours, and the swatch shows the letter.
+// Colour step FUN_00eeb9a0 thiscall(menu, cat, code, dir): after its DLC / single-colour checks
+// (0xeeb9d4) it adds dir to menu+0x54+cat (wrap 0-3), stores it in the codes, reloads the preview,
+// sets the swatch and plays the sound; we enter there with the colour primed to land on ours.
+using ColourStepFn = void(__attribute__((thiscall)) *)(uint8_t*, uint32_t, uint32_t, int);
+using SwatchFn = void(__attribute__((thiscall)) *)(uint8_t*, uint32_t, uint32_t, uint32_t);
+ColourStepFn g_colourStepOriginal = nullptr;
+ColourStepFn g_colourStepTail = nullptr;
+SwatchFn g_swatchOriginal = nullptr;
+
+void SetChosenColour(const PartPackage& pkg, int colour);
+
+uint32_t MenuCode(uint8_t* menu, uint32_t cat)
+{
+	return *(uint32_t*)(menu + 0xa8 + (cat + *(int32_t*)(menu + 0xa4) * 8) * 4);
+}
+
+void __attribute__((thiscall)) ColourStep(uint8_t* menu, uint32_t cat, uint32_t code, int dir)
+{
+	const PartPackage* pkg = FindPackage(cat, code);
+	if (!pkg || pkg->colours.size() < 2) {
+		g_colourStepOriginal(menu, cat, code, dir);
+		return;
+	}
+	int n = (int)pkg->colours.size();
+	int worn = WornColour(*pkg, (code >> 8) & 0xff);
+	int at = (int)(std::find(pkg->colours.begin(), pkg->colours.end(), worn) - pkg->colours.begin());
+	int step = (int8_t)dir < 0 ? -1 : 1;
+	int next = pkg->colours[((at + step) % n + n) % n];
+	menu[0x54 + cat] = (uint8_t)(next - step); // the game adds step: lands on next, no wrap
+	XLS_LOG_INFO("mods: parts: %s %s colour %c -> %c.", pkg->setId.c_str(), kSlotNames[cat], 'A' + worn, 'A' + next);
+	SetChosenColour(*pkg, next);
+	g_colourStepTail(menu, cat, code, dir);
+}
+
+// Swatch FUN_00ee5060 thiscall(menu, index, cat, colour): colour 0-3 -> "A".."D", else "".
+void __attribute__((thiscall)) Swatch(uint8_t* menu, uint32_t index, uint32_t cat, uint32_t colour)
+{
+	if (colour > 3 && cat < kPartSlotCount) {
+		uint32_t code = MenuCode(menu, cat);
+		const PartPackage* pkg = FindPackage(cat, code);
+		if (pkg && pkg->colours.size() > 1) {
+			colour = (uint32_t)WornColour(*pkg, (code >> 8) & 0xff);
+		}
+	}
+	g_swatchOriginal(menu, index, cat, colour);
+}
+
+// Colour-locked predicate FUN_00ee4c40 stdcall(code): true hides the colour row's arrows (stock:
+// single-colour parts and sets 0x0c/0x0d/0x0e). It gets no category; a set's parts share one DLC
+// slot and one colour list, so the slot alone finds the set.
+using ColourLockedFn = uint8_t(__stdcall*)(uint32_t);
+ColourLockedFn g_colourLockedOriginal = nullptr;
+
+uint8_t __stdcall ColourLocked(uint32_t code)
+{
+	if (((code & 0xff) & 0xdf) == 0x0e) {
+		for (const PartPackage& pkg : g_packages) {
+			if (pkg.item == (int)((code >> 16) & 0xff)) {
+				return pkg.colours.size() < 2;
+			}
+		}
+	}
+	return g_colourLockedOriginal(code);
+}
+
+// Descriptor id lookup FUN_00f5c860 cdecl(set, colour, variant, cat): DLC entries exist for colour
+// A only, so a DLC code with another colour finds nothing (0x100) and the loadout falls back to
+// id 0 (hd2f0000, a part that doesn't exist: fatal "Failed open file"). Our parts keep their
+// colour in the code byte; the id is the slot's.
+using DescriptorIdFn = uint32_t(__cdecl*)(uint32_t, uint32_t, uint32_t, uint32_t);
+DescriptorIdFn g_descriptorIdOriginal = nullptr;
+
+uint32_t __cdecl DescriptorId(uint32_t set, uint32_t colour, uint32_t variant, uint32_t cat)
+{
+	if (colour != 0 && (set & 0xff) == 0x0e) {
+		for (const PartPackage& pkg : g_packages) {
+			if (pkg.item == (int)(variant & 0xff)) {
+				colour = 0;
+				break;
+			}
+		}
+	}
+	uint32_t id = g_descriptorIdOriginal(set, colour, variant, cat);
+	if (id >= 0x100 && (set & 0xdf) == 0x0e) {
+		static int logged = 0;
+		if (logged++ < 8) {
+			XLS_LOG_WARN("mods: parts: no descriptor for DLC set 0x%02x colour %u variant %u (cat %u), asked by 0x%p.", set & 0xff, colour, variant & 0xff, cat,
+			             __builtin_return_address(0));
+		}
+	}
+	return id;
+}
+
+// --- Chosen colours. A DLC part has one id for all colours (stock parts have one per colour), so
+// the save can't hold a custom part's colour: it is kept here per set and category
+// (ModCache\parts\colours.txt, "<set id> <category> <letter>" lines) and put back into the code
+// whenever the game turns an id into a code.
+std::mutex g_coloursMutex;
+std::map<std::string, int> g_chosen;
+bool g_chosenLoaded = false;
+
+std::wstring ColoursFile()
+{
+	return Cfg().modCacheDir + L"parts\\colours.txt";
+}
+
+void LoadChosenLocked()
+{
+	if (g_chosenLoaded) {
+		return;
+	}
+	g_chosenLoaded = true;
+	Bytes data;
+	if (!ReadWholeFile(ColoursFile(), &data)) {
+		return;
+	}
+	std::string text(data.begin(), data.end()), line;
+	size_t pos = 0;
+	while (pos < text.size()) {
+		size_t end = text.find('\n', pos);
+		line = text.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+		pos = end == std::string::npos ? text.size() : end + 1;
+		char id[64], cat[16], letter = 0;
+		if (sscanf(line.c_str(), "%63s %15s %c", id, cat, &letter) == 3 && letter >= 'A' && letter <= 'D') {
+			g_chosen[std::string(id) + ":" + cat] = letter - 'A';
+		}
+	}
+}
+
+int ChosenColour(const PartPackage& pkg)
+{
+	std::lock_guard<std::mutex> lock(g_coloursMutex);
+	LoadChosenLocked();
+	auto it = g_chosen.find(pkg.setId + ":" + kSlotNames[pkg.slot]);
+	return it == g_chosen.end() ? -1 : it->second;
+}
+
+void SetChosenColour(const PartPackage& pkg, int colour)
+{
+	std::lock_guard<std::mutex> lock(g_coloursMutex);
+	LoadChosenLocked();
+	g_chosen[pkg.setId + ":" + kSlotNames[pkg.slot]] = colour;
+	std::string text;
+	for (const auto& c : g_chosen) {
+		size_t colon = c.first.rfind(':');
+		text += c.first.substr(0, colon) + " " + c.first.substr(colon + 1) + " " + (char)('A' + c.second) + "\n";
+	}
+	WriteWholeFile(ColoursFile(), Bytes(text.begin(), text.end()));
+}
+
+// Apply part FUN_00eed720 thiscall(menu, cat, code): wearing a part resets its colour to 0. For our
+// parts with a chosen colour, step to it through the colour step's tail (preview, swatch, codes).
+using ApplyFn = void(__attribute__((thiscall)) *)(uint8_t*, uint32_t, uint32_t);
+ApplyFn g_applyOriginal = nullptr;
+
+void __attribute__((thiscall)) ApplyPart(uint8_t* menu, uint32_t cat, uint32_t code)
+{
+	g_applyOriginal(menu, cat, code);
+	const PartPackage* pkg = FindPackage(cat, code);
+	if (!pkg || pkg->colours.size() < 2 || !g_colourStepTail) {
+		return;
+	}
+	int chosen = ChosenColour(*pkg);
+	if (chosen < 0) {
+		return;
+	}
+	int worn = WornColour(*pkg, (uint8_t)chosen);
+	menu[0x54 + cat] = (uint8_t)(worn - 1); // the tail adds 1
+	g_colourStepTail(menu, cat, MenuCode(menu, cat), 1);
+}
+
+// Part id -> code FUN_00f5cae0 cdecl(id, cat). Id 0 of every category is a placeholder
+// (0x0500000f: set 0x0f, faction 5) whose colour archive doesn't exist, so loading it is fatal. A
+// loadout holding id 0 (a DLC part saved with a colour other than A) gets the default part (id 1)
+// instead. Also logs which caller produced it (diagnostics for the colour/save route).
+using PartCodeFn = uint32_t(__cdecl*)(uint32_t, uint32_t);
+PartCodeFn g_partCodeOriginal = nullptr;
+
+uint32_t __cdecl PartCode(uint32_t id, uint32_t cat)
+{
+	uint32_t code = g_partCodeOriginal(id, cat);
+	if (id == 0 && cat < kPartSlotCount && (code & 0xff) == 0x0f) {
+		static int logged = 0;
+		if (logged++ < 8) {
+			XLS_LOG_WARN("mods: parts: %s id 0 (placeholder) asked for by 0x%p; using the default part.", kSlotNames[cat], __builtin_return_address(0));
+		}
+		return g_partCodeOriginal(1, cat);
+	}
+	if (const PartPackage* pkg = FindPackage(cat, code)) {
+		int chosen = ChosenColour(*pkg);
+		if (chosen >= 0) {
+			code = (code & ~0xff00u) | ((uint32_t)WornColour(*pkg, (uint8_t)chosen) << 8);
+		}
+	}
+	return code;
+}
+
+// Part code -> id FUN_00f5c9a0 cdecl(code, cat): logs failed lookups of DLC codes (diagnostics).
+using PartIdFn = uint32_t(__cdecl*)(uint32_t, uint32_t);
+PartIdFn g_partIdOriginal = nullptr;
+
+uint32_t __cdecl PartId(uint32_t code, uint32_t cat)
+{
+	uint32_t id = g_partIdOriginal(code, cat);
+	if (id >= 0x100 && ((code & 0xff) & 0xdf) == 0x0e) {
+		static int logged = 0;
+		if (logged++ < 8) {
+			XLS_LOG_WARN("mods: parts: no id for DLC code 0x%08x (cat %u), asked by 0x%p.", code, cat, __builtin_return_address(0));
+		}
+	}
+	return id;
+}
+
+void* Detour(uint8_t* fn, const uint8_t* expect, size_t length, void* detour)
+{
+	if (memcmp(fn, expect, length) != 0) {
+		return nullptr;
+	}
+	auto* tramp = (uint8_t*)VirtualAlloc(nullptr, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+	if (!tramp) {
+		return nullptr;
+	}
+	memcpy(tramp, fn, length);
+	tramp[length] = 0xe9;
+	int32_t back = (int32_t)((fn + length) - (tramp + length + 5));
+	memcpy(tramp + length + 1, &back, 4);
+	FlushInstructionCache(GetCurrentProcess(), tramp, 32);
+	uint8_t patch[16];
+	memset(patch, 0x90, sizeof(patch));
+	patch[0] = 0xe9;
+	int32_t rel = (int32_t)((uint8_t*)detour - (fn + 5));
+	memcpy(patch + 1, &rel, 4);
+	DWORD old = 0;
+	if (!VirtualProtect(fn, length, PAGE_EXECUTE_READWRITE, &old)) {
+		return nullptr;
+	}
+	memcpy(fn, patch, length);
+	VirtualProtect(fn, length, old, &old);
+	FlushInstructionCache(GetCurrentProcess(), fn, length);
+	return tramp;
+}
+
+const uint8_t kColourStepPrologue[] = {0x8a, 0x44, 0x24, 0x08, 0x56, 0x8b, 0xf1};      // mov al,[esp+8]; push esi; mov esi,ecx
+const uint8_t kColourStepBody[] = {0x8a, 0x4c, 0x24, 0x10, 0x57, 0x8b, 0x7c, 0x24, 0x0c}; // at +0x34: mov cl,[esp+0x10]; push edi; mov edi,[esp+0xc]
+const uint8_t kColourLockedPrologue[] = {0x8b, 0x44, 0x24, 0x04, 0x50};               // mov eax,[esp+4]; push eax
+const uint8_t kDescriptorIdPrologue[] = {0x0f, 0xb6, 0x4c, 0x24, 0x0c, 0x0f, 0xb6, 0x54, 0x24, 0x08}; // movzx ecx,[esp+0xc]; movzx edx,[esp+8]
+const uint8_t kPartCodePrologue[] = {0x8b, 0x44, 0x24, 0x04, 0x3d, 0xb4, 0x00, 0x00, 0x00}; // mov eax,[esp+4]; cmp eax,0xb4
+const uint8_t kPartIdPrologue[] = {0x51, 0x8a, 0x4c, 0x24, 0x08, 0x80, 0xe1, 0xdf};       // push ecx; mov cl,[esp+8]; and cl,0xdf
+const uint8_t kApplyPrologue[] = {0x56, 0x8b, 0xf1, 0x57, 0x8b, 0x7c, 0x24, 0x0c};       // push esi; mov esi,ecx; push edi; mov edi,[esp+0xc]
+const uint8_t kSwatchPrologue[] = {0x83, 0xec, 0x24, 0x8b, 0x54, 0x24, 0x2c};          // sub esp,0x24; mov edx,[esp+0x2c]
+
+// VAs per exe (LP2DX11.exe, LP2DX9.exe); every prologue is checked before patching.
+struct MenuVas {
+	uint32_t step, swatch, locked, apply, descriptorId, partCode, partId;
+};
+const MenuVas kMenuVas[] = {
+	{0xeeb9a0, 0xee5060, 0xee4c40, 0xeed720, 0xf5c860, 0xf5cae0, 0xf5c9a0}, // DX11
+	{0xedbb80, 0xed5240, 0xed4e20, 0xedd900, 0xf4cb40, 0xf4cdc0, 0xf4cc80}, // DX9
+};
+
+void InstallMenuColours(uint8_t* base, const MenuVas& va)
+{
+	auto at = [&](uint32_t v) { return base + (v - 0x400000); };
+	uint8_t* step = at(va.step);
+	uint8_t* body = step + 0x34;
+	if (memcmp(body, kColourStepBody, sizeof(kColourStepBody)) != 0 || memcmp(step, kColourStepPrologue, sizeof(kColourStepPrologue)) != 0 ||
+	    memcmp(at(va.swatch), kSwatchPrologue, sizeof(kSwatchPrologue)) != 0 || memcmp(at(va.apply), kApplyPrologue, sizeof(kApplyPrologue)) != 0) {
+		XLS_LOG_WARN("mods: parts: customise menu not as expected; custom parts keep one colour.");
+		return;
+	}
+	// the tail entry: push esi; mov esi,ecx; jmp body (the stack as the body expects it)
+	auto* tail = (uint8_t*)VirtualAlloc(nullptr, 16, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+	if (!tail) {
+		return;
+	}
+	tail[0] = 0x56;
+	tail[1] = 0x8b;
+	tail[2] = 0xf1;
+	tail[3] = 0xe9;
+	int32_t rel = (int32_t)(body - (tail + 8));
+	memcpy(tail + 4, &rel, 4);
+	FlushInstructionCache(GetCurrentProcess(), tail, 16);
+	g_colourStepTail = (ColourStepFn)tail;
+	g_partCodeOriginal = (PartCodeFn)Detour(at(va.partCode), kPartCodePrologue, sizeof(kPartCodePrologue), (void*)&PartCode);
+	g_partIdOriginal = (PartIdFn)Detour(at(va.partId), kPartIdPrologue, sizeof(kPartIdPrologue), (void*)&PartId);
+	g_descriptorIdOriginal = (DescriptorIdFn)Detour(at(va.descriptorId), kDescriptorIdPrologue, sizeof(kDescriptorIdPrologue), (void*)&DescriptorId);
+	g_colourStepOriginal = (ColourStepFn)Detour(step, kColourStepPrologue, sizeof(kColourStepPrologue), (void*)&ColourStep);
+	g_swatchOriginal = (SwatchFn)Detour(at(va.swatch), kSwatchPrologue, sizeof(kSwatchPrologue), (void*)&Swatch);
+	g_colourLockedOriginal = (ColourLockedFn)Detour(at(va.locked), kColourLockedPrologue, sizeof(kColourLockedPrologue), (void*)&ColourLocked);
+	g_applyOriginal = (ApplyFn)Detour(at(va.apply), kApplyPrologue, sizeof(kApplyPrologue), (void*)&ApplyPart);
+	XLS_LOG_INFO("mods: parts: customise menu colours hooked (code %d, id %d, descriptor %d, step %d, swatch %d, arrows %d, apply %d).", !!g_partCodeOriginal,
+	             !!g_partIdOriginal, !!g_descriptorIdOriginal, !!g_colourStepOriginal, !!g_swatchOriginal, !!g_colourLockedOriginal, !!g_applyOriginal);
+}
+
 const uint8_t kPathPrologue[] = {0x81, 0xec, 0xd0, 0x00, 0x00, 0x00, 0x53, 0x55, 0x8b, 0xac, 0x24, 0xe4, 0x00, 0x00, 0x00, 0x56, 0x8b, 0xf1, 0xb8};
 const uint32_t kPathRvas[] = {0xb664b0 /* DX11 */, 0xb56650 /* DX9 */};
 
+}
+
+void PartsIndex(std::unordered_map<std::wstring, std::wstring>* index)
+{
+	for (const PartPackage& pkg : PartPackages()) {
+		std::wstring dir = pkg.root + L"Content\\nativePC\\arcXmlTmpPC\\CustomParts\\";
+		for (int dset : {0x0e, 0x2e}) {
+			for (int c = 1; c < 4; c++) {
+				std::string name = std::string(kPrefixes[pkg.slot]) + Hex2(dset) + Hex2(pkg.item) + Hex2(c) + ".arc";
+				std::wstring wname = Utf8ToWide(name.c_str());
+				(*index)[L"nativepc\\arcxmltmppc\\customparts\\" + wname] = dir + wname;
+			}
+		}
+	}
 }
 
 bool PartsTryInstallPathHook(unsigned char* base)
@@ -764,6 +1164,7 @@ bool PartsTryInstallPathHook(unsigned char* base)
 	VirtualProtect(fn, len, old, &old);
 	FlushInstructionCache(GetCurrentProcess(), fn, len);
 	XLS_LOG_INFO("mods: parts: path builder hooked at 0x%p.", fn);
+	InstallMenuColours(base, kMenuVas[fn == base + kPathRvas[0] ? 0 : 1]);
 	return true;
 }
 
