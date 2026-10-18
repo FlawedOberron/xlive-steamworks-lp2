@@ -325,18 +325,26 @@ const char* const kPrefixes[kPartSlotCount] = {"hd", "bd", "bk", "lg"};
 const int kSnameCategory[kPartSlotCount] = {1, 2, 3, 4};  // head, body, back, legs
 const int kSnameFloats[kPartSlotCount] = {3, 3, 12, 0};
 const int kCarrierItem = 69; // the carrier's default slot (saves from before the per-loadout aliases)
-const int kAliasFirst = 20;  // carrier aliases: one DLC slot per faction (5) and loadout (2), 20-29
-const int kAliasCount = 10;
+const int kAliasFirst = 20;  // carrier aliases: two DLC slots per faction (5) and loadout (2), 20-39
+const int kAliasCount = 20;
 
 bool IsCarrierItem(int item)
 {
 	return item == kCarrierItem || (item >= kAliasFirst && item < kAliasFirst + kAliasCount);
 }
 
-// The alias a faction's loadout wears (save: part ids at game +0x50794 + (faction + loadout*5)*8).
-int AliasItem(int faction, int loadout)
+// The aliases a faction's loadout wears (save: part ids at game +0x50794 + (faction + loadout*5)*8).
+// Two per loadout, worn in turn: a set switch then changes the archive name, so the game frees the
+// old set's archive and opens the new one (same name: it hands the old one back).
+int AliasItem(int faction, int loadout, int alt)
 {
-	return kAliasFirst + (faction < 0 || faction > 4 ? 0 : faction) * 2 + (loadout & 1);
+	return kAliasFirst + (((faction < 0 || faction > 4 ? 0 : faction) * 2 + (loadout & 1)) * 2) + (alt & 1);
+}
+
+// The slot a choice is kept under: a loadout's two aliases share one.
+int ChoiceItem(int item)
+{
+	return item >= kAliasFirst && item < kAliasFirst + kAliasCount ? item & ~1 : item;
 }
 const char* const kGenVersion = "lp2-partpkg 11";
 
@@ -827,7 +835,7 @@ std::map<int, int> g_carrierChoice; // item * kPartSlotCount + category -> index
 int CarrierWornIndex(int cat, int item)
 {
 	std::lock_guard<std::mutex> lock(g_carrierMutex);
-	auto it = g_carrierChoice.find(item * kPartSlotCount + cat);
+	auto it = g_carrierChoice.find(ChoiceItem(item) * kPartSlotCount + cat);
 	return it != g_carrierChoice.end() ? it->second : (int)g_carrierWorn[cat];
 }
 
@@ -879,7 +887,7 @@ void LoadCarrierChoice()
 				continue;
 			}
 			if (perSlot) {
-				g_carrierChoice[item * kPartSlotCount + s] = i;
+				g_carrierChoice[ChoiceItem(item) * kPartSlotCount + s] = i;
 			}
 			else {
 				g_carrierWorn[s] = i;
@@ -892,7 +900,7 @@ void LoadCarrierChoice()
 void SetCarrierWorn(int cat, int item, int i)
 {
 	std::lock_guard<std::mutex> lock(g_carrierMutex);
-	g_carrierChoice[item * kPartSlotCount + cat] = i;
+	g_carrierChoice[ChoiceItem(item) * kPartSlotCount + cat] = i;
 	g_carrierWorn[cat] = i;
 	std::string text;
 	for (int s = 0; s < kPartSlotCount; s++) {
@@ -908,6 +916,38 @@ void SetCarrierWorn(int cat, int item, int i)
 	}
 	WriteWholeFile(CarrierFile(), Bytes(text.begin(), text.end()));
 	XLS_LOG_INFO("mods: parts: carrier slot %d %s wears %s.", item, kSlotNames[cat], g_carrierSets[cat][i].setId.c_str());
+}
+
+DWORD WINAPI WarmCarrierCache(LPVOID)
+{
+	SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_IDLE);
+	size_t bytes = 0;
+	DWORD start = GetTickCount();
+	std::vector<char> buf(1 << 20);
+	for (const auto& sets : g_carrierSets) {
+		for (const PartPackage& pkg : sets) {
+			std::wstring dir = pkg.root + L"Content\\nativePC\\arcXmlTmpPC\\CustomParts\\";
+			WIN32_FIND_DATAW fd;
+			HANDLE find = FindFirstFileW((dir + L"*.arc").c_str(), &fd);
+			if (find == INVALID_HANDLE_VALUE) {
+				continue;
+			}
+			do {
+				HANDLE f = CreateFileW((dir + fd.cFileName).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+				if (f == INVALID_HANDLE_VALUE) {
+					continue;
+				}
+				DWORD got = 0;
+				while (ReadFile(f, buf.data(), (DWORD)buf.size(), &got, nullptr) && got) {
+					bytes += got;
+				}
+				CloseHandle(f);
+			} while (FindNextFileW(find, &fd));
+			FindClose(find);
+		}
+	}
+	XLS_LOG_INFO("mods: parts: warmed %zu MB of carrier archives in %lu ms.", bytes >> 20, (unsigned long)(GetTickCount() - start));
+	return 0;
 }
 
 void BuildPackages()
@@ -992,6 +1032,12 @@ void BuildPackages()
 	}
 	LoadCarrierChoice();
 	XLS_LOG_INFO("mods: parts: %zu part package(s) ready.", g_packages.size());
+	// Warm the OS file cache with every carrier build's archives (read once, low priority), so a
+	// set's first load in the menu doesn't wait on the disk (it shows nothing until loaded).
+	HANDLE warm = CreateThread(nullptr, 0, WarmCarrierCache, nullptr, 0, nullptr);
+	if (warm) {
+		CloseHandle(warm);
+	}
 }
 
 }
@@ -1037,7 +1083,7 @@ DWORD WINAPI UnlockThread(LPVOID param)
 			continue;
 		}
 		int set = 0;
-		// custom slots from before the carrier (30-68) stay locked: the list then skips them
+		// custom slots from before the carrier (40-68) stay locked: the list then skips them
 		for (int s = 0; s < kPartSlotCount; s++) {
 			for (int item = kAliasFirst + kAliasCount; item < kCarrierItem; item++) {
 				int id = 180 + item;
@@ -1380,6 +1426,67 @@ char* __attribute__((thiscall)) DlcName(void* names, uint32_t cat, uint32_t vari
 // near end.
 using PartCodeFn = uint32_t(__cdecl*)(uint32_t, uint32_t);
 PartCodeFn g_partCodeOriginal = nullptr;
+
+// Backup for a set's first load in a session: if the preview hasn't got it after 1.5 s (state 3 at
+// preview + g_previewState + cat*4 = loaded; the preview is menu+0x344), it is applied again.
+uint32_t g_previewState = 0x20d4;
+std::atomic<uint32_t> g_redrawCode[kPartSlotCount];
+std::atomic<int> g_redrawPass[kPartSlotCount];    // redraws done for g_redrawCode (two: when loaded, ~1 s later)
+std::atomic<DWORD> g_redrawAt[kPartSlotCount];    // tick of the first
+std::set<int> g_loadedOnce[kPartSlotCount]; // menu thread only
+
+void NoteCarrierWorn(uint32_t cat, int set, uint32_t code)
+{
+	if (g_loadedOnce[cat].insert(set).second) {
+		g_redrawPass[cat] = 0;
+		g_redrawAt[cat] = GetTickCount();
+		g_redrawCode[cat] = code;
+	}
+}
+
+void __attribute__((thiscall)) ApplyPart(uint8_t* menu, uint32_t cat, uint32_t code);
+
+
+// Menu update FUN_00ef0c20 (DX9 ee0e00), every frame while the customise menu runs.
+extern "C" __attribute__((used)) void __stdcall MenuTick(uint8_t* menu)
+{
+	uint8_t* preview = *(uint8_t**)(menu + 0x344);
+	for (uint32_t cat = 0; cat < kPartSlotCount; cat++) {
+		uint32_t code = g_redrawCode[cat];
+		if (!code) {
+			continue;
+		}
+		if (MenuCode(menu, cat) != code) {
+			g_redrawCode[cat] = 0; // moved on before it loaded
+			continue;
+		}
+		if (!preview) {
+			continue;
+		}
+		if (*(int32_t*)(preview + g_previewState + cat * 4) != 3) {
+			// never ready: the game keeps retrying a model it didn't find; load it again
+			if (GetTickCount() - g_redrawAt[cat] > 1500 && g_redrawPass[cat] < 4) {
+				int pass = ++g_redrawPass[cat];
+				g_redrawAt[cat] = GetTickCount();
+				XLS_LOG_INFO("mods: parts: %s carrier not loaded after 1.5 s, reload %d.", kSlotNames[cat], pass);
+				ApplyPart(menu, cat, code);
+			}
+			continue;
+		}
+		g_redrawCode[cat] = 0; // loaded
+	}
+}
+extern "C" void* g_menuUpdateTramp;
+__attribute__((used)) void* g_menuUpdateTramp = nullptr;
+extern "C" void MenuUpdateStub();
+asm(".text\n"
+    "_MenuUpdateStub:\n"
+    "  pushal\n"
+    "  push %ecx\n"
+    "  call _MenuTick@4\n"
+    "  popal\n"
+    "  jmp *_g_menuUpdateTramp\n");
+
 using PartStepFn = uint32_t*(__attribute__((thiscall)) *)(uint8_t*, uint32_t*, uint32_t, int);
 PartStepFn g_partStepOriginal = nullptr;
 
@@ -1389,6 +1496,7 @@ uint32_t* __attribute__((thiscall)) PartStep(uint8_t* menu, uint32_t* out, uint3
 	if (dir == 0 || cat >= kPartSlotCount || g_carrierSets[cat].empty() || !g_partCodeOriginal) {
 		return g_partStepOriginal(menu, out, cat, dir);
 	}
+	uint32_t* wornSlot = (uint32_t*)(menu + 0xa8 + (cat + *(int32_t*)(menu + 0xa4) * 8) * 4);
 	int faction = *(int32_t*)(menu + 0x124);
 	bool anyFaction = menu[0x72f] != 0;
 	std::vector<int> list;
@@ -1398,9 +1506,13 @@ uint32_t* __attribute__((thiscall)) PartStep(uint8_t* menu, uint32_t* out, uint3
 			list.push_back((int)i);
 		}
 	}
-	// this loadout's carrier slot (its own, whatever slot the code had)
-	int alias = AliasItem(faction, *(int32_t*)(menu + 0xa4));
+	// this loadout's carrier slots (its own, whatever slot the code had); a switch wears the other one
+	int loadout = *(int32_t*)(menu + 0xa4);
+	int curItem = (cur >> 16) & 0xff;
+	int alias = AliasItem(faction, loadout, 0);
+	int other = curItem == alias ? AliasItem(faction, loadout, 1) : alias;
 	uint32_t aliasCode = g_partCodeOriginal(180 + alias, cat);
+	uint32_t otherCode = g_partCodeOriginal(180 + other, cat);
 	int step = dir < 0 ? -1 : 1;
 	if (IsCarrier(cur) && !list.empty()) {
 		int at = (int)(std::find(list.begin(), list.end(), CarrierWornIndex((int)cat, (cur >> 16) & 0xff)) - list.begin());
@@ -1412,9 +1524,10 @@ uint32_t* __attribute__((thiscall)) PartStep(uint8_t* menu, uint32_t* out, uint3
 			SetCarrierWorn((int)cat, alias, list[next]);
 			g_lastCarrierCat = (int)cat;
 			XLS_LOG_INFO("mods: parts: %s carrier -> %s (%d/%zu).", kSlotNames[cat], g_carrierSets[cat][list[next]].setId.c_str(), next + 1, list.size());
-			*out = aliasCode;
-			if (aliasCode == *(uint32_t*)(menu + 0xa8 + cat * 4)) {
-				ApplyPart(menu, cat, aliasCode); // the menu won't (same code): reload the preview, name, colour
+			*out = otherCode;
+			NoteCarrierWorn(cat, list[next], otherCode);
+			if (otherCode == *(uint32_t*)(menu + 0xa8 + cat * 4)) {
+				ApplyPart(menu, cat, otherCode); // the menu won't (same code): reload the preview, name, colour
 			}
 			return out;
 		}
@@ -1424,7 +1537,7 @@ uint32_t* __attribute__((thiscall)) PartStep(uint8_t* menu, uint32_t* out, uint3
 	if (IsCarrier(cur)) {
 		// leaving the carrier: the list holds every carrier slot, step over them all. The game's step
 		// stops on the worn code's own entry, so the worn code is hidden meanwhile (no entry matches).
-		uint32_t* worn = (uint32_t*)(menu + 0xa8 + (cat + *(int32_t*)(menu + 0xa4) * 8) * 4);
+		uint32_t* worn = wornSlot;
 		const uint32_t kNone = 0xfefefefe;
 		*worn = kNone;
 		r = g_partStepOriginal(menu, out, cat, dir);
@@ -1444,6 +1557,7 @@ uint32_t* __attribute__((thiscall)) PartStep(uint8_t* menu, uint32_t* out, uint3
 		*out = aliasCode; // coming onto the carrier: this loadout's slot, at the near end
 		if (!list.empty()) {
 			SetCarrierWorn((int)cat, alias, step > 0 ? list.front() : list.back());
+			NoteCarrierWorn(cat, step > 0 ? list.front() : list.back(), aliasCode);
 		}
 		g_lastCarrierCat = (int)cat;
 	}
@@ -1537,15 +1651,16 @@ const uint8_t kPartIdPrologue[] = {0x51, 0x8a, 0x4c, 0x24, 0x08, 0x80, 0xe1, 0xd
 const uint8_t kApplyPrologue[] = {0x56, 0x8b, 0xf1, 0x57, 0x8b, 0x7c, 0x24, 0x0c};       // push esi; mov esi,ecx; push edi; mov edi,[esp+0xc]
 const uint8_t kPartStepPrologue[] = {0x53, 0x8b, 0x5c, 0x24, 0x0c, 0x55, 0x8b, 0xe9};   // push ebx; mov ebx,[esp+0xc]; push ebp; mov ebp,ecx
 const uint8_t kDlcNamePrologue[] = {0x53, 0x8a, 0x5c, 0x24, 0x08, 0x56, 0x8b, 0xf1};    // push ebx; mov bl,[esp+8]; push esi; mov esi,ecx
+const uint8_t kMenuUpdatePrologue[] = {0x83, 0xec, 0x08, 0x53, 0x56, 0x8b, 0xf1};      // sub esp,8; push ebx; push esi; mov esi,ecx
 const uint8_t kSwatchPrologue[] = {0x83, 0xec, 0x24, 0x8b, 0x54, 0x24, 0x2c};          // sub esp,0x24; mov edx,[esp+0x2c]
 
 // VAs per exe (LP2DX11.exe, LP2DX9.exe); every prologue is checked before patching.
 struct MenuVas {
-	uint32_t step, swatch, locked, apply, descriptorId, partCode, partId, partStep, dlcName;
+	uint32_t step, swatch, locked, apply, descriptorId, partCode, partId, partStep, dlcName, menuUpdate, previewState;
 };
 const MenuVas kMenuVas[] = {
-	{0xeeb9a0, 0xee5060, 0xee4c40, 0xeed720, 0xf5c860, 0xf5cae0, 0xf5c9a0, 0xee4ac0, 0x8654a0}, // DX11
-	{0xedbb80, 0xed5240, 0xed4e20, 0xedd900, 0xf4cb40, 0xf4cdc0, 0xf4cc80, 0xed4ca0, 0x855df0}, // DX9
+	{0xeeb9a0, 0xee5060, 0xee4c40, 0xeed720, 0xf5c860, 0xf5cae0, 0xf5c9a0, 0xee4ac0, 0x8654a0, 0xef0c20, 0x20d4}, // DX11
+	{0xedbb80, 0xed5240, 0xed4e20, 0xedd900, 0xf4cb40, 0xf4cdc0, 0xf4cc80, 0xed4ca0, 0x855df0, 0xee0e00, 0x20c4}, // DX9
 };
 
 void InstallMenuColours(uint8_t* base, const MenuVas& va)
@@ -1581,9 +1696,11 @@ void InstallMenuColours(uint8_t* base, const MenuVas& va)
 	if (g_applyOriginal) {
 		g_partStepOriginal = (PartStepFn)Detour(at(va.partStep), kPartStepPrologue, sizeof(kPartStepPrologue), (void*)&PartStep);
 	}
+	g_previewState = va.previewState;
+	g_menuUpdateTramp = Detour(at(va.menuUpdate), kMenuUpdatePrologue, sizeof(kMenuUpdatePrologue), (void*)&MenuUpdateStub);
 	g_dlcNameOriginal = (DlcNameFn)Detour(at(va.dlcName), kDlcNamePrologue, sizeof(kDlcNamePrologue), (void*)&DlcName);
-	XLS_LOG_INFO("mods: parts: customise menu colours hooked (code %d, id %d, descriptor %d, step %d, swatch %d, arrows %d, apply %d, part step %d, name %d).", !!g_partCodeOriginal,
-	             !!g_partIdOriginal, !!g_descriptorIdOriginal, !!g_colourStepOriginal, !!g_swatchOriginal, !!g_colourLockedOriginal, !!g_applyOriginal, !!g_partStepOriginal, !!g_dlcNameOriginal);
+	XLS_LOG_INFO("mods: parts: customise menu colours hooked (code %d, id %d, descriptor %d, step %d, swatch %d, arrows %d, apply %d, part step %d, name %d, redraw %d).", !!g_partCodeOriginal,
+	             !!g_partIdOriginal, !!g_descriptorIdOriginal, !!g_colourStepOriginal, !!g_swatchOriginal, !!g_colourLockedOriginal, !!g_applyOriginal, !!g_partStepOriginal, !!g_dlcNameOriginal, !!g_menuUpdateTramp);
 }
 
 const uint8_t kPathPrologue[] = {0x81, 0xec, 0xd0, 0x00, 0x00, 0x00, 0x53, 0x55, 0x8b, 0xac, 0x24, 0xe4, 0x00, 0x00, 0x00, 0x56, 0x8b, 0xf1, 0xb8};
