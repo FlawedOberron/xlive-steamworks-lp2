@@ -141,6 +141,10 @@ with one, the swatch is locked. Each letter wears the part's own colour map for 
 else the template part's. The choice is remembered per set and part in `ModCache\parts\colours.txt`.
 (Older `"colour": "B"` still works: that colour only.)
 
+Each colour can also have its own shine: a part's `textures` may add `MM_<letter>` / `NM_<letter>`
+(that colour's mask / normal map) and `material_overrides` per colour (`spec_power`,
+`spec_colour`); see `README-parts.md` §9 "Shine per colour".
+
 **How they appear:** at start, each part of each set is built into a small DLC content package in
 `ModCache\parts\pkg\` (the template part's archives with the custom model in place; rebuilt only
 when something changes) and listed in each category's part list under the set's name, after the

@@ -153,6 +153,55 @@ void LoadFolder(const std::wstring& dir, const std::wstring& label)
 			}
 			set.textures[s].push_back({tex.first, tp});
 		}
+		for (const auto& byColour : part["material_overrides"].Items()) {
+			int c = byColour.first.size() == 1 ? toupper((unsigned char)byColour.first[0]) - 'A' : -1;
+			if (c < 0 || c > 3) {
+				XLS_LOG_WARN("mods: parts %ls: %s: material_overrides key \"%s\" is not A-D.", label.c_str(), kSlotNames[s], byColour.first.c_str());
+				continue;
+			}
+			for (const auto& byMaterial : byColour.second.Items()) {
+				int m = byMaterial.first == "*" ? -1 : atoi(byMaterial.first.c_str());
+				for (const auto& byWord : byMaterial.second.Items()) {
+					// named: spec_power (word 18, highlight size: low = broad sheen, high = pinpoint),
+					// spec_colour (words 20-22, specular RGB multiplier; a number or [r, g, b]);
+					// or a raw word index
+					std::vector<std::pair<int, double>> words;
+					const Json& v = byWord.second;
+					if (byWord.first == "spec_power") {
+						if (v.IsNumber()) {
+							words.push_back({18, v.GetNumber(0)});
+						}
+					}
+					else if (byWord.first == "spec_colour") {
+						for (int i = 0; i < 3; i++) {
+							const Json& e = v.IsArray() && v.Size() == 3 ? v.At(i) : v;
+							if (e.IsNumber()) {
+								words.push_back({20 + i, e.GetNumber(0)});
+							}
+						}
+					}
+					else if (!byWord.first.empty() && isdigit((unsigned char)byWord.first[0])) {
+						if (v.IsNumber()) {
+							words.push_back({atoi(byWord.first.c_str()), v.GetNumber(0)});
+						}
+					}
+					else {
+						XLS_LOG_WARN("mods: parts %ls: %s: unknown material setting \"%s\".", label.c_str(), kSlotNames[s], byWord.first.c_str());
+					}
+					for (const auto& w : words) {
+						if (w.first < 0 || w.first >= 40) {
+							continue;
+						}
+						MaterialOverride o;
+						o.colour = c;
+						o.material = m;
+						o.word = w.first;
+						o.value = (float)w.second;
+						set.overrides[s].push_back(o);
+					}
+				}
+			}
+		}
 		count++;
 	}
 	if (count == 0) {
@@ -273,7 +322,7 @@ const char* const kPrefixes[kPartSlotCount] = {"hd", "bd", "bk", "lg"};
 const int kSnameCategory[kPartSlotCount] = {1, 2, 3, 4};  // head, body, back, legs
 const int kSnameFloats[kPartSlotCount] = {3, 3, 12, 0};
 const int kLastItem = 69;
-const char* const kGenVersion = "lp2-partpkg 10";
+const char* const kGenVersion = "lp2-partpkg 11";
 
 std::once_flag g_pkgOnce;
 std::vector<PartPackage> g_packages;
@@ -437,6 +486,33 @@ bool BuildLpcEntries(const std::string& base, const Bytes& modelIn, const std::v
 	return true;
 }
 
+// Applies one colour's material overrides to a model copy (material records: 160 bytes each after
+// the texture names; count u16 @0x0a, texture count u32 @0x1c, texture table @0x2c).
+bool PatchMaterials(Bytes* model, const std::vector<MaterialOverride>& overrides, int colour)
+{
+	if (model->size() < 0x30) {
+		return false;
+	}
+	uint16_t nmat = *(uint16_t*)(model->data() + 0x0a);
+	uint32_t ntex = *(uint32_t*)(model->data() + 0x1c);
+	uint32_t oTex = *(uint32_t*)(model->data() + 0x2c);
+	size_t oMat = (size_t)oTex + (size_t)ntex * 64;
+	if (oMat + (size_t)nmat * 160 > model->size()) {
+		return false;
+	}
+	for (const MaterialOverride& o : overrides) {
+		if (o.colour != colour || o.material >= nmat) {
+			continue;
+		}
+		for (int m = 0; m < nmat; m++) {
+			if (o.material == m || (o.material < 0 && (*(uint32_t*)(model->data() + oMat + m * 160) & 0xff) == 0x43)) {
+				memcpy(model->data() + oMat + m * 160 + o.word * 4, &o.value, 4); // "*": lit materials only (type byte 0x43)
+			}
+		}
+	}
+	return true;
+}
+
 bool BuildPackage(const PartSet& set, int slot, int item, PartPackage* out)
 {
 	std::string tmpl = set.templates[slot];
@@ -464,6 +540,11 @@ bool BuildPackage(const PartSet& set, int slot, int item, PartPackage* out)
 	std::string stamp = stampBuf;
 	for (const auto& t : set.textures[slot]) {
 		stamp += " " + t.first + "=" + FileStamp(t.second);
+	}
+	for (const MaterialOverride& o : set.overrides[slot]) {
+		char ob[64];
+		snprintf(ob, sizeof(ob), " m%c%d.%d=%g", 'A' + o.colour, o.material, o.word, o.value);
+		stamp += ob;
 	}
 	Bytes old;
 	bool fresh = ReadWholeFile(root + L"stamp.txt", &old) && std::string(old.begin(), old.end()) == stamp;
@@ -594,6 +675,58 @@ bool BuildPackage(const PartSet& set, int slot, int item, PartPackage* out)
 						}
 					}
 				}
+				// a model copy per colour (<lpc>_<letter>) for material overrides and its own mask /
+				// normal map (texture roles MM_<letter>, NM_<letter>)
+				for (int c = 0; c < 4; c++) {
+					bool any = false;
+					for (const MaterialOverride& o : set.overrides[slot]) {
+						any |= o.colour == c;
+					}
+					std::string mmRole = std::string("MM_") + kColours[c], nmRole = std::string("NM_") + kColours[c];
+					any |= find(mmRole.c_str()) != nullptr || find(nmRole.c_str()) != nullptr;
+					if (!any) {
+						continue;
+					}
+					auto base = std::find_if(lpc.begin(), lpc.end(), [&](const ArcEntry& e) { return e.name == lpcBase && e.classHash == ClassHash("rModel"); });
+					if (base == lpc.end()) {
+						break;
+					}
+					ArcEntry v = *base;
+					v.name = lpcBase + "_" + kColours[c];
+					if (!PatchMaterials(&v.data, set.overrides[slot], c)) {
+						XLS_LOG_WARN("mods: parts %s: %s: material overrides for colour %c don't fit the model.", set.id.c_str(), kSlotNames[slot], kColours[c]);
+						continue;
+					}
+					std::vector<ArcEntry> extra;
+					for (const char* kindTail : {"_MM-00", "_NM-00"}) {
+						const std::wstring* own = find(((kindTail[1] == 'M' ? mmRole : nmRole)).c_str());
+						if (!own) {
+							continue;
+						}
+						std::string from = lpcBase + kindTail, to = from + "_" + kColours[c];
+						auto tex = std::find_if(lpc.begin(), lpc.end(), [&](const ArcEntry& e) { return e.name == from; });
+						Bytes data;
+						if (tex == lpc.end() || to.size() >= 64 || !ReadWholeFile(*own, &data)) {
+							XLS_LOG_WARN("mods: parts %s: %s: can't use %s for colour %c.", set.id.c_str(), kSlotNames[slot], kindTail + 1, kColours[c]);
+							continue;
+						}
+						Bytes rec(64, 0);
+						memcpy(rec.data(), from.data(), from.size());
+						Bytes repl(64, 0);
+						memcpy(repl.data(), to.data(), to.size());
+						for (size_t i = 0; i + 64 <= v.data.size(); i++) {
+							if (memcmp(v.data.data() + i, rec.data(), 64) == 0) {
+								memcpy(v.data.data() + i, repl.data(), 64); // the model's texture record
+							}
+						}
+						ArcEntry t = *tex;
+						t.name = to;
+						t.data = data;
+						extra.push_back(t);
+					}
+					lpc.push_back(v);
+					lpc.insert(lpc.end(), extra.begin(), extra.end());
+				}
 				// into the slot's own archives, which the game loads for a DLC part
 				for (int dset : {0x0e, 0x2e}) {
 					std::wstring arcPath = dstDir + Utf8ToWide((pfx + Hex2(dset) + Hex2(item)).c_str()) + L".arc";
@@ -618,6 +751,14 @@ bool BuildPackage(const PartSet& set, int slot, int item, PartPackage* out)
 	out->root = root;
 	out->lpcPath = lpcBase;
 	out->colours = set.colours;
+	for (const MaterialOverride& o : set.overrides[slot]) {
+		out->modelVariants |= (uint8_t)(1 << o.colour);
+	}
+	for (const auto& t : set.textures[slot]) {
+		if (t.first.size() == 4 && (t.first.compare(0, 3, "MM_") == 0 || t.first.compare(0, 3, "NM_") == 0) && t.first[3] >= 'A' && t.first[3] <= 'D') {
+			out->modelVariants |= (uint8_t)(1 << (t.first[3] - 'A'));
+		}
+	}
 	out->displayName = Utf8ToWide((set.name + " (" + kSlotNames[slot] + ")").c_str());
 	std::string key = std::string("lpc:") + set.id + ":" + kSlotNames[slot];
 	uint64_t h = Fnv1a64(key.data(), key.size());
@@ -807,6 +948,9 @@ void __attribute__((thiscall)) PartPath(uint8_t* parts, char* out, int kind, uin
 				XLS_LOG_INFO("mods: parts: %s %s colour byte %u -> %c.", pkg.setId.c_str(), kSlotNames[cat], seen[cat], letter);
 			}
 			std::string path = pkg.lpcPath + (kind == 1 ? std::string("_BM-00_") + letter : "");
+			if (kind == 0 && (pkg.modelVariants >> (letter - 'A') & 1)) {
+				path += std::string("_") + letter; // this colour's model copy (material overrides)
+			}
 			if (path.size() < 64) {
 				memcpy(out, path.c_str(), path.size() + 1);
 			}

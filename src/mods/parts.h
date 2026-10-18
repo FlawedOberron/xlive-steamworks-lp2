@@ -19,6 +19,17 @@ namespace xls::mods {
 
 enum PartSlot { kPartHead, kPartBody, kPartBack, kPartLegs, kPartSlotCount };
 
+// One material value for one colour's model copy (experimental, lpc.json part
+// "material_overrides": {"<letter>": {"<material index or *>": {"<word>": value}}}): the float
+// at word (4-byte index) of the 160-byte material record. Words 18/19 look like specular power /
+// strength.
+struct MaterialOverride {
+	int colour = 0;    // 0-3
+	int material = -1; // -1 = every material
+	int word = 0;      // 0-39
+	float value = 0;
+};
+
 struct PartSet {
 	std::string id;           // LPC id, unique ("scav01")
 	std::string name;         // menu name (UTF-8, up to 43 bytes)
@@ -31,6 +42,7 @@ struct PartSet {
 	std::vector<int> colours; // colours the menu offers (lpc.json "colours"; one = locked swatch)
 	// Custom textures per slot ("BM_A".."BM_D", "NM", "MM" -> .rTexture file), replacing the template's.
 	std::vector<std::pair<std::string, std::wstring>> textures[kPartSlotCount];
+	std::vector<MaterialOverride> overrides[kPartSlotCount];
 };
 
 // A generated DLC content package: one custom part in DLC slot `item` (game part id 180+item).
@@ -43,6 +55,7 @@ struct PartPackage {
 	uint8_t contentId[20] = {};
 	std::string lpcPath;      // carrier route: model path (no extension) in the slot archives, model\hm\lpc\...
 	std::vector<int> colours; // the set's colours (0-3); the first is worn when the code's isn't one
+	uint8_t modelVariants = 0; // bit c: colour c has its own model copy (<lpcPath>_<letter>)
 };
 
 // Builds (once; cached in ModCache\parts\pkg\) a DLC package per custom part, cloning the
