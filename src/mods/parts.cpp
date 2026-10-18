@@ -14,7 +14,9 @@
 #include <string.h>
 
 #include <algorithm>
+#include <atomic>
 #include <map>
+#include <set>
 #include <mutex>
 
 // Part sets come from the Blender exporter (lp2-tools/lp2_blender_export.py): a folder
@@ -321,7 +323,7 @@ void Load()
 const char* const kPrefixes[kPartSlotCount] = {"hd", "bd", "bk", "lg"};
 const int kSnameCategory[kPartSlotCount] = {1, 2, 3, 4};  // head, body, back, legs
 const int kSnameFloats[kPartSlotCount] = {3, 3, 12, 0};
-const int kLastItem = 69;
+const int kCarrierItem = 69; // one slot per category wears any set (the carrier)
 const char* const kGenVersion = "lp2-partpkg 11";
 
 std::once_flag g_pkgOnce;
@@ -513,8 +515,12 @@ bool PatchMaterials(Bytes* model, const std::vector<MaterialOverride>& overrides
 	return true;
 }
 
-bool BuildPackage(const PartSet& set, int slot, int item, PartPackage* out)
+// carrierTok (carrier builds): the set's own 6-character stand-in for the slot's <pfx>0e45 / 2e45 /
+// f645 names, so the effect provider, extra models and textures differ between the carrier's sets
+// (the game caches resources by name). Same length as the names it replaces.
+bool BuildPackage(const PartSet& set, int slot, int item, PartPackage* out, const std::string& carrierTok = std::string())
 {
+	bool carrierBuild = !carrierTok.empty();
 	std::string tmpl = set.templates[slot];
 	size_t dot = tmpl.find('.');
 	if (dot != std::string::npos) {
@@ -533,11 +539,11 @@ bool BuildPackage(const PartSet& set, int slot, int item, PartPackage* out)
 	snprintf(hash, sizeof(hash), "%08x", Fnv1a32(hkey.data(), hkey.size()));
 	std::string lpcBase = "model\\hm\\lpc\\" + std::string(hash) + "\\" + pfx + hash;
 	std::wstring srcDir = ExeDirectory() + L"nativePC\\arcXmlTmpPC\\CustomParts\\";
-	std::wstring root = Cfg().modCacheDir + L"parts\\pkg\\" + Utf8ToWide(set.id.c_str()) + L"_" + Utf8ToWide(kSlotNames[slot]) + L"\\";
+	std::wstring root = Cfg().modCacheDir + L"parts\\pkg\\" + Utf8ToWide(set.id.c_str()) + L"_" + Utf8ToWide(kSlotNames[slot]) + (carrierBuild ? L"_c\\" : L"\\");
 	std::wstring dstDir = root + L"Content\\nativePC\\arcXmlTmpPC\\CustomParts\\";
 	char stampBuf[256];
 	snprintf(stampBuf, sizeof(stampBuf), "%s item %d colour %d template %s model %s", kGenVersion, item, set.colour, tmpl.c_str(), FileStamp(set.models[slot]).c_str());
-	std::string stamp = stampBuf;
+	std::string stamp = std::string(stampBuf) + (carrierBuild ? " token " + carrierTok : "");
 	for (const auto& t : set.textures[slot]) {
 		stamp += " " + t.first + "=" + FileStamp(t.second);
 	}
@@ -588,9 +594,9 @@ bool BuildPackage(const PartSet& set, int slot, int item, PartPackage* out)
 		for (int dset : {0x0e, 0x2e}) {
 			std::string d = Hex2(dset), dv = Hex2(item);
 			std::vector<std::pair<std::string, std::string>> pairs = {
-				{modelName, "model\\hm\\hmf6\\" + pfx + "f6" + dv + "\\" + pfx + "f6" + dv},
-				{"hm" + sset + "\\" + tmpl, "hm" + d + "\\" + pfx + d + dv},
-				{tmpl, pfx + d + dv},
+				{modelName, "model\\hm\\hmf6\\" + (carrierBuild ? carrierTok : pfx + "f6" + dv) + "\\" + (carrierBuild ? carrierTok : pfx + "f6" + dv)},
+				{"hm" + sset + "\\" + tmpl, "hm" + d + "\\" + (carrierBuild ? carrierTok : pfx + d + dv)},
+				{tmpl, carrierBuild ? carrierTok : pfx + d + dv},
 			};
 			std::wstring tag = Utf8ToWide((pfx + d + dv).c_str());
 			if (!CloneArc(srcDir + Utf8ToWide(tmpl.c_str()) + L".arc", dstDir + tag + L".arc", pairs, modelName, &model, std::string(), mainTex)) {
@@ -751,6 +757,9 @@ bool BuildPackage(const PartSet& set, int slot, int item, PartPackage* out)
 	out->root = root;
 	out->lpcPath = lpcBase;
 	out->colours = set.colours;
+	out->faction = set.factionIndex;
+	out->name = set.name;
+	out->carrierToken = carrierTok;
 	for (const MaterialOverride& o : set.overrides[slot]) {
 		out->modelVariants |= (uint8_t)(1 << o.colour);
 	}
@@ -791,31 +800,120 @@ void RemoveTree(const std::wstring& dir)
 	RemoveDirectoryW(dir.c_str());
 }
 
+// Carrier state: the per-set carrier builds per category, the registered package's root (lower
+// case) and the worn set (index into g_carrierSets, kept in ModCache\parts\carrier.txt as
+// "<category> <set id>" lines).
+std::vector<PartPackage> g_carrierSets[kPartSlotCount];
+std::wstring g_carrierRootLower[kPartSlotCount];
+std::atomic<int> g_carrierWorn[kPartSlotCount];
+
+std::wstring LowerW(std::wstring s)
+{
+	for (wchar_t& c : s) {
+		c = (wchar_t)towlower(c);
+	}
+	return s;
+}
+
+std::wstring CarrierFile()
+{
+	return Cfg().modCacheDir + L"parts\\carrier.txt";
+}
+
+void LoadCarrierChoice()
+{
+	Bytes data;
+	if (!ReadWholeFile(CarrierFile(), &data)) {
+		return;
+	}
+	std::string text(data.begin(), data.end());
+	size_t pos = 0;
+	while (pos < text.size()) {
+		size_t end = text.find('\n', pos);
+		std::string line = text.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+		pos = end == std::string::npos ? text.size() : end + 1;
+		char cat[16], id[64];
+		if (sscanf(line.c_str(), "%15s %63s", cat, id) != 2) {
+			continue;
+		}
+		for (int s = 0; s < kPartSlotCount; s++) {
+			for (size_t i = 0; i < g_carrierSets[s].size(); i++) {
+				if (_stricmp(cat, kSlotNames[s]) == 0 && g_carrierSets[s][i].setId == id) {
+					g_carrierWorn[s] = (int)i;
+				}
+			}
+		}
+	}
+}
+
+void SaveCarrierChoice()
+{
+	std::string text;
+	for (int s = 0; s < kPartSlotCount; s++) {
+		if (!g_carrierSets[s].empty()) {
+			text += std::string(kSlotNames[s]) + " " + g_carrierSets[s][g_carrierWorn[s]].setId + "\n";
+		}
+	}
+	WriteWholeFile(CarrierFile(), Bytes(text.begin(), text.end()));
+}
+
 void BuildPackages()
 {
 	PartsLoad();
 	RemoveTree(Cfg().modCacheDir + L"parts\\loose\\"); // loose copies from lp2-partpkg 6/7
-	// Sets in id order, one DLC slot each (all of a set's parts share it); slots stay stable
-	// while the folder doesn't change (multiplayer will need them agreed between players).
+	// Sets in id order. Every set is worn through the carrier (no slot of its own any more).
 	std::vector<const PartSet*> order;
 	for (const PartSet& s : g_sets) {
 		order.push_back(&s);
 	}
 	std::sort(order.begin(), order.end(), [](const PartSet* a, const PartSet* b) { return _stricmp(a->id.c_str(), b->id.c_str()) < 0; });
-	int item = Cfg().partsFirstSlot;
-	for (const PartSet* set : order) {
-		if (item > kLastItem) {
-			XLS_LOG_WARN("mods: parts: more sets than DLC slots %d-%d, \"%s\" and later are left out.", Cfg().partsFirstSlot, kLastItem, set->id.c_str());
-			break;
-		}
-		for (int s = 0; s < kPartSlotCount; s++) {
+	// per-set slot packages from before the carrier (pkg\<id>_<category>\); carrier builds end in _c
+	std::wstring pkgDir = Cfg().modCacheDir + L"parts\\pkg\\";
+	WIN32_FIND_DATAW fd;
+	HANDLE find = FindFirstFileW((pkgDir + L"*").c_str(), &fd);
+	if (find != INVALID_HANDLE_VALUE) {
+		do {
+			std::wstring n = fd.cFileName;
+			if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && n != L"." && n != L".." && (n.size() < 2 || n.compare(n.size() - 2, 2, L"_c") != 0)) {
+				RemoveTree(pkgDir + n + L"\\");
+			}
+		} while (FindNextFileW(find, &fd));
+		FindClose(find);
+	}
+	// The carrier: every set again in slot 69 (its own folder per set and category). One package per
+	// category is registered with the game; opens of its part archives go to the worn set's build.
+	for (int s = 0; s < kPartSlotCount; s++) {
+		std::set<std::string> tokens;
+		for (const PartSet* set : order) {
+			// <pfx>z + 3 letters g-z (never a game part's hex name), from the set id; bumped on a clash
+			std::string key = set->id + ":" + kSlotNames[s];
+			uint32_t h = Fnv1a32(key.data(), key.size()) % 8000;
+			std::string tok;
+			do {
+				tok = std::string(kPrefixes[s]) + "z" + (char)('g' + h / 400) + (char)('g' + h / 20 % 20) + (char)('g' + h % 20);
+				h = (h + 1) % 8000;
+			} while (!tokens.insert(tok).second);
 			PartPackage pkg;
-			if (!set->models[s].empty() && BuildPackage(*set, s, item, &pkg)) {
-				g_packages.push_back(pkg);
+			if (!set->models[s].empty() && BuildPackage(*set, s, kCarrierItem, &pkg, tok)) {
+				g_carrierSets[s].push_back(pkg);
 			}
 		}
-		item++;
+		if (g_carrierSets[s].empty()) {
+			continue; // no carrier in this category's list
+		}
+		PartPackage reg = g_carrierSets[s][0];
+		reg.carrier = true;
+		reg.displayName = std::wstring(L"Custom sets (") + Utf8ToWide(kSlotNames[s]) + L")";
+		std::string key = std::string("lpc-carrier:") + kSlotNames[s];
+		uint64_t h = Fnv1a64(key.data(), key.size());
+		uint32_t h2 = Fnv1a32(key.data(), key.size());
+		memcpy(reg.contentId + 4, &h, 8);
+		memcpy(reg.contentId + 12, &h2, 4);
+		g_carrierRootLower[s] = LowerW(reg.root);
+		g_packages.push_back(reg);
+		XLS_LOG_INFO("mods: parts: %s carrier (DLC slot %d) holds %zu set(s).", kSlotNames[s], kCarrierItem, g_carrierSets[s].size());
 	}
+	LoadCarrierChoice();
 	XLS_LOG_INFO("mods: parts: %zu part package(s) ready.", g_packages.size());
 }
 
@@ -862,6 +960,13 @@ DWORD WINAPI UnlockThread(LPVOID param)
 			continue;
 		}
 		int set = 0;
+		// custom slots from before the carrier (20-68) stay locked: the list then skips them
+		for (int s = 0; s < kPartSlotCount; s++) {
+			for (int item = 20; item < kCarrierItem; item++) {
+				int id = 180 + item;
+				InterlockedAnd((volatile LONG*)(game + kUnlockMask[s] + (id >> 5) * 4), ~(LONG)(0x80000000u >> (id & 31)));
+			}
+		}
 		for (const PartPackage& pkg : g_packages) {
 			int id = 180 + pkg.item;
 			volatile LONG* word = (volatile LONG*)(game + kUnlockMask[pkg.slot] + (id >> 5) * 4);
@@ -907,11 +1012,32 @@ int WornColour(const PartPackage& pkg, uint8_t colour)
 	return pkg.colours.empty() ? 0 : pkg.colours[0];
 }
 
+bool IsCarrier(uint32_t code)
+{
+	return ((code & 0xff) & 0xdf) == 0x0e && ((code >> 16) & 0xff) == kCarrierItem;
+}
+
+// The set the carrier wears in category cat (its carrier build), or nullptr.
+const PartPackage* CarrierWorn(uint32_t cat)
+{
+	if (cat >= kPartSlotCount || g_carrierSets[cat].empty()) {
+		return nullptr;
+	}
+	int i = g_carrierWorn[cat];
+	return &g_carrierSets[cat][i >= 0 && i < (int)g_carrierSets[cat].size() ? i : 0];
+}
+
+std::atomic<int> g_lastCarrierCat{0}; // the colour-arrows predicate gets no category
+thread_local bool t_inPartStep = false; // the menu's part list: old custom slots stay what they are
+
 // Our generated part a code (set | colour << 8 | variant << 16) names in category cat, or nullptr.
 const PartPackage* FindPackage(uint32_t cat, uint32_t code)
 {
 	if (cat >= kPartSlotCount || ((code & 0xff) & 0xdf) != 0x0e) {
 		return nullptr;
+	}
+	if (IsCarrier(code)) {
+		return CarrierWorn(cat);
 	}
 	for (const PartPackage& pkg : g_packages) {
 		if (pkg.slot == (int)cat && pkg.item == (int)((code >> 16) & 0xff)) {
@@ -931,16 +1057,30 @@ PathFn g_pathOriginal = nullptr;
 void __attribute__((thiscall)) PartPath(uint8_t* parts, char* out, int kind, uint32_t cat)
 {
 	g_pathOriginal(parts, out, kind, cat);
-	if (cat >= 4 || (kind != 0 && kind != 1)) {
+	if (cat >= 4 || kind < 0 || kind > 5 || kind == 2) {
 		return;
 	}
 	uint8_t set = parts[0x44 + cat * 4];
 	uint8_t variant = parts[0x46 + cat * 4];
+	if (kind >= 3) {
+		// effect provider (3) and the other models (4, 5): the worn set's own names
+		if ((set & 0xdf) == 0x0e && variant == kCarrierItem) {
+			if (const PartPackage* worn = CarrierWorn(cat); worn && worn->carrierToken.size() == 6) {
+				std::string path = out;
+				for (const char* mid : {"0e", "2e", "f6"}) {
+					ReplaceAll(&path, std::string(kPrefixes[cat]) + mid + Hex2(kCarrierItem), worn->carrierToken);
+				}
+				memcpy(out, path.c_str(), path.size() + 1); // same length
+			}
+		}
+		return;
+	}
 	if ((set & 0xdf) != 0x0e) {
 		return;
 	}
-	for (const PartPackage& pkg : g_packages) {
-		if (pkg.slot == (int)cat && pkg.item == variant && !pkg.lpcPath.empty()) {
+	if (const PartPackage* found = FindPackage(cat, set | (uint32_t)variant << 16)) {
+		const PartPackage& pkg = *found;
+		if (!pkg.lpcPath.empty()) {
 			char letter = (char)('A' + WornColour(pkg, parts[0x45 + cat * 4]));
 			static uint8_t seen[kPartSlotCount] = {0xff, 0xff, 0xff, 0xff};
 			if (kind == 1 && seen[cat] != parts[0x45 + cat * 4]) {
@@ -954,7 +1094,6 @@ void __attribute__((thiscall)) PartPath(uint8_t* parts, char* out, int kind, uin
 			if (path.size() < 64) {
 				memcpy(out, path.c_str(), path.size() + 1);
 			}
-			return;
 		}
 	}
 }
@@ -1017,6 +1156,11 @@ ColourLockedFn g_colourLockedOriginal = nullptr;
 
 uint8_t __stdcall ColourLocked(uint32_t code)
 {
+	if (IsCarrier(code)) {
+		if (const PartPackage* pkg = CarrierWorn(g_lastCarrierCat)) {
+			return pkg->colours.size() < 2;
+		}
+	}
 	if (((code & 0xff) & 0xdf) == 0x0e) {
 		for (const PartPackage& pkg : g_packages) {
 			if (pkg.item == (int)((code >> 16) & 0xff)) {
@@ -1133,6 +1277,79 @@ void __attribute__((thiscall)) ApplyPart(uint8_t* menu, uint32_t cat, uint32_t c
 	g_colourStepTail(menu, cat, MenuCode(menu, cat), 1);
 }
 
+// DLC part name FUN_008654a0 thiscall(names, cat, variant, language) (DX9 855df0): the 44-byte
+// sname.bin name of a DLC slot. The carrier's name is the worn set's.
+using DlcNameFn = char*(__attribute__((thiscall)) *)(void*, uint32_t, uint32_t, uint32_t);
+DlcNameFn g_dlcNameOriginal = nullptr;
+
+char* __attribute__((thiscall)) DlcName(void* names, uint32_t cat, uint32_t variant, uint32_t language)
+{
+	if ((cat & 0xff) < kPartSlotCount && (variant & 0xff) == kCarrierItem) {
+		if (const PartPackage* pkg = CarrierWorn(cat & 0xff)) {
+			static char buf[kPartSlotCount][0x2c];
+			char* b = buf[cat & 0xff];
+			snprintf(b, 0x2c, "%s", pkg->name.c_str());
+			return b;
+		}
+	}
+	return g_dlcNameOriginal(names, cat, variant, language);
+}
+
+// Part step FUN_00ee4ac0 thiscall(menu, &out, cat, dir) (DX9 ed4ca0): Left/Right on a part row
+// steps the list (unlocks, faction filter) and returns the new code in out (the current one when
+// nothing else is wearable); the menu applies it when it differs from menu+0xa8+cat*4. On the
+// carrier, Left/Right step through the sets first (the menu's faction, sets for every faction
+// everywhere); past either end the game's step moves on. Coming onto the carrier starts at the
+// near end.
+using PartStepFn = uint32_t*(__attribute__((thiscall)) *)(uint8_t*, uint32_t*, uint32_t, int);
+PartStepFn g_partStepOriginal = nullptr;
+
+uint32_t* __attribute__((thiscall)) PartStep(uint8_t* menu, uint32_t* out, uint32_t cat, int dir)
+{
+	uint32_t cur = MenuCode(menu, cat);
+	if (dir == 0 || cat >= kPartSlotCount || g_carrierSets[cat].empty()) {
+		return g_partStepOriginal(menu, out, cat, dir);
+	}
+	int faction = *(int32_t*)(menu + 0x124);
+	bool anyFaction = menu[0x72f] != 0;
+	std::vector<int> list;
+	for (size_t i = 0; i < g_carrierSets[cat].size(); i++) {
+		int f = g_carrierSets[cat][i].faction;
+		if (anyFaction || f < 0 || f == faction) {
+			list.push_back((int)i);
+		}
+	}
+	int step = dir < 0 ? -1 : 1;
+	if (IsCarrier(cur) && !list.empty()) {
+		int at = (int)(std::find(list.begin(), list.end(), (int)g_carrierWorn[cat]) - list.begin());
+		if (at == (int)list.size()) {
+			at = step > 0 ? -1 : (int)list.size(); // worn set not in this faction's list
+		}
+		int next = at + step;
+		if (next >= 0 && next < (int)list.size()) {
+			g_carrierWorn[cat] = list[next];
+			g_lastCarrierCat = (int)cat;
+			SaveCarrierChoice();
+			XLS_LOG_INFO("mods: parts: %s carrier -> %s (%d/%zu).", kSlotNames[cat], g_carrierSets[cat][list[next]].setId.c_str(), next + 1, list.size());
+			*out = cur;
+			if (cur == *(uint32_t*)(menu + 0xa8 + cat * 4)) {
+				ApplyPart(menu, cat, cur); // the menu won't (same code): reload the preview, name, colour
+			}
+			return out;
+		}
+	}
+	t_inPartStep = true;
+	uint32_t* r = g_partStepOriginal(menu, out, cat, dir);
+	t_inPartStep = false;
+	if (IsCarrier(*out) && !IsCarrier(cur) && !list.empty()) {
+		g_carrierWorn[cat] = step > 0 ? list.front() : list.back();
+		g_lastCarrierCat = (int)cat;
+		SaveCarrierChoice();
+		XLS_LOG_INFO("mods: parts: %s carrier entered at %s.", kSlotNames[cat], g_carrierSets[cat][g_carrierWorn[cat]].setId.c_str());
+	}
+	return r;
+}
+
 // Part id -> code FUN_00f5cae0 cdecl(id, cat). Id 0 of every category is a placeholder
 // (0x0500000f: set 0x0f, faction 5) whose colour archive doesn't exist, so loading it is fatal. A
 // loadout holding id 0 (a DLC part saved with a colour other than A) gets the default part (id 1)
@@ -1149,6 +1366,15 @@ uint32_t __cdecl PartCode(uint32_t id, uint32_t cat)
 			XLS_LOG_WARN("mods: parts: %s id 0 (placeholder) asked for by 0x%p; using the default part.", kSlotNames[cat], __builtin_return_address(0));
 		}
 		return g_partCodeOriginal(1, cat);
+	}
+	// a save from before the carrier wears a custom part's own slot (20-68): wear the carrier instead
+	// (or the default part when this category has none)
+	if (!t_inPartStep && cat < kPartSlotCount && ((code & 0xff) & 0xdf) == 0x0e && id >= 180 + 20 && id < 180 + kCarrierItem) {
+		static int logged = 0;
+		if (logged++ < 8) {
+			XLS_LOG_WARN("mods: parts: %s DLC slot %u is no longer used; wearing the %s.", kSlotNames[cat], id - 180, g_carrierSets[cat].empty() ? "default part" : "carrier");
+		}
+		code = g_partCodeOriginal(g_carrierSets[cat].empty() ? 1 : 180 + kCarrierItem, cat);
 	}
 	if (const PartPackage* pkg = FindPackage(cat, code)) {
 		int chosen = ChosenColour(*pkg);
@@ -1211,15 +1437,17 @@ const uint8_t kDescriptorIdPrologue[] = {0x0f, 0xb6, 0x4c, 0x24, 0x0c, 0x0f, 0xb
 const uint8_t kPartCodePrologue[] = {0x8b, 0x44, 0x24, 0x04, 0x3d, 0xb4, 0x00, 0x00, 0x00}; // mov eax,[esp+4]; cmp eax,0xb4
 const uint8_t kPartIdPrologue[] = {0x51, 0x8a, 0x4c, 0x24, 0x08, 0x80, 0xe1, 0xdf};       // push ecx; mov cl,[esp+8]; and cl,0xdf
 const uint8_t kApplyPrologue[] = {0x56, 0x8b, 0xf1, 0x57, 0x8b, 0x7c, 0x24, 0x0c};       // push esi; mov esi,ecx; push edi; mov edi,[esp+0xc]
+const uint8_t kPartStepPrologue[] = {0x53, 0x8b, 0x5c, 0x24, 0x0c, 0x55, 0x8b, 0xe9};   // push ebx; mov ebx,[esp+0xc]; push ebp; mov ebp,ecx
+const uint8_t kDlcNamePrologue[] = {0x53, 0x8a, 0x5c, 0x24, 0x08, 0x56, 0x8b, 0xf1};    // push ebx; mov bl,[esp+8]; push esi; mov esi,ecx
 const uint8_t kSwatchPrologue[] = {0x83, 0xec, 0x24, 0x8b, 0x54, 0x24, 0x2c};          // sub esp,0x24; mov edx,[esp+0x2c]
 
 // VAs per exe (LP2DX11.exe, LP2DX9.exe); every prologue is checked before patching.
 struct MenuVas {
-	uint32_t step, swatch, locked, apply, descriptorId, partCode, partId;
+	uint32_t step, swatch, locked, apply, descriptorId, partCode, partId, partStep, dlcName;
 };
 const MenuVas kMenuVas[] = {
-	{0xeeb9a0, 0xee5060, 0xee4c40, 0xeed720, 0xf5c860, 0xf5cae0, 0xf5c9a0}, // DX11
-	{0xedbb80, 0xed5240, 0xed4e20, 0xedd900, 0xf4cb40, 0xf4cdc0, 0xf4cc80}, // DX9
+	{0xeeb9a0, 0xee5060, 0xee4c40, 0xeed720, 0xf5c860, 0xf5cae0, 0xf5c9a0, 0xee4ac0, 0x8654a0}, // DX11
+	{0xedbb80, 0xed5240, 0xed4e20, 0xedd900, 0xf4cb40, 0xf4cdc0, 0xf4cc80, 0xed4ca0, 0x855df0}, // DX9
 };
 
 void InstallMenuColours(uint8_t* base, const MenuVas& va)
@@ -1252,8 +1480,12 @@ void InstallMenuColours(uint8_t* base, const MenuVas& va)
 	g_swatchOriginal = (SwatchFn)Detour(at(va.swatch), kSwatchPrologue, sizeof(kSwatchPrologue), (void*)&Swatch);
 	g_colourLockedOriginal = (ColourLockedFn)Detour(at(va.locked), kColourLockedPrologue, sizeof(kColourLockedPrologue), (void*)&ColourLocked);
 	g_applyOriginal = (ApplyFn)Detour(at(va.apply), kApplyPrologue, sizeof(kApplyPrologue), (void*)&ApplyPart);
-	XLS_LOG_INFO("mods: parts: customise menu colours hooked (code %d, id %d, descriptor %d, step %d, swatch %d, arrows %d, apply %d).", !!g_partCodeOriginal,
-	             !!g_partIdOriginal, !!g_descriptorIdOriginal, !!g_colourStepOriginal, !!g_swatchOriginal, !!g_colourLockedOriginal, !!g_applyOriginal);
+	if (g_applyOriginal) {
+		g_partStepOriginal = (PartStepFn)Detour(at(va.partStep), kPartStepPrologue, sizeof(kPartStepPrologue), (void*)&PartStep);
+	}
+	g_dlcNameOriginal = (DlcNameFn)Detour(at(va.dlcName), kDlcNamePrologue, sizeof(kDlcNamePrologue), (void*)&DlcName);
+	XLS_LOG_INFO("mods: parts: customise menu colours hooked (code %d, id %d, descriptor %d, step %d, swatch %d, arrows %d, apply %d, part step %d, name %d).", !!g_partCodeOriginal,
+	             !!g_partIdOriginal, !!g_descriptorIdOriginal, !!g_colourStepOriginal, !!g_swatchOriginal, !!g_colourLockedOriginal, !!g_applyOriginal, !!g_partStepOriginal, !!g_dlcNameOriginal);
 }
 
 const uint8_t kPathPrologue[] = {0x81, 0xec, 0xd0, 0x00, 0x00, 0x00, 0x53, 0x55, 0x8b, 0xac, 0x24, 0xe4, 0x00, 0x00, 0x00, 0x56, 0x8b, 0xf1, 0xb8};
@@ -1273,6 +1505,28 @@ void PartsIndex(std::unordered_map<std::wstring, std::wstring>* index)
 			}
 		}
 	}
+}
+
+bool PartsCarrierRedirect(const std::wstring& path, std::wstring* out)
+{
+	std::wstring lower = LowerW(path);
+	for (int s = 0; s < kPartSlotCount; s++) {
+		const std::wstring& root = g_carrierRootLower[s];
+		if (root.empty() || lower.compare(0, root.size(), root) != 0 || lower.find(L"\\customparts\\", root.size()) == std::wstring::npos) {
+			continue;
+		}
+		const PartPackage* worn = CarrierWorn(s);
+		if (!worn || LowerW(worn->root) == root) {
+			return false;
+		}
+		*out = worn->root + path.substr(root.size());
+		static std::atomic<int> logged{0};
+		if (logged++ < 64) {
+			XLS_LOG_INFO("mods: parts: carrier %s -> %s", WideToUtf8(path.c_str()).c_str(), WideToUtf8(out->c_str()).c_str());
+		}
+		return true;
+	}
+	return false;
 }
 
 bool PartsTryInstallPathHook(unsigned char* base)

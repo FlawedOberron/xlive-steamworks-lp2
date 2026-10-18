@@ -49,13 +49,17 @@ struct PartSet {
 struct PartPackage {
 	std::string setId;
 	int slot = 0;             // PartSlot
-	int item = 0;             // DLC slot 20-69 (listed one by one in the parts menus)
+	int item = 0;             // DLC slot (69: the carrier)
 	std::wstring root;        // the package folder (holds Content\nativePC\...)
 	std::wstring displayName;
 	uint8_t contentId[20] = {};
 	std::string lpcPath;      // carrier route: model path (no extension) in the slot archives, model\hm\lpc\...
 	std::vector<int> colours; // the set's colours (0-3); the first is worn when the code's isn't one
 	uint8_t modelVariants = 0; // bit c: colour c has its own model copy (<lpcPath>_<letter>)
+	std::string name;         // the set's menu name
+	std::string carrierToken; // carrier builds: the set's 6-character stand-in for the slot's part names
+	int faction = -1;         // the set's faction byte, -1 = every faction
+	bool carrier = false;     // the carrier slot's registered package (the worn set's files are swapped in)
 };
 
 // Builds (once; cached in ModCache\parts\pkg\) a DLC package per custom part, cloning the
@@ -67,6 +71,11 @@ const std::vector<PartPackage>& PartPackages();
 // nativePC\arcXmlTmpPC\CustomParts\ for the overlay index: outside the parts menu the game opens
 // a DLC part's colour archive there instead of in its package (colour A is found either way).
 void PartsIndex(std::unordered_map<std::wstring, std::wstring>* index);
+
+// The carrier slot (DLC item 69, one per category) wears any custom set: opens of the registered
+// carrier package's part archives go to the worn set's carrier build instead. path is a full path
+// (as opened, or as the overlay index maps it); true with *out set when it is swapped.
+bool PartsCarrierRedirect(const std::wstring& path, std::wstring* out);
 
 // Hooks the part path builder (DX11 FUN_00f664b0, DX9 FUN_00f56650) so generated parts load their
 // lpc resources from the slot archives; returns true once hooked.

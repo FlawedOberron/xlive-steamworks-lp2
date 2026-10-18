@@ -181,6 +181,11 @@ const std::wstring* Redirect(const std::wstring& path)
 	std::wstring rel = lower.substr(g_gameDirLower.size());
 	auto it = g_index.find(rel);
 	const std::wstring* found = it == g_index.end() ? nullptr : &it->second;
+	// the carrier slot's part archives (as opened, or as the index maps them) -> the worn set's
+	thread_local std::wstring carrierPath;
+	if (PartsCarrierRedirect(found ? *found : std::wstring(full, length), &carrierPath)) {
+		found = &carrierPath;
+	}
 	// Shared game files that map packages add to (names), built from whatever would be opened.
 	if (const std::wstring* generated = PackagesGenerated(rel, found ? *found : std::wstring(full, length))) {
 		found = generated;
