@@ -40,8 +40,7 @@ struct PartPackage {
 	std::wstring root;        // the package folder (holds Content\nativePC\...)
 	std::wstring displayName;
 	uint8_t contentId[20] = {};
-	std::string loosePath;    // carrier route: model path (no extension) of the loose copy, model\hm\lpc\...
-	std::string archive;      // carrier route: archive holding it (arcXmlTmpPC\\CustomParts\\lpc<hash>)
+	std::string lpcPath;      // carrier route: model path (no extension) in the slot archives, model\hm\lpc\...
 };
 
 // Builds (once; cached in ModCache\parts\pkg\) a DLC package per custom part, cloning the
@@ -49,10 +48,8 @@ struct PartPackage {
 // scan (api/xcontent.cpp).
 const std::vector<PartPackage>& PartPackages();
 
-// Loose copies of the generated parts (ModCache\parts\loose\nativePC\...) for the overlay index.
-void PartsIndex(std::unordered_map<std::wstring, std::wstring>* index);
-// Hooks the part path builder (DX11 FUN_00f664b0, DX9 FUN_00f56650) so generated parts load from
-// their loose copies; returns true once hooked.
+// Hooks the part path builder (DX11 FUN_00f664b0, DX9 FUN_00f56650) so generated parts load their
+// lpc resources from the slot archives; returns true once hooked.
 bool PartsTryInstallPathHook(unsigned char* base);
 
 // Keeps the generated parts unlocked in the player's profile (a fresh save has DLC ids locked).
