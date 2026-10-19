@@ -64,7 +64,7 @@ Comments are allowed. Mod-related keys:
 		"disabled": ["SomeMod"],  // Mods\ entries to skip (folder or zip name without .zip)
 		// "enabled": [...],      // or: only these Mods\ entries, in this order (later ones win)
 		"trace_opens": 0,         // debugging: log the first N files the game opens
-		"parts_first_slot": 20    // first DLC slot custom parts use (20-69); raise it if a real DLC package uses low slots
+		"parts_any_faction": false // true: every part (stock and custom) can be picked by every faction
 	},
 	"log": { "level": "info" }   // debug / trace for troubleshooting
 }

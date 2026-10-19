@@ -137,6 +137,12 @@ bool MakeBundle(const std::wstring& dir, const PartSet& set, Bytes* out)
 		if (!set.models[s].empty()) {
 			add(set.models[s]);
 		}
+		if (!set.chains[s].empty()) {
+			add(set.chains[s]);
+		}
+		if (!set.chainCols[s].empty()) {
+			add(set.chainCols[s]);
+		}
 		for (const auto& t : set.textures[s]) {
 			add(t.second);
 		}
@@ -234,6 +240,28 @@ void LoadFolder(const std::wstring& dir, const std::wstring& label, std::vector<
 		}
 		set.models[s] = path;
 		set.templates[s] = part["template"].GetString(std::string());
+		std::string chain = part["chain"].GetString(std::string());
+		if (!chain.empty()) {
+			Bytes head;
+			std::wstring cp = dir + Utf8ToWide(chain.c_str());
+			if (chain.find_first_of("/\\:") != std::string::npos || !ReadWholeFile(cp, &head) || head.size() < 16 || memcmp(head.data(), "CHN\0", 4) != 0) {
+				XLS_LOG_WARN("mods: parts %ls: %s: chain %s is missing or not an rChain (plain file name).", label.c_str(), kSlotNames[s], chain.c_str());
+			}
+			else {
+				set.chains[s] = cp;
+			}
+		}
+		std::string chainCol = part["chaincol"].GetString(std::string());
+		if (!chainCol.empty()) {
+			Bytes head;
+			std::wstring cp = dir + Utf8ToWide(chainCol.c_str());
+			if (chainCol.find_first_of("/\\:") != std::string::npos || !ReadWholeFile(cp, &head) || head.size() < 16 || memcmp(head.data(), "CCL\0", 4) != 0) {
+				XLS_LOG_WARN("mods: parts %ls: %s: chaincol %s is missing or not an rChainCol (plain file name).", label.c_str(), kSlotNames[s], chainCol.c_str());
+			}
+			else {
+				set.chainCols[s] = cp;
+			}
+		}
 		for (const auto& tex : part["textures"].Items()) {
 			std::string f = tex.second.GetString(std::string());
 			if (f.empty() || f.find_first_of("/\\:") != std::string::npos) {
@@ -443,7 +471,7 @@ int ChoiceItem(int item)
 {
 	return item >= kAliasFirst && item < kAliasFirst + kAliasCount ? item & ~1 : item;
 }
-const char* const kGenVersion = "lp2-partpkg 11";
+const char* const kGenVersion = "lp2-partpkg 14";
 
 std::once_flag g_pkgOnce;
 std::vector<PartPackage> g_packages;
@@ -484,13 +512,33 @@ bool EndsWith(const std::string& s, const std::string& tail)
 
 bool CloneArc(const std::wstring& src, const std::wstring& dst, const std::vector<std::pair<std::string, std::string>>& pairs,
               const std::string& modelName, const Bytes* model, const std::string& colourFrom,
-              const std::vector<std::pair<std::string, const Bytes*>>& textures = {})
+              const std::vector<std::pair<std::string, const Bytes*>>& textures = {}, const Bytes* chain = nullptr, const Bytes* chainCol = nullptr)
 {
 	Bytes file;
 	std::vector<ArcEntry> entries;
 	if (!ReadWholeFile(src, &file) || !ArcRead(file, &entries)) {
 		return false;
 	}
+	// the set's own rChain replaces the template's beside the model (the game loads the chain from
+	// the model's path, so the stand-in model must carry it, not just the lpc copy)
+	auto own = [&](const char* cls, const Bytes* data) {
+		if (!data) {
+			return;
+		}
+		auto it = std::find_if(entries.begin(), entries.end(), [&](const ArcEntry& e) {
+			return e.classHash == ClassHash(cls) && e.name == modelName;
+		});
+		if (it == entries.end()) {
+			ArcEntry c{};
+			c.name = modelName;
+			c.classHash = ClassHash(cls);
+			entries.push_back(c);
+			it = entries.end() - 1;
+		}
+		it->data = *data;
+	};
+	own("rChain", chain);
+	own("rChainCol", chainCol);
 	for (ArcEntry& e : entries) {
 		if (model && e.name == modelName && e.classHash == ClassHash("rModel")) {
 			e.data = *model;
@@ -514,19 +562,22 @@ bool CloneArc(const std::wstring& src, const std::wstring& dst, const std::vecto
 	return WriteWholeFile(dst, ArcWrite(entries));
 }
 
-std::string SnameBin(int slot, int item, const std::string& name)
+std::string SnameBin(const std::vector<int>& slots, int item, const std::string& name)
 {
-	std::string t = "\xef\xbb\xbf" "01\r\n";
 	char line[16];
-	snprintf(line, sizeof(line), "%02d\r\n%02d\r\n", kSnameCategory[slot], item);
-	t += line;
-	for (int i = 0; i < 7; i++) {
-		t += name + "\r\n";
+	snprintf(line, sizeof(line), "%02d\r\n", (int)slots.size());
+	std::string t = std::string("\xef\xbb\xbf") + line;
+	for (int slot : slots) {
+		snprintf(line, sizeof(line), "%02d\r\n%02d\r\n", kSnameCategory[slot], item);
+		t += line;
+		for (int i = 0; i < 7; i++) {
+			t += name + "\r\n";
+		}
+		for (int i = 0; i < kSnameFloats[slot]; i++) {
+			t += "0\r\n";
+		}
 	}
-	for (int i = 0; i < kSnameFloats[slot]; i++) {
-		t += "0\r\n";
-	}
-	return t;
+	return t; // the game reads 1024 bytes: 4 entries of "Custom set" are about 340
 }
 
 std::string FileStamp(const std::wstring& path)
@@ -710,6 +761,10 @@ bool BuildPackage(const PartSet& set, int slot, int item, PartPackage* out, cons
 			const std::wstring* bm = find(role);
 			add(bm ? bm : find("BM_A"), &colourTex, tmpl + "_BM-00_" + kColours[set.colour]);
 		}
+		Bytes ownChain;
+		const Bytes* chainData = !set.chains[slot].empty() && ReadWholeFile(set.chains[slot], &ownChain) ? &ownChain : nullptr;
+		Bytes ownCol;
+		const Bytes* colData = !set.chainCols[slot].empty() && ReadWholeFile(set.chainCols[slot], &ownCol) ? &ownCol : nullptr;
 		for (int dset : {0x0e, 0x2e}) {
 			std::string d = Hex2(dset), dv = Hex2(item);
 			std::vector<std::pair<std::string, std::string>> pairs = {
@@ -718,7 +773,7 @@ bool BuildPackage(const PartSet& set, int slot, int item, PartPackage* out, cons
 				{tmpl, carrierBuild ? carrierTok : pfx + d + dv},
 			};
 			std::wstring tag = Utf8ToWide((pfx + d + dv).c_str());
-			if (!CloneArc(srcDir + Utf8ToWide(tmpl.c_str()) + L".arc", dstDir + tag + L".arc", pairs, modelName, &model, std::string(), mainTex)) {
+			if (!CloneArc(srcDir + Utf8ToWide(tmpl.c_str()) + L".arc", dstDir + tag + L".arc", pairs, modelName, &model, std::string(), mainTex, chainData, colData)) {
 				XLS_LOG_WARN("mods: parts %s: %s: cannot clone %s.arc.", set.id.c_str(), kSlotNames[slot], tmpl.c_str());
 				return false;
 			}
@@ -749,6 +804,47 @@ bool BuildPackage(const PartSet& set, int slot, int item, PartPackage* out, cons
 				ArcRead(file, &colourEntries);
 				texs.insert(texs.end(), colourEntries.begin(), colourEntries.end());
 			}
+			// bone physics: the game loads the part's rChain / rChainCol from the model's path, so
+			// the lpc model gets the template's (or the set's own rChain) beside it
+			std::string modelName = "model\\hm\\hm" + sset + "\\" + tmpl + "\\" + tmpl;
+			std::vector<ArcEntry> chains;
+			for (const ArcEntry& e : texs) {
+				if ((e.classHash == ClassHash("rChain") || e.classHash == ClassHash("rChainCol")) && _stricmp(e.name.c_str(), modelName.c_str()) == 0) {
+					chains.push_back(e);
+				}
+			}
+			if (!set.chains[slot].empty()) {
+				Bytes own;
+				if (ReadWholeFile(set.chains[slot], &own)) {
+					auto it = std::find_if(chains.begin(), chains.end(), [](const ArcEntry& e) { return e.classHash == ClassHash("rChain"); });
+					if (it == chains.end()) {
+						ArcEntry c{};
+						c.classHash = ClassHash("rChain");
+						chains.push_back(c);
+						it = chains.end() - 1;
+					}
+					it->data = own;
+				}
+			}
+			if (!set.chainCols[slot].empty()) {
+				Bytes own;
+				if (ReadWholeFile(set.chainCols[slot], &own)) {
+					auto it = std::find_if(chains.begin(), chains.end(), [](const ArcEntry& e) { return e.classHash == ClassHash("rChainCol"); });
+					if (it == chains.end()) {
+						ArcEntry c{};
+						c.classHash = ClassHash("rChainCol");
+						chains.push_back(c);
+						it = chains.end() - 1;
+					}
+					it->data = own;
+				}
+			}
+			auto addChains = [&](std::vector<ArcEntry>* to, const std::string& name) {
+				for (ArcEntry c : chains) {
+					c.name = name;
+					to->push_back(c);
+				}
+			};
 			std::vector<ArcEntry> only;
 			for (ArcEntry& e : texs) {
 				if (e.classHash != ClassHash("rTexture")) {
@@ -772,6 +868,7 @@ bool BuildPackage(const PartSet& set, int slot, int item, PartPackage* out, cons
 				XLS_LOG_WARN("mods: parts %s: %s: lpc resources failed.", set.id.c_str(), kSlotNames[slot]);
 			}
 			else {
+				addChains(&lpc, lpcBase);
 				// every colour as <lpc>_BM-00_A..D (the path hook picks one): the part's own BM_<c>,
 				// else its BM_A (a retextured part's UVs don't fit the template's colours), else the
 				// template's colour c
@@ -850,6 +947,7 @@ bool BuildPackage(const PartSet& set, int slot, int item, PartPackage* out, cons
 						extra.push_back(t);
 					}
 					lpc.push_back(v);
+					addChains(&lpc, v.name);
 					lpc.insert(lpc.end(), extra.begin(), extra.end());
 				}
 				// into the slot's own archives, which the game loads for a DLC part
@@ -865,7 +963,7 @@ bool BuildPackage(const PartSet& set, int slot, int item, PartPackage* out, cons
 			}
 			DeleteFileW((dstDir + L"lpc" + Utf8ToWide(hash) + L".arc").c_str()); // left by lp2-partpkg 6/7
 		}
-		std::string sname = SnameBin(slot, item, set.name);
+		std::string sname = SnameBin({slot}, item, set.name);
 		WriteWholeFile(root + L"Content\\nativePC\\sname.bin", Bytes(sname.begin(), sname.end()));
 		WriteWholeFile(root + L"stamp.txt", Bytes(stamp.begin(), stamp.end()));
 		XLS_LOG_INFO("mods: parts %s: %s built as DLC slot %d (template %s, colour %c).", set.id.c_str(), kSlotNames[slot], item, tmpl.c_str(), kColours[set.colour]);
@@ -1071,7 +1169,7 @@ void BuildPackages()
 	if (find != INVALID_HANDLE_VALUE) {
 		do {
 			std::wstring n = fd.cFileName;
-			if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && n != L"." && n != L".." && (n.size() < 2 || n.compare(n.size() - 2, 2, L"_c") != 0) && n.compare(0, 8, L"carrier_") != 0) {
+			if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && n != L"." && n != L".." && (n.size() < 2 || n.compare(n.size() - 2, 2, L"_c") != 0) && (n.compare(0, 8, L"carrier_") != 0 || !iswdigit(n[8]))) {
 				RemoveTree(pkgDir + n + L"\\");
 			}
 		} while (FindNextFileW(find, &fd));
@@ -1096,23 +1194,40 @@ void BuildPackages()
 				g_carrierSets[s].push_back(pkg);
 			}
 		}
-		if (g_carrierSets[s].empty()) {
-			continue; // no carrier in this category's list
+		XLS_LOG_INFO("mods: parts: %s carrier (DLC slots %d-%d, %d) holds %zu set(s).", kSlotNames[s], kAliasFirst, kAliasFirst + kAliasCount - 1, kCarrierItem,
+		             g_carrierSets[s].size());
+	}
+	// One package per carrier slot (the aliases and 69), shared by the categories: its sname.bin
+	// and empty stand-ins for the archives; the overlay serves the worn set's archives by name
+	// (PartsCarrierRedirect). The game enumerates at most 72 content packages (FUN_008722b0), so
+	// one per slot and category (84) left the last legs slots unmounted. Each category keeps its
+	// own record here (same root and content id); the content scan registers the folder once.
+	std::vector<int> items;
+	for (int i = 0; i < kAliasCount; i++) {
+		items.push_back(kAliasFirst + i);
+	}
+	items.push_back(kCarrierItem);
+	for (int item : items) {
+		std::wstring root = Cfg().modCacheDir + L"parts\\pkg\\carrier_" + std::to_wstring(item) + L"\\";
+		std::wstring dir = root + L"Content\\nativePC\\arcXmlTmpPC\\CustomParts\\";
+		std::vector<int> cats;
+		for (int s = 0; s < kPartSlotCount; s++) {
+			if (!g_carrierSets[s].empty()) {
+				cats.push_back(s);
+			}
 		}
-		// one package per carrier slot (the aliases and 69): its sname.bin and empty stand-ins for
-		// the archives; the overlay serves the worn set's archives by name (PartsCarrierRedirect)
-		std::vector<int> items;
-		for (int i = 0; i < kAliasCount; i++) {
-			items.push_back(kAliasFirst + i);
+		if (cats.empty()) {
+			break; // no sets at all
 		}
-		items.push_back(kCarrierItem);
-		for (int item : items) {
+		SHCreateDirectoryExW(nullptr, dir.c_str(), nullptr);
+		std::string key = std::string("lpc-carrier:") + std::to_string(item);
+		uint64_t h = Fnv1a64(key.data(), key.size());
+		uint32_t h2 = Fnv1a32(key.data(), key.size());
+		for (int s : cats) {
 			PartPackage reg = g_carrierSets[s][0];
 			reg.carrier = true;
 			reg.item = item;
-			reg.root = Cfg().modCacheDir + L"parts\\pkg\\carrier_" + Utf8ToWide(kSlotNames[s]) + L"_" + std::to_wstring(item) + L"\\";
-			std::wstring dir = reg.root + L"Content\\nativePC\\arcXmlTmpPC\\CustomParts\\";
-			SHCreateDirectoryExW(nullptr, dir.c_str(), nullptr);
+			reg.root = root;
 			for (int dset : {0x0e, 0x2e}) {
 				std::string base = std::string(kPrefixes[s]) + Hex2(dset) + Hex2(item);
 				for (const std::string& tail : {std::string(), std::string("00"), std::string("01"), std::string("02"), std::string("03")}) {
@@ -1122,18 +1237,13 @@ void BuildPackages()
 					}
 				}
 			}
-			std::string sname = SnameBin(s, item, "Custom set");
-			WriteWholeFile(reg.root + L"Content\\nativePC\\sname.bin", Bytes(sname.begin(), sname.end()));
-			reg.displayName = std::wstring(L"Custom sets (") + Utf8ToWide(kSlotNames[s]) + L") " + std::to_wstring(item);
-			std::string key = std::string("lpc-carrier:") + kSlotNames[s] + (item == kCarrierItem ? "" : ":" + std::to_string(item));
-			uint64_t h = Fnv1a64(key.data(), key.size());
-			uint32_t h2 = Fnv1a32(key.data(), key.size());
+			reg.displayName = L"Custom sets " + std::to_wstring(item);
 			memcpy(reg.contentId + 4, &h, 8);
 			memcpy(reg.contentId + 12, &h2, 4);
 			g_packages.push_back(reg);
 		}
-		XLS_LOG_INFO("mods: parts: %s carrier (DLC slots %d-%d, %d) holds %zu set(s).", kSlotNames[s], kAliasFirst, kAliasFirst + kAliasCount - 1, kCarrierItem,
-		             g_carrierSets[s].size());
+		std::string sname = SnameBin(cats, item, "Custom set");
+		WriteWholeFile(root + L"Content\\nativePC\\sname.bin", Bytes(sname.begin(), sname.end()));
 	}
 	LoadCarrierChoice();
 	PartsSyncInit();
@@ -1613,6 +1723,16 @@ void PartsSyncInit()
 	LoadFakeMember();
 }
 
+// The Steam id behind a player info's XUID. The game keeps the OFFLINE xuid (XUserGetSigninInfo
+// with XUSER_GET_SIGNIN_INFO_OFFLINE_XUID_ONLY), which we build as the offline flag | Steam account id.
+uint64_t InfoSteamId(XUID xuid)
+{
+	if ((xuid & 0xF000000000000000ull) == XUID_OFFLINE_FLAG && (uint32_t)xuid != 0) {
+		return CSteamID((uint32)(xuid & 0xFFFFFFFF), k_EUniversePublic, k_EAccountTypeIndividual).ConvertToUint64();
+	}
+	return xls::SteamIdFromXuid(xuid).ConvertToUint64();
+}
+
 // The member playing slot p, or 0.
 uint64_t SlotMember(int p)
 {
@@ -1624,8 +1744,7 @@ uint64_t SlotMember(int p)
 	if (!info || g_infoXuidOffset < 0) {
 		return 0;
 	}
-	XUID xuid = *(XUID*)(info + g_infoXuidOffset);
-	uint64_t steamId = xls::SteamIdFromXuid(xuid).ConvertToUint64();
+	uint64_t steamId = InfoSteamId(*(XUID*)(info + g_infoXuidOffset));
 	return steamId == xls::SteamLocalId().ConvertToUint64() ? 0 : steamId; // our own: the menu's choice
 }
 
@@ -1669,6 +1788,7 @@ void FindInfoXuid(uint8_t* game)
 		return;
 	}
 	XUID ours = xls::XuidFromSteamId(xls::SteamLocalId());
+	XUID oursOffline = XUID_OFFLINE_FLAG | (ours & 0xFFFFFFFF); // what the game keeps (xuser.cpp)
 	for (int p = 0; p < kMaxPlayers; p++) {
 		uint8_t* info = *(uint8_t**)(game + 0x28 + p * 4);
 		MEMORY_BASIC_INFORMATION mbi;
@@ -1676,10 +1796,11 @@ void FindInfoXuid(uint8_t* game)
 			continue;
 		}
 		size_t room = (uint8_t*)mbi.BaseAddress + mbi.RegionSize - info;
-		for (size_t o = 0; o + 8 <= 0x400 && o + 8 <= room; o += 4) {
-			if (*(XUID*)(info + o) == ours) {
+		for (size_t o = 0; o + 8 <= 0x900 && o + 8 <= room; o += 4) { // infos are 0x900 apart
+			XUID x = *(XUID*)(info + o);
+			if (x == ours || x == oursOffline) {
 				g_infoXuidOffset = (int)o;
-				XLS_LOG_INFO("mods: parts: player %d's info holds our xuid at +0x%x.", p, (unsigned)o);
+				XLS_LOG_INFO("mods: parts: player %d's info holds our %s xuid at +0x%x.", p, x == ours ? "online" : "offline", (unsigned)o);
 				return;
 			}
 		}
@@ -1687,7 +1808,7 @@ void FindInfoXuid(uint8_t* game)
 	static bool logged = false;
 	if (!logged) {
 		logged = true;
-		XLS_LOG_WARN("mods: parts: our xuid 0x%016llx not found in the player infos (remote players fall back).", (unsigned long long)ours);
+		XLS_LOG_WARN("mods: parts: our xuid 0x%016llx not found in the player infos, online or offline (remote players fall back).", (unsigned long long)ours);
 	}
 }
 
@@ -2100,6 +2221,9 @@ PartStepFn g_partStepOriginal = nullptr;
 uint32_t* __attribute__((thiscall)) PartStep(uint8_t* menu, uint32_t* out, uint32_t cat, int dir)
 {
 	uint32_t cur = MenuCode(menu, cat);
+	if (Cfg().partsAnyFaction) {
+		menu[0x72f] = 1; // the menu's own ignore-faction flag: the stock list skips its faction filter too
+	}
 	if (dir == 0 || cat >= kPartSlotCount || g_carrierSets[cat].empty() || !g_partCodeOriginal) {
 		return g_partStepOriginal(menu, out, cat, dir);
 	}

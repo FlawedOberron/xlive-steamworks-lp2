@@ -38,6 +38,8 @@ struct PartSet {
 	std::wstring source;      // the zip or folder it came from
 	std::string hash;         // content hash of its bundle (16 hex; the same on every PC), see MakeBundle
 	std::wstring models[kPartSlotCount]; // unpacked .rModel per slot, empty = set has no such part
+	std::wstring chainCols[kPartSlotCount]; // the part's own .rChainCol (what the chain collides with), empty = the template's
+	std::wstring chains[kPartSlotCount]; // the part's own .rChain (bone physics), empty = the template's
 	std::string templates[kPartSlotCount]; // original part each was built on ("bd2900")
 	int colour = 0;           // default colour (0-3 = A-D): the first of colours
 	std::vector<int> colours; // colours the menu offers (lpc.json "colours"; one = locked swatch)

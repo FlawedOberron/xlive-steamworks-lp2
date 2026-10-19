@@ -110,7 +110,7 @@ struct Config {
 	// Lost Planet 2 mods (src/mods).
 	std::wstring modDir;                // <exe dir>\Mods\ unless "mods": {"dir": ...}: overlay mods (folders or .zip).
 	std::wstring mapsDir;               // <exe dir>\Maps\ ("mods": {"maps_dir": ...}): map packages (.zip).
-	int partsFirstSlot = 20;            // first DLC slot generated part packages use (20-69)
+	bool partsAnyFaction = false;       // "mods": {"parts_any_faction": true}: every part (stock and custom) for every faction.
 	std::wstring partsDir;              // <exe dir>\Parts\ ("mods": {"parts_dir": ...}): part packages (.zip).
 	std::wstring modCacheDir;           // <exe dir>\ModCache\: unpacked and generated files.
 	std::vector<std::wstring> modsEnabled; // If set, only these overlay mods, in this order (later ones win).

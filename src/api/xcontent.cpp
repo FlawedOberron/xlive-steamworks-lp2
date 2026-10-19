@@ -14,6 +14,7 @@
 #include "mods/parts.h"
 
 #include <mutex>
+#include <set>
 
 namespace {
 
@@ -43,7 +44,12 @@ void Scan()
 		g_content.push_back(content);
 	}
 	// Custom parts from the Parts folder, built into DLC packages (mods/parts.cpp).
+	// (the carrier slots' categories share one package each: registered once)
+	std::set<std::wstring> partRoots;
 	for (const xls::mods::PartPackage& pkg : xls::mods::PartPackages()) {
+		if (!partRoots.insert(pkg.root).second) {
+			continue;
+		}
 		Content content;
 		memcpy(content.mapping.contentId, pkg.contentId, sizeof(pkg.contentId));
 		content.mapping.contentType = XCONTENTTYPE_MARKETPLACE;
