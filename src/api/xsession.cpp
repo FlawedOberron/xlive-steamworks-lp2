@@ -6,6 +6,7 @@
 #include "core/config.h"
 #include "core/enumerator.h"
 #include "core/log.h"
+#include "core/memberdata.h"
 #include "core/net.h"
 #include "core/notify.h"
 #include "core/overlapped.h"
@@ -598,6 +599,7 @@ void SessionsShutdown()
 	for (auto& entry : g_sessions) {
 		if (entry.second->lobby.IsValid() && SteamReady() && !entry.second->deleted) {
 			SteamMatchmaking()->LeaveLobby(entry.second->lobby);
+			xls::MemberDataLobbyLeft((entry.second->lobby).ConvertToUint64());
 			XLS_LOG_INFO("session: left lobby %llu (shutdown).", entry.second->lobby.ConvertToUint64());
 		}
 		CloseHandle(entry.first);
@@ -621,6 +623,7 @@ bool SessionCloseHandle(HANDLE session)
 	}
 	if (!it->second->deleted && it->second->lobby.IsValid() && SteamReady()) {
 		SteamMatchmaking()->LeaveLobby(it->second->lobby);
+		xls::MemberDataLobbyLeft((it->second->lobby).ConvertToUint64());
 		XLS_LOG_INFO("session: left lobby %llu (handle closed).", it->second->lobby.ConvertToUint64());
 	}
 	g_sessions.erase(it);
@@ -824,7 +827,8 @@ void OnLobbyDataUpdate(const LobbyDataUpdate_t& update)
 		}
 	}
 	else {
-		// Member data changed: a host claim may have arrived.
+		// Member data changed: a host claim (or mod member data) may have arrived.
+		xls::MemberDataMemberChanged(update.m_ulSteamIDLobby, update.m_ulSteamIDMember);
 		std::shared_ptr<Session> session = FindByLobby(lobby);
 		if (session) {
 			if (!session->host) {
@@ -908,6 +912,7 @@ DWORD WINAPI XSessionCreate(DWORD dwFlags, DWORD dwUserIndex, DWORD dwMaxPublicS
 			session->info.sessionID = KidFromLobby(session->lobby);
 			PublishSession(*session);
 			PublishRichPresenceConnect(session.get());
+			xls::MemberDataLobbyEntered(session->lobby.ConvertToUint64());
 			*pqwSessionNonce = session->nonce;
 			*pSessionInfo = session->info;
 			XLS_LOG_INFO("session: hosting lobby %llu.", session->lobby.ConvertToUint64());
@@ -963,6 +968,7 @@ DWORD WINAPI XSessionCreate(DWORD dwFlags, DWORD dwUserIndex, DWORD dwMaxPublicS
 			xls::SteamFriends()->SetPlayedWith(host);
 		}
 		PublishRichPresenceConnect(session.get());
+		xls::MemberDataLobbyEntered(session->lobby.ConvertToUint64());
 		*pqwSessionNonce = session->nonce;
 		*pSessionInfo = session->info;
 		XLS_LOG_INFO("session: joined lobby %llu.", session->lobby.ConvertToUint64());
@@ -1036,6 +1042,7 @@ DWORD WINAPI XSessionDelete(HANDLE hSession, XOVERLAPPED* pOverlapped)
 	}
 	if (!session->deleted && session->lobby.IsValid() && xls::SteamReady()) {
 		xls::SteamMatchmaking()->LeaveLobby(session->lobby);
+		xls::MemberDataLobbyLeft((session->lobby).ConvertToUint64());
 		XLS_LOG_INFO("session: left lobby %llu.", session->lobby.ConvertToUint64());
 	}
 	session->deleted = true;
@@ -1112,6 +1119,7 @@ DWORD WINAPI XSessionLeaveLocal(HANDLE hSession, DWORD dwUserCount, const DWORD*
 		session->members.erase(std::remove_if(session->members.begin(), session->members.end(), [xuid](const Member& m) { return m.xuid == xuid; }), session->members.end());
 		if (pdwUserIndexes[i] == 0 && !session->host && !session->deleted && session->lobby.IsValid() && xls::SteamReady()) {
 			xls::SteamMatchmaking()->LeaveLobby(session->lobby);
+			xls::MemberDataLobbyLeft((session->lobby).ConvertToUint64());
 			XLS_LOG_INFO("session: left lobby %llu (local user left).", session->lobby.ConvertToUint64());
 			session->deleted = true;
 			PublishRichPresenceConnect(nullptr);

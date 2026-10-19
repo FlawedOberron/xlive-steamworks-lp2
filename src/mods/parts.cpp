@@ -3,6 +3,8 @@
 #include "core/config.h"
 #include "core/json.h"
 #include "core/log.h"
+#include "core/memberdata.h"
+#include "core/steam.h"
 #include "core/utils.h"
 #include "mods/package.h"
 
@@ -11,11 +13,14 @@
 
 #include <wctype.h>
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
 #include <algorithm>
 #include <atomic>
+#include <deque>
+#include <memory>
 #include <map>
 #include <set>
 #include <mutex>
@@ -110,7 +115,94 @@ bool ParseManifest(const Bytes& text, const std::wstring& source, PartSet* set)
 	return true;
 }
 
-void LoadFolder(const std::wstring& dir, const std::wstring& label)
+// Set bundle: the files a set is made of (lpc.json, its models and textures; flat names), sorted
+// by lower-case name: "LPCB" u32 count, then per file u16 name length, name, u32 size, data. What
+// players send each other; its FNV-1a 64 (16 hex) names the set's content on every PC.
+const size_t kMaxBundle = 64u << 20;
+
+bool MakeBundle(const std::wstring& dir, const PartSet& set, Bytes* out)
+{
+	std::map<std::string, std::wstring> files; // lower-case name -> path
+	auto add = [&](const std::wstring& path) {
+		std::wstring leaf = path.substr(path.find_last_of(L"\\/") + 1);
+		std::string name = WideToUtf8(leaf.c_str());
+		std::string lower = name;
+		for (char& c : lower) {
+			c = (char)tolower((unsigned char)c);
+		}
+		files[lower] = path;
+	};
+	add(dir + L"lpc.json");
+	for (int s = 0; s < kPartSlotCount; s++) {
+		if (!set.models[s].empty()) {
+			add(set.models[s]);
+		}
+		for (const auto& t : set.textures[s]) {
+			add(t.second);
+		}
+	}
+	out->assign({'L', 'P', 'C', 'B'});
+	auto put32 = [&](uint32_t v) {
+		for (int i = 0; i < 4; i++) {
+			out->push_back((uint8_t)(v >> (i * 8)));
+		}
+	};
+	put32((uint32_t)files.size());
+	for (const auto& f : files) {
+		Bytes data;
+		if (!ReadWholeFile(f.second, &data) || out->size() + data.size() > kMaxBundle) {
+			return false;
+		}
+		out->push_back((uint8_t)f.first.size());
+		out->push_back((uint8_t)(f.first.size() >> 8));
+		out->insert(out->end(), f.first.begin(), f.first.end());
+		put32((uint32_t)data.size());
+		out->insert(out->end(), data.begin(), data.end());
+	}
+	return true;
+}
+
+std::string BundleHash(const Bytes& bundle)
+{
+	uint64_t h = Fnv1a64(bundle.data(), bundle.size());
+	char text[17];
+	snprintf(text, sizeof(text), "%016llx", (unsigned long long)h);
+	return text;
+}
+
+// Writes a bundle's files into dir (flat, plain names only).
+bool UnpackBundle(const Bytes& b, const std::wstring& dir)
+{
+	if (b.size() < 8 || memcmp(b.data(), "LPCB", 4) != 0) {
+		return false;
+	}
+	auto get32 = [&](size_t o) { return (uint32_t)b[o] | (uint32_t)b[o + 1] << 8 | (uint32_t)b[o + 2] << 16 | (uint32_t)b[o + 3] << 24; };
+	uint32_t count = get32(4);
+	size_t o = 8;
+	SHCreateDirectoryExW(nullptr, dir.c_str(), nullptr);
+	for (uint32_t i = 0; i < count; i++) {
+		if (o + 2 > b.size()) {
+			return false;
+		}
+		size_t n = b[o] | b[o + 1] << 8;
+		if (o + 2 + n + 4 > b.size()) {
+			return false;
+		}
+		std::string name((const char*)&b[o + 2], n);
+		uint32_t size = get32(o + 2 + n);
+		o += 2 + n + 4;
+		if (name.empty() || name.find_first_of("/\\:") != std::string::npos || name.find("..") != std::string::npos || o + size > b.size()) {
+			return false;
+		}
+		if (!WriteWholeFile(dir + Utf8ToWide(name.c_str()), Bytes(b.begin() + o, b.begin() + o + size))) {
+			return false;
+		}
+		o += size;
+	}
+	return o == b.size();
+}
+
+void LoadFolder(const std::wstring& dir, const std::wstring& label, std::vector<PartSet>* into = nullptr)
 {
 	Bytes text;
 	if (!ReadWholeFile(dir + L"lpc.json", &text)) {
@@ -211,7 +303,8 @@ void LoadFolder(const std::wstring& dir, const std::wstring& label)
 		XLS_LOG_WARN("mods: parts %ls: no usable parts, skipped.", label.c_str());
 		return;
 	}
-	for (const PartSet& other : g_sets) {
+	std::vector<PartSet>* target = into ? into : &g_sets;
+	for (const PartSet& other : *target) {
 		if (_stricmp(other.id.c_str(), set.id.c_str()) == 0) {
 			XLS_LOG_WARN("mods: parts %ls: id \"%s\" already used by %ls, skipped.", label.c_str(), set.id.c_str(), other.source.c_str());
 			return;
@@ -223,8 +316,12 @@ void LoadFolder(const std::wstring& dir, const std::wstring& label)
 			slots += (slots.empty() ? "" : ", ") + std::string(kSlotNames[s]);
 		}
 	}
-	XLS_LOG_INFO("mods: part set \"%s\" (%s, %s): %s.", set.name.c_str(), set.id.c_str(), set.faction.c_str(), slots.c_str());
-	g_sets.push_back(set);
+	Bytes bundle;
+	if (MakeBundle(dir, set, &bundle)) {
+		set.hash = BundleHash(bundle);
+	}
+	XLS_LOG_INFO("mods: part set \"%s\" (%s, %s, %s): %s.", set.name.c_str(), set.id.c_str(), set.faction.c_str(), set.hash.c_str(), slots.c_str());
+	target->push_back(set);
 }
 
 void LoadZip(const std::wstring& file)
@@ -897,25 +994,30 @@ void LoadCarrierChoice()
 }
 
 // Carrier slot `item` wears set index i in category cat; saves the choices.
+void PublishParts();
+
 void SetCarrierWorn(int cat, int item, int i)
 {
-	std::lock_guard<std::mutex> lock(g_carrierMutex);
-	g_carrierChoice[ChoiceItem(item) * kPartSlotCount + cat] = i;
-	g_carrierWorn[cat] = i;
-	std::string text;
-	for (int s = 0; s < kPartSlotCount; s++) {
-		if (!g_carrierSets[s].empty()) {
-			text += std::string(kSlotNames[s]) + " " + g_carrierSets[s][g_carrierWorn[s]].setId + "\n";
+	{
+		std::lock_guard<std::mutex> lock(g_carrierMutex);
+		g_carrierChoice[ChoiceItem(item) * kPartSlotCount + cat] = i;
+		g_carrierWorn[cat] = i;
+		std::string text;
+		for (int s = 0; s < kPartSlotCount; s++) {
+			if (!g_carrierSets[s].empty()) {
+				text += std::string(kSlotNames[s]) + " " + g_carrierSets[s][g_carrierWorn[s]].setId + "\n";
+			}
 		}
+		for (const auto& c : g_carrierChoice) {
+			int s = c.first % kPartSlotCount;
+			char line[128];
+			snprintf(line, sizeof(line), "%d %s %s\n", c.first / kPartSlotCount, kSlotNames[s], g_carrierSets[s][c.second].setId.c_str());
+			text += line;
+		}
+		WriteWholeFile(CarrierFile(), Bytes(text.begin(), text.end()));
+		XLS_LOG_INFO("mods: parts: carrier slot %d %s wears %s.", item, kSlotNames[cat], g_carrierSets[cat][i].setId.c_str());
 	}
-	for (const auto& c : g_carrierChoice) {
-		int s = c.first % kPartSlotCount;
-		char line[128];
-		snprintf(line, sizeof(line), "%d %s %s\n", c.first / kPartSlotCount, kSlotNames[s], g_carrierSets[s][c.second].setId.c_str());
-		text += line;
-	}
-	WriteWholeFile(CarrierFile(), Bytes(text.begin(), text.end()));
-	XLS_LOG_INFO("mods: parts: carrier slot %d %s wears %s.", item, kSlotNames[cat], g_carrierSets[cat][i].setId.c_str());
+	PublishParts(); // the other players see the new choice
 }
 
 DWORD WINAPI WarmCarrierCache(LPVOID)
@@ -949,6 +1051,8 @@ DWORD WINAPI WarmCarrierCache(LPVOID)
 	XLS_LOG_INFO("mods: parts: warmed %zu MB of carrier archives in %lu ms.", bytes >> 20, (unsigned long)(GetTickCount() - start));
 	return 0;
 }
+
+void PartsSyncInit();
 
 void BuildPackages()
 {
@@ -988,6 +1092,7 @@ void BuildPackages()
 			} while (!tokens.insert(tok).second);
 			PartPackage pkg;
 			if (!set->models[s].empty() && BuildPackage(*set, s, kCarrierItem, &pkg, tok)) {
+				pkg.setHash = set->hash;
 				g_carrierSets[s].push_back(pkg);
 			}
 		}
@@ -1031,6 +1136,7 @@ void BuildPackages()
 		             g_carrierSets[s].size());
 	}
 	LoadCarrierChoice();
+	PartsSyncInit();
 	XLS_LOG_INFO("mods: parts: %zu part package(s) ready.", g_packages.size());
 	// Warm the OS file cache with every carrier build's archives (read once, low priority), so a
 	// set's first load in the menu doesn't wait on the disk (it shows nothing until loaded).
@@ -1170,6 +1276,485 @@ const PartPackage* FindPackage(uint32_t cat, uint32_t code)
 	return nullptr;
 }
 
+// --- Per-player carrier sets (sync; notes: lp2-tools/notes/parts-carrier-and-sync-plan.md §6).
+// A carrier code only names an alias (faction, loadout), so without more a remote player on our
+// alias shows OUR set. Every player publishes their carrier choices as lobby member data "parts"
+// (PartsMemberValue); the receiving side keeps them per member and resolves a player slot p
+// (game+0x28[p], 0-15) to its member by the XUID in the player's info (offset found at run time
+// from our own entry) or, for the test stand-in, by ModCache\parts\fake_member.txt ("slot <p>" then
+// a member value, e.g. "1;d.body=spe3"). A match loads every player's parts in one stage loop
+// (DX11 7d4260), one archive request per player and category; a player with a set of their own
+// gets the archive "CustomParts\<token><set>[<colour>]" (the overlay serves the set's build,
+// PartsCarrierRedirect), and their unit's paths (parts+4 = unit, unit parts at unit+0x6f70, player
+// slot at parts+0x70) the set's names. The colour travels in the part code itself.
+const int kMaxPlayers = 16;
+const uint64_t kFakeMember = 0x01100001fffffff0ull; // the fake member's (made up) Steam id
+
+// A member's choices: per alias pair and category, and their last-worn set per category (by id).
+struct MemberParts {
+	std::map<int, std::string> choice; // ChoiceItem * kPartSlotCount + category -> "<set id>[:<hash>]"
+	std::string worn[kPartSlotCount];
+};
+
+std::mutex g_membersMutex;
+std::map<uint64_t, MemberParts> g_members; // Steam id -> choices
+int g_fakeSlot = -1;                       // the fake member plays this slot
+int g_infoXuidOffset = -1;                 // player info -> XUID (found from our own entry)
+std::atomic<bool> g_stageSeen{false};      // a stage load has started (PartsPlayer diagnostics)
+uint32_t g_unitParts = 0;                  // unit -> its parts object (DX11 0x6f70, DX9 0x6f60); 0 = unknown exe
+uint8_t** g_gameObject = nullptr;
+using SlotMapFn = int(__attribute__((thiscall)) *)(void*, int);
+SlotMapFn g_slotMap = nullptr;             // unit slot >= 100 -> player slot (DX11 7e5d10)
+thread_local int t_stagePlayers[kMaxPlayers];
+thread_local int t_stagePlayerCount = -1; // inside the stage loop: players present, in request order
+thread_local int t_stageRequest = 0;
+thread_local const PartPackage* t_requestSet = nullptr; // the request being built wears this set
+
+// Our member value: "1" then ";<item>.<cat>=<set id>:<hash>" per carrier choice and
+// ";d.<cat>=<set id>:<hash>" per last-worn set (hash: the set bundle's, MakeBundle).
+std::string PartsMemberValue()
+{
+	std::string value = "1";
+	std::lock_guard<std::mutex> lock(g_carrierMutex);
+	for (int s = 0; s < kPartSlotCount; s++) {
+		if (!g_carrierSets[s].empty()) {
+			const PartPackage& worn = g_carrierSets[s][g_carrierWorn[s]];
+			value += std::string(";d.") + kSlotNames[s] + "=" + worn.setId + ":" + worn.setHash;
+		}
+	}
+	for (const auto& c : g_carrierChoice) {
+		int s = c.first % kPartSlotCount;
+		const PartPackage& chosen = g_carrierSets[s][c.second];
+		value += ";" + std::to_string(c.first / kPartSlotCount) + "." + kSlotNames[s] + "=" + chosen.setId + ":" + chosen.setHash;
+	}
+	return value;
+}
+
+void PublishParts()
+{
+	xls::MemberDataSet("parts", PartsMemberValue());
+}
+
+bool ParseMemberParts(const std::string& value, MemberParts* out)
+{
+	if (value.compare(0, 1, "1") != 0 || (value.size() > 1 && value[1] != ';')) {
+		return false;
+	}
+	size_t pos = 2;
+	while (pos < value.size()) {
+		size_t end = value.find(';', pos);
+		std::string entry = value.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+		pos = end == std::string::npos ? value.size() : end + 1;
+		size_t dot = entry.find('.'), eq = entry.find('=');
+		if (dot == std::string::npos || eq == std::string::npos || eq < dot) {
+			continue;
+		}
+		std::string where = entry.substr(0, dot), cat = entry.substr(dot + 1, eq - dot - 1), id = entry.substr(eq + 1);
+		for (int s = 0; s < kPartSlotCount; s++) {
+			if (_stricmp(cat.c_str(), kSlotNames[s]) != 0) {
+				continue;
+			}
+			if (where == "d") {
+				out->worn[s] = id;
+			}
+			else if (int item = atoi(where.c_str()); IsCarrierItem(item)) {
+				out->choice[ChoiceItem(item) * kPartSlotCount + s] = id;
+			}
+		}
+	}
+	return true;
+}
+
+// --- Other players' sets we don't have: fetched as bundles into ModCache\parts\remote\<hash>\,
+// built like ours (own carrier token, internal id "<id>-<hash 8>" so names never meet a local
+// set's) and kept apart: worn only by the players who sent them, never in our menu.
+std::mutex g_remoteMutex;
+std::deque<PartPackage> g_remoteSets[kPartSlotCount]; // deque: pointers stay valid as sets arrive
+std::map<std::string, int> g_remoteState;             // hash -> 0 fetching, 1 ready, -1 failed
+std::vector<PartSet> g_fakeSets;                      // the fake member's library (fake_library\)
+
+const PartPackage* RemoteSet(uint32_t cat, const std::string& hash)
+{
+	std::lock_guard<std::mutex> lock(g_remoteMutex);
+	for (const PartPackage& pkg : g_remoteSets[cat]) {
+		if (pkg.setHash == hash) {
+			return &pkg;
+		}
+	}
+	return nullptr;
+}
+
+// A carrier token for category s no other set (ours or remote) uses, from key.
+std::string FreeToken(int s, const std::string& key)
+{
+	std::set<std::string> used;
+	for (const PartPackage& pkg : g_carrierSets[s]) {
+		used.insert(pkg.carrierToken);
+	}
+	for (const PartPackage& pkg : g_remoteSets[s]) {
+		used.insert(pkg.carrierToken);
+	}
+	uint32_t h = Fnv1a32(key.data(), key.size()) % 8000;
+	std::string tok;
+	do {
+		tok = std::string(kPrefixes[s]) + "z" + (char)('g' + h / 400) + (char)('g' + h / 20 % 20) + (char)('g' + h % 20);
+		h = (h + 1) % 8000;
+	} while (used.count(tok));
+	return tok;
+}
+
+// The transport: the bundle with this hash from member. The fake member reads its library; real
+// players need the P2P transfer (not built yet).
+bool FetchBundle(uint64_t member, const std::string& hash, Bytes* bundle)
+{
+	if (member == kFakeMember) {
+		for (const PartSet& set : g_fakeSets) {
+			if (set.hash == hash) {
+				std::wstring dir = set.source + L"\\";
+				return MakeBundle(dir, set, bundle);
+			}
+		}
+		return false;
+	}
+	XLS_LOG_INFO("mods: parts: set %s from player %llu: transfers between players are not built yet.", hash.c_str(), (unsigned long long)member);
+	return false;
+}
+
+struct RemoteJob {
+	uint64_t member;
+	std::string hash;
+};
+
+DWORD WINAPI RemoteSetThread(LPVOID param)
+{
+	std::unique_ptr<RemoteJob> job((RemoteJob*)param);
+	const std::string& hash = job->hash;
+	std::wstring dir = Cfg().modCacheDir + L"parts\\remote\\" + Utf8ToWide(hash.c_str()) + L"\\";
+	bool ok = GetFileAttributesW((dir + L"verified").c_str()) != INVALID_FILE_ATTRIBUTES;
+	if (!ok) {
+		DWORD start = GetTickCount();
+		Bytes bundle;
+		if (!FetchBundle(job->member, hash, &bundle)) {
+			XLS_LOG_WARN("mods: parts: could not get set %s from player %llu.", hash.c_str(), (unsigned long long)job->member);
+		}
+		else if (BundleHash(bundle) != hash) {
+			XLS_LOG_WARN("mods: parts: set %s from player %llu doesn't match its hash, dropped.", hash.c_str(), (unsigned long long)job->member);
+		}
+		else if (!UnpackBundle(bundle, dir)) {
+			XLS_LOG_WARN("mods: parts: set %s: bad bundle, dropped.", hash.c_str());
+			RemoveTree(dir);
+		}
+		else {
+			WriteWholeFile(dir + L"verified", Bytes());
+			ok = true;
+			XLS_LOG_INFO("mods: parts: got set %s (%zu bytes) from player %llu in %lu ms.", hash.c_str(), bundle.size(), (unsigned long long)job->member, GetTickCount() - start);
+		}
+	}
+	std::vector<PartSet> sets;
+	if (ok) {
+		LoadFolder(dir, L"remote " + Utf8ToWide(hash.c_str()), &sets);
+	}
+	int built = 0;
+	if (sets.size() == 1 && sets[0].hash == hash) {
+		PartSet set = sets[0];
+		std::string shown = set.id;
+		set.id += "-" + hash.substr(0, 8); // its build folder and model names apart from any local set
+		for (int s = 0; s < kPartSlotCount; s++) {
+			if (set.models[s].empty()) {
+				continue;
+			}
+			std::string tok;
+			{
+				std::lock_guard<std::mutex> lock(g_remoteMutex);
+				tok = FreeToken(s, hash + ":" + kSlotNames[s]);
+			}
+			PartPackage pkg;
+			if (BuildPackage(set, s, kCarrierItem, &pkg, tok)) {
+				pkg.setHash = hash;
+				pkg.remote = true;
+				std::lock_guard<std::mutex> lock(g_remoteMutex);
+				g_remoteSets[s].push_back(pkg);
+				built++;
+			}
+		}
+		XLS_LOG_INFO("mods: parts: player set %s (%s) ready, %d part(s); worn from the next load.", shown.c_str(), hash.c_str(), built);
+	}
+	else if (ok) {
+		XLS_LOG_WARN("mods: parts: set %s didn't load (%zu set(s), hash %s).", hash.c_str(), sets.size(), sets.empty() ? "-" : sets[0].hash.c_str());
+	}
+	std::lock_guard<std::mutex> lock(g_remoteMutex);
+	g_remoteState[hash] = built ? 1 : -1;
+	return 0;
+}
+
+// Starts getting set `hash` from member (once per hash).
+void EnsureRemote(uint64_t member, const std::string& hash)
+{
+	{
+		std::lock_guard<std::mutex> lock(g_remoteMutex);
+		if (!g_remoteState.emplace(hash, 0).second) {
+			return;
+		}
+	}
+	HANDLE thread = CreateThread(nullptr, 0, RemoteSetThread, new RemoteJob{member, hash}, 0, nullptr);
+	if (thread) {
+		CloseHandle(thread);
+	}
+}
+
+// What a member's entry "<set id>[:<hash>]" stands for here: our own set when we have that exact
+// set (or the id, when the entry has no hash), else the downloaded one; fetches it when missing.
+const PartPackage* ResolveEntry(uint64_t member, uint32_t cat, const std::string& entry, bool fetch)
+{
+	size_t colon = entry.find(':');
+	std::string id = entry.substr(0, colon), hash = colon == std::string::npos ? std::string() : entry.substr(colon + 1);
+	int i = id.empty() ? -1 : CarrierSetIndex((int)cat, id.c_str());
+	if (i >= 0 && (hash.empty() || g_carrierSets[cat][i].setHash == hash)) {
+		return &g_carrierSets[cat][i];
+	}
+	if (hash.empty()) {
+		return nullptr;
+	}
+	for (const PartPackage& pkg : g_carrierSets[cat]) {
+		if (pkg.setHash == hash) {
+			return &pkg; // the same set under another id
+		}
+	}
+	if (const PartPackage* remote = RemoteSet(cat, hash)) {
+		return remote;
+	}
+	if (fetch) {
+		EnsureRemote(member, hash);
+	}
+	return nullptr;
+}
+
+void OnMemberParts(uint64_t steamId, XUID xuid, const std::string& value)
+{
+	MemberParts parts;
+	if (!value.empty() && !ParseMemberParts(value, &parts)) {
+		XLS_LOG_WARN("mods: parts: member %llu: unknown parts data \"%.40s\".", (unsigned long long)steamId, value.c_str());
+		return;
+	}
+	{
+		std::lock_guard<std::mutex> lock(g_membersMutex);
+		if (value.empty()) {
+			g_members.erase(steamId);
+			return;
+		}
+		g_members[steamId] = parts;
+	}
+	XLS_LOG_INFO("mods: parts: member %llu (xuid 0x%016llx): %zu choice(s): %s", (unsigned long long)steamId, (unsigned long long)xuid, parts.choice.size(), value.c_str());
+	// get what we don't have now (in the lobby), not at the match's load
+	for (int s = 0; s < kPartSlotCount; s++) {
+		ResolveEntry(steamId, s, parts.worn[s], true);
+	}
+	for (const auto& c : parts.choice) {
+		ResolveEntry(steamId, c.first % kPartSlotCount, c.second, true);
+	}
+}
+
+// The test stand-in for a second client (ModCache\parts\fake_member.txt): "slot <p>" and a parts
+// line; without one, it wears every set of ModCache\parts\fake_library\ (set folders this PC
+// doesn't have in Parts\, so they come through the download path).
+void LoadFakeMember()
+{
+	Bytes data;
+	if (!ReadWholeFile(Cfg().modCacheDir + L"parts\\fake_member.txt", &data)) {
+		return;
+	}
+	std::wstring lib = Cfg().modCacheDir + L"parts\\fake_library\\";
+	for (const std::wstring& d : List(lib, true)) {
+		size_t before = g_fakeSets.size();
+		LoadFolder(lib + d + L"\\", L"fake library " + d, &g_fakeSets);
+		if (g_fakeSets.size() > before) {
+			g_fakeSets.back().source = lib + d;
+		}
+	}
+	std::string text(data.begin(), data.end());
+	int slot = -1;
+	std::string value;
+	size_t pos = 0;
+	while (pos < text.size()) {
+		size_t end = text.find('\n', pos);
+		std::string line = text.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+		pos = end == std::string::npos ? text.size() : end + 1;
+		while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) {
+			line.pop_back();
+		}
+		if (sscanf(line.c_str(), "slot %d", &slot) == 1 || line.empty() || line[0] == '#') {
+			continue;
+		}
+		value = line;
+	}
+	if (value.empty() && !g_fakeSets.empty()) {
+		value = "1";
+		for (const PartSet& set : g_fakeSets) {
+			for (int s = 0; s < kPartSlotCount; s++) {
+				if (!set.models[s].empty()) {
+					value += std::string(";d.") + kSlotNames[s] + "=" + set.id + ":" + set.hash;
+				}
+			}
+		}
+	}
+	if (slot < 0 || slot >= kMaxPlayers || value.empty()) {
+		XLS_LOG_WARN("mods: parts: fake_member.txt needs \"slot <0-15>\" and a parts line (or sets in fake_library).");
+		return;
+	}
+	g_fakeSlot = slot;
+	XLS_LOG_INFO("mods: parts: fake member plays slot %d (%zu library set(s)).", slot, g_fakeSets.size());
+	xls::MemberDataInject(kFakeMember, "parts", value);
+}
+
+void PartsSyncInit()
+{
+	xls::MemberDataListen("parts", OnMemberParts);
+	PublishParts();
+	LoadFakeMember();
+}
+
+// The member playing slot p, or 0.
+uint64_t SlotMember(int p)
+{
+	if (p == g_fakeSlot) {
+		return kFakeMember;
+	}
+	uint8_t* game = g_gameObject ? *g_gameObject : nullptr;
+	uint8_t* info = game && p >= 0 && p < kMaxPlayers ? *(uint8_t**)(game + 0x28 + p * 4) : nullptr;
+	if (!info || g_infoXuidOffset < 0) {
+		return 0;
+	}
+	XUID xuid = *(XUID*)(info + g_infoXuidOffset);
+	uint64_t steamId = xls::SteamIdFromXuid(xuid).ConvertToUint64();
+	return steamId == xls::SteamLocalId().ConvertToUint64() ? 0 : steamId; // our own: the menu's choice
+}
+
+// The set player p wears on carrier alias `item` in category cat, or nullptr (= the alias's own
+// choice: our own player, no data, or a set not here (yet)).
+const PartPackage* PlayerSet(int p, uint32_t cat, int item)
+{
+	if (p < 0 || p >= kMaxPlayers || cat >= kPartSlotCount) {
+		return nullptr;
+	}
+	uint64_t member = SlotMember(p);
+	if (!member) {
+		return nullptr;
+	}
+	std::string entry;
+	{
+		std::lock_guard<std::mutex> lock(g_membersMutex);
+		auto it = g_members.find(member);
+		if (it == g_members.end()) {
+			return nullptr;
+		}
+		auto c = it->second.choice.find(ChoiceItem(item) * kPartSlotCount + (int)cat);
+		entry = c != it->second.choice.end() ? c->second : it->second.worn[cat];
+	}
+	const PartPackage* pkg = entry.empty() ? nullptr : ResolveEntry(member, cat, entry, true);
+	if (!pkg && !entry.empty()) {
+		static std::set<std::string> missing;
+		static std::mutex mutex;
+		std::lock_guard<std::mutex> lock(mutex);
+		if (missing.insert(entry).second) {
+			XLS_LOG_WARN("mods: parts: player %d wears %s %s, not here (yet): shows our choice.", p, kSlotNames[cat], entry.c_str());
+		}
+	}
+	return pkg;
+}
+
+// Finds where a player info keeps the XUID: our own XUID in our own entry (once).
+void FindInfoXuid(uint8_t* game)
+{
+	if (g_infoXuidOffset >= 0 || !xls::SteamReady()) {
+		return;
+	}
+	XUID ours = xls::XuidFromSteamId(xls::SteamLocalId());
+	for (int p = 0; p < kMaxPlayers; p++) {
+		uint8_t* info = *(uint8_t**)(game + 0x28 + p * 4);
+		MEMORY_BASIC_INFORMATION mbi;
+		if (!info || !VirtualQuery(info, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) {
+			continue;
+		}
+		size_t room = (uint8_t*)mbi.BaseAddress + mbi.RegionSize - info;
+		for (size_t o = 0; o + 8 <= 0x400 && o + 8 <= room; o += 4) {
+			if (*(XUID*)(info + o) == ours) {
+				g_infoXuidOffset = (int)o;
+				XLS_LOG_INFO("mods: parts: player %d's info holds our xuid at +0x%x.", p, (unsigned)o);
+				return;
+			}
+		}
+	}
+	static bool logged = false;
+	if (!logged) {
+		logged = true;
+		XLS_LOG_WARN("mods: parts: our xuid 0x%016llx not found in the player infos (remote players fall back).", (unsigned long long)ours);
+	}
+}
+
+// The player whose controller drives unit, or -1: the game's own lookup (DX11 f87f40) walks the
+// player infos (game+0x28[p]) -> +0x480 -> +0x40 = that player's unit. Works for every unit class
+// (match units embed their parts at +0x2700, not at the +0x6f70 of the 8cc550 class).
+int OwnerPlayer(uint8_t* owner)
+{
+	uint8_t* game = g_gameObject ? *g_gameObject : nullptr;
+	auto live = [](uint8_t* o) { return o && ((*(uint32_t*)(o + 4) & 7) == 1 || (*(uint32_t*)(o + 4) & 7) == 2); };
+	if (!game || !live(owner)) {
+		return -1;
+	}
+	for (int p = 0; p < kMaxPlayers; p++) {
+		uint8_t* info = *(uint8_t**)(game + 0x28 + p * 4);
+		if (!info || !(info[8] & 1)) {
+			continue;
+		}
+		uint8_t* x = *(uint8_t**)(info + 0x480);
+		if (live(x) && *(uint8_t**)(x + 0x40) == owner) {
+			return p;
+		}
+	}
+	return -1;
+}
+
+// The player slot of the unit a parts object belongs to, or -1 (menu previews, unknown exe).
+int PartsPlayer(uint8_t* parts)
+{
+	if (!g_unitParts) {
+		return -1;
+	}
+	uint8_t* owner = *(uint8_t**)(parts + 4);
+	if (!owner || owner + g_unitParts != parts) {
+		int player = g_stageSeen ? OwnerPlayer(owner) : -1;
+		static std::mutex mutex;
+		static std::set<uint64_t> seen;
+		if (g_stageSeen) {
+			std::lock_guard<std::mutex> lock(mutex);
+			if (seen.size() < 32 && seen.insert((uint64_t)(uintptr_t)owner << 8 | (uint8_t)player).second) {
+				XLS_LOG_INFO("mods: parts: owner 0x%p (parts at +0x%x) -> player %d.", owner, (unsigned)(parts - owner), player);
+			}
+		}
+		return player;
+	}
+	int raw = *(int*)(parts + 0x70);
+	int player = raw;
+	if (raw >= 100) {
+		uint8_t* game = g_gameObject ? *g_gameObject : nullptr;
+		player = game && g_slotMap ? g_slotMap(game, raw - 100) : -1;
+	}
+	static std::atomic<int> logged{0};
+	if (logged++ < 32) {
+		XLS_LOG_INFO("mods: parts: unit 0x%p slot %d -> player %d.", owner, raw, player);
+	}
+	return player >= 0 && player < kMaxPlayers ? player : -1;
+}
+
+// The set the carrier part a parts object wears in category cat (alias item) stands for.
+const PartPackage* CarrierFor(uint8_t* parts, uint32_t cat, int item)
+{
+	if (const PartPackage* own = PlayerSet(PartsPlayer(parts), cat, item)) {
+		return own;
+	}
+	return CarrierWorn(cat, item);
+}
+
 // --- Path hook: after the game builds a part's resource path (thiscall(parts, out, kind, cat)),
 // a category wearing one of our generated DLC slots gets its model (kind 0) and colour texture
 // (kind 1) from the lpc copy in the slot archives. parts+0x44+cat*4: set byte (DLC = 0x0e / 0x2e), +0x46: variant
@@ -1188,7 +1773,7 @@ void __attribute__((thiscall)) PartPath(uint8_t* parts, char* out, int kind, uin
 	if (kind >= 3) {
 		// effect provider (3) and the other models (4, 5): the worn set's own names
 		if ((set & 0xdf) == 0x0e && IsCarrierItem(variant)) {
-			if (const PartPackage* worn = CarrierWorn(cat, variant); worn && worn->carrierToken.size() == 6) {
+			if (const PartPackage* worn = CarrierFor(parts, cat, variant); worn && worn->carrierToken.size() == 6) {
 				std::string path = out;
 				for (const char* mid : {"0e", "2e", "f6"}) {
 					ReplaceAll(&path, std::string(kPrefixes[cat]) + mid + Hex2(variant), worn->carrierToken);
@@ -1201,7 +1786,8 @@ void __attribute__((thiscall)) PartPath(uint8_t* parts, char* out, int kind, uin
 	if ((set & 0xdf) != 0x0e) {
 		return;
 	}
-	if (const PartPackage* found = FindPackage(cat, set | (uint32_t)variant << 16)) {
+	const PartPackage* found = IsCarrier(set | (uint32_t)variant << 16) ? CarrierFor(parts, cat, variant) : FindPackage(cat, set | (uint32_t)variant << 16);
+	if (found) {
 		const PartPackage& pkg = *found;
 		if (!pkg.lpcPath.empty()) {
 			char letter = (char)('A' + WornColour(pkg, parts[0x45 + cat * 4]));
@@ -1603,7 +2189,73 @@ void __attribute__((thiscall)) PartRequest(void* loader, uint32_t character, uin
 			             IsCarrier(code) ? " carrier" : "", __builtin_return_address(0));
 		}
 	}
+	// in the stage loop: whose part this is (the loop asks for 4 categories per present player)
+	const PartPackage* own = nullptr;
+	if (t_stagePlayerCount > 0 && IsCarrier(code)) {
+		int player = t_stagePlayers[(t_stageRequest / 4) % t_stagePlayerCount];
+		own = PlayerSet(player, cat, (code >> 16) & 0xff);
+		if (own) {
+			XLS_LOG_INFO("mods: parts: stage request player %d %s -> %s.", player, kSlotNames[cat], own->setId.c_str());
+		}
+	}
+	if (t_stagePlayerCount > 0) {
+		t_stageRequest++;
+	}
+	t_requestSet = own;
 	g_partRequestOriginal(loader, character, cat, code);
+	t_requestSet = nullptr;
+}
+
+// The request's archive names (sprintf "CustomParts\%s%02x%02x[%02x]" from prefix, set, item[,
+// colour]): for a player wearing a set of their own, "CustomParts\<token><set>[<colour>]".
+extern "C" int __cdecl RequestNameSprintf(char* out, const char* format, ...)
+{
+	va_list args;
+	va_start(args, format);
+	int n = vsprintf(out, format, args);
+	va_end(args);
+	if (const PartPackage* own = t_requestSet; own && own->carrierToken.size() == 6) {
+		va_start(args, format);
+		va_arg(args, const char*);
+		unsigned set = va_arg(args, unsigned);
+		va_arg(args, unsigned);
+		std::string name = "CustomParts\\" + own->carrierToken + Hex2((int)(set & 0xff));
+		if (strstr(format, "%02x%02x%02x")) {
+			name += Hex2((int)(va_arg(args, unsigned) & 0xff));
+		}
+		va_end(args);
+		n = sprintf(out, "%s", name.c_str());
+	}
+	return n;
+}
+
+// Stage loop DX11 FUN_007d4260 thiscall(loader, character, 0, 2): requests 4 categories for each
+// present player (game+0x28[p] != 0): offline players 0-3 twice (f8c6a0 codes, then the infos'),
+// online 0-15 once.
+using StageRequestFn = void(__attribute__((thiscall)) *)(void*, uint32_t, uint32_t, uint32_t);
+StageRequestFn g_stageRequestOriginal = nullptr;
+
+void __attribute__((thiscall)) StageRequest(void* loader, uint32_t character, uint32_t a, uint32_t b)
+{
+	uint8_t* game = g_gameObject ? *g_gameObject : nullptr;
+	t_stagePlayerCount = 0;
+	t_stageRequest = 0;
+	g_stageSeen = true;
+	if (game) {
+		FindInfoXuid(game);
+		int limit = game[0x256] == 0 ? 4 : kMaxPlayers;
+		for (int p = 0; p < limit; p++) {
+			if (*(uint32_t*)(game + 0x28 + p * 4) != 0) {
+				t_stagePlayers[t_stagePlayerCount++] = p;
+			}
+		}
+	}
+	static std::atomic<int> logged{0};
+	if (logged++ < 16) {
+		XLS_LOG_INFO("mods: parts: stage parts request (character %u, %d player(s), %s).", character, t_stagePlayerCount, game && game[0x256] ? "online" : "offline");
+	}
+	g_stageRequestOriginal(loader, character, a, b);
+	t_stagePlayerCount = -1;
 }
 
 // Part id -> code FUN_00f5cae0 cdecl(id, cat). Id 0 of every category is a placeholder
@@ -1695,15 +2347,19 @@ const uint8_t kPartStepPrologue[] = {0x53, 0x8b, 0x5c, 0x24, 0x0c, 0x55, 0x8b, 0
 const uint8_t kDlcNamePrologue[] = {0x53, 0x8a, 0x5c, 0x24, 0x08, 0x56, 0x8b, 0xf1};    // push ebx; mov bl,[esp+8]; push esi; mov esi,ecx
 const uint8_t kMenuUpdatePrologue[] = {0x83, 0xec, 0x08, 0x53, 0x56, 0x8b, 0xf1};      // sub esp,8; push ebx; push esi; mov esi,ecx
 const uint8_t kPartRequestPrologue[] = {0x81, 0xec, 0x10, 0x01, 0x00, 0x00};       // sub esp,0x110
+const uint8_t kStageRequestPrologue[] = {0x51, 0x80, 0xb9, 0x20, 0x95, 0x03, 0x00, 0x00}; // push ecx; cmp byte [ecx+0x39520],0
 const uint8_t kSwatchPrologue[] = {0x83, 0xec, 0x24, 0x8b, 0x54, 0x24, 0x2c};          // sub esp,0x24; mov edx,[esp+0x2c]
 
 // VAs per exe (LP2DX11.exe, LP2DX9.exe); every prologue is checked before patching.
 struct MenuVas {
 	uint32_t step, swatch, locked, apply, descriptorId, partCode, partId, partStep, dlcName, menuUpdate, previewState, partRequest;
+	uint32_t stageRequest, nameSprintf[2], sprintfFn, game, unitParts, slotMap;
 };
 const MenuVas kMenuVas[] = {
-	{0xeeb9a0, 0xee5060, 0xee4c40, 0xeed720, 0xf5c860, 0xf5cae0, 0xf5c9a0, 0xee4ac0, 0x8654a0, 0xef0c20, 0x20d4, 0x7d3fd0}, // DX11
-	{0xedbb80, 0xed5240, 0xed4e20, 0xedd900, 0xf4cb40, 0xf4cdc0, 0xf4cc80, 0xed4ca0, 0x855df0, 0xee0e00, 0x20c4, 0x7c5120}, // DX9
+	{0xeeb9a0, 0xee5060, 0xee4c40, 0xeed720, 0xf5c860, 0xf5cae0, 0xf5c9a0, 0xee4ac0, 0x8654a0, 0xef0c20, 0x20d4, 0x7d3fd0,
+	 0x7d4260, {0x7d4097, 0x7d4118}, 0x1224239, 0x18520c0, 0x6f70, 0x7e5d10}, // DX11
+	{0xedbb80, 0xed5240, 0xed4e20, 0xedd900, 0xf4cb40, 0xf4cdc0, 0xf4cc80, 0xed4ca0, 0x855df0, 0xee0e00, 0x20c4, 0x7c5120,
+	 0x7c53b0, {0x7c51e7, 0x7c5268}, 0x1213e59, 0x1842020, 0x6f60, 0x7d6e50}, // DX9
 };
 
 void InstallMenuColours(uint8_t* base, const MenuVas& va)
@@ -1741,6 +2397,32 @@ void InstallMenuColours(uint8_t* base, const MenuVas& va)
 	}
 	g_previewState = va.previewState;
 	g_partRequestOriginal = (PartRequestFn)Detour(at(va.partRequest), kPartRequestPrologue, sizeof(kPartRequestPrologue), (void*)&PartRequest);
+	int names = 0;
+	if (g_partRequestOriginal) {
+		// the request's two archive name sprintf calls -> RequestNameSprintf (call rel32 checked)
+		for (uint32_t site : va.nameSprintf) {
+			uint8_t* call = at(site);
+			if (call[0] == 0xe8 && call + 5 + *(int32_t*)(call + 1) == at(va.sprintfFn)) {
+				int32_t rel = (int32_t)((uint8_t*)&RequestNameSprintf - (call + 5));
+				DWORD old = 0;
+				if (VirtualProtect(call + 1, 4, PAGE_EXECUTE_READWRITE, &old)) {
+					memcpy(call + 1, &rel, 4);
+					VirtualProtect(call + 1, 4, old, &old);
+					FlushInstructionCache(GetCurrentProcess(), call, 5);
+					names++;
+				}
+			}
+		}
+		if (names == 2) {
+			g_gameObject = (uint8_t**)at(va.game);
+			g_unitParts = va.unitParts;
+			if (memcmp(at(va.slotMap), "\x81\xec\xd8\x00\x00\x00\x53", 7) == 0) {
+				g_slotMap = (SlotMapFn)at(va.slotMap); // sub esp,0xd8; push ebx
+			}
+			g_stageRequestOriginal = (StageRequestFn)Detour(at(va.stageRequest), kStageRequestPrologue, sizeof(kStageRequestPrologue), (void*)&StageRequest);
+		}
+	}
+	XLS_LOG_INFO("mods: parts: per-player sets: names %d, stage %d.", names, !!g_stageRequestOriginal);
 	g_menuUpdateTramp = Detour(at(va.menuUpdate), kMenuUpdatePrologue, sizeof(kMenuUpdatePrologue), (void*)&MenuUpdateStub);
 	g_dlcNameOriginal = (DlcNameFn)Detour(at(va.dlcName), kDlcNamePrologue, sizeof(kDlcNamePrologue), (void*)&DlcName);
 	XLS_LOG_INFO("mods: parts: customise menu colours hooked (code %d, id %d, descriptor %d, step %d, swatch %d, arrows %d, apply %d, part step %d, name %d, redraw %d, request log %d).", !!g_partCodeOriginal,
@@ -1774,6 +2456,31 @@ bool PartsCarrierRedirect(const std::wstring& path, std::wstring* out)
 		return false;
 	}
 	std::wstring name = lower.substr(lower.rfind(L'\\') + 1);
+	// a player's own set (RequestNameSprintf): <token><set>[<colour>].arc -> that set's build
+	if ((name.size() == 12 || name.size() == 14) && name[2] == L'z' && name.compare(name.size() - 4, 4, L".arc") == 0) {
+		std::lock_guard<std::mutex> lock(g_remoteMutex);
+		for (int s = 0; s < kPartSlotCount; s++) {
+			std::vector<const PartPackage*> all;
+			for (const PartPackage& pkg : g_carrierSets[s]) {
+				all.push_back(&pkg);
+			}
+			for (const PartPackage& pkg : g_remoteSets[s]) {
+				all.push_back(&pkg);
+			}
+			for (const PartPackage* found : all) {
+				const PartPackage& pkg = *found;
+				if (pkg.carrierToken.size() == 6 && name.compare(0, 6, Utf8ToWide(pkg.carrierToken.c_str())) == 0) {
+					*out = pkg.root + L"Content\\nativePC\\arcXmlTmpPC\\CustomParts\\" + Utf8ToWide(kPrefixes[s]) + name.substr(6, 2) +
+					       Utf8ToWide(Hex2(kCarrierItem).c_str()) + name.substr(8);
+					static std::atomic<int> logged{0};
+					if (logged++ < 64) {
+						XLS_LOG_INFO("mods: parts: player set %s %s -> %s", pkg.setId.c_str(), kSlotNames[s], WideToUtf8(out->c_str()).c_str());
+					}
+					return true;
+				}
+			}
+		}
+	}
 	if ((name.size() != 10 && name.size() != 12) || name.compare(name.size() - 4, 4, L".arc") != 0 || (name.compare(2, 2, L"0e") != 0 && name.compare(2, 2, L"2e") != 0)) {
 		return false;
 	}

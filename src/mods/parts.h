@@ -36,6 +36,7 @@ struct PartSet {
 	std::string faction;      // RND FJ SPE NEV FF ALL
 	int factionIndex = -1;    // the game's faction byte, -1 = every faction
 	std::wstring source;      // the zip or folder it came from
+	std::string hash;         // content hash of its bundle (16 hex; the same on every PC), see MakeBundle
 	std::wstring models[kPartSlotCount]; // unpacked .rModel per slot, empty = set has no such part
 	std::string templates[kPartSlotCount]; // original part each was built on ("bd2900")
 	int colour = 0;           // default colour (0-3 = A-D): the first of colours
@@ -60,6 +61,8 @@ struct PartPackage {
 	std::string carrierToken; // carrier builds: the set's 6-character stand-in for the slot's part names
 	int faction = -1;         // the set's faction byte, -1 = every faction
 	bool carrier = false;     // the carrier slot's registered package (the worn set's files are swapped in)
+	std::string setHash;      // carrier builds: the set's content hash
+	bool remote = false;      // a set downloaded from another player: worn by them only, never in our menu
 };
 
 // Builds (once; cached in ModCache\parts\pkg\) a DLC package per custom part, cloning the
