@@ -62,6 +62,7 @@ DWORD WINAPI Worker(LPVOID)
 
 void Start()
 {
+	CrashLogInstall();
 	HANDLE thread = CreateThread(nullptr, 0, Worker, nullptr, 0, nullptr);
 	if (thread) {
 		CloseHandle(thread);

@@ -9,6 +9,7 @@ namespace xls::mods {
 // Called from DllMain. Starts a worker that loads the plugin mods and waits for SteamStub to
 // decrypt the game's code to apply the mod-support patches.
 void Start();
+void CrashLogInstall(); // logs faults (module + offset, registers, call trail) to the xlive log
 
 // Hooks the game's file opens so files in enabled mod folders replace the game's own
 // (mods/<name>/nativePC/... overrides <game>/nativePC/...). Called from DllMain.

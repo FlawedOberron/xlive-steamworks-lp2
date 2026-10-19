@@ -208,6 +208,32 @@ bool UnpackBundle(const Bytes& b, const std::wstring& dir)
 	return o == b.size();
 }
 
+// rChainCol: u32 count at 0x08, 64-byte shapes from 0x10 (u16 joint a at +4, i16 joint b at +6, -1 = none).
+// Returns the first joint a shape uses that the rModel has no bone for (bones: u16 count at 0x06,
+// 24-byte records from the offset at 0x24, u8 joint id first), -1 when all are there.
+int ChainColMissingJoint(const Bytes& col, const Bytes& model)
+{
+	if (model.size() < 0x28 || col.size() < 16) {
+		return 0;
+	}
+	uint16_t bones = *(const uint16_t*)&model[6];
+	uint32_t at = *(const uint32_t*)&model[0x24];
+	bool has[256] = {};
+	for (uint32_t i = 0; i < bones && at + i * 24 < model.size(); i++) {
+		has[model[at + i * 24]] = true;
+	}
+	uint32_t count = *(const uint32_t*)&col[8];
+	for (uint32_t k = 0; k < count && 16 + k * 64 + 8 <= col.size(); k++) {
+		const uint8_t* r = &col[16 + k * 64];
+		for (int16_t j : {*(const int16_t*)(r + 4), *(const int16_t*)(r + 6)}) {
+			if (j != -1 && (j < 0 || j > 255 || !has[j])) {
+				return j;
+			}
+		}
+	}
+	return -1;
+}
+
 void LoadFolder(const std::wstring& dir, const std::wstring& label, std::vector<PartSet>* into = nullptr)
 {
 	Bytes text;
@@ -257,6 +283,10 @@ void LoadFolder(const std::wstring& dir, const std::wstring& label, std::vector<
 			std::wstring cp = dir + Utf8ToWide(chainCol.c_str());
 			if (chainCol.find_first_of("/\\:") != std::string::npos || !ReadWholeFile(cp, &head) || head.size() < 16 || memcmp(head.data(), "CCL\0", 4) != 0) {
 				XLS_LOG_WARN("mods: parts %ls: %s: chaincol %s is missing or not an rChainCol (plain file name).", label.c_str(), kSlotNames[s], chainCol.c_str());
+			}
+			else if (int j = ChainColMissingJoint(head, model); j >= 0) {
+				// the game looks every shape's joint up on the part's model and crashes on a miss
+				XLS_LOG_WARN("mods: parts %ls: %s: chaincol %s uses joint %d, which the model does not have; skipped.", label.c_str(), kSlotNames[s], chainCol.c_str(), j);
 			}
 			else {
 				set.chainCols[s] = cp;
@@ -716,6 +746,11 @@ bool BuildPackage(const PartSet& set, int slot, int item, PartPackage* out, cons
 	std::string stamp = std::string(stampBuf) + (carrierBuild ? " token " + carrierTok : "");
 	for (const auto& t : set.textures[slot]) {
 		stamp += " " + t.first + "=" + FileStamp(t.second);
+	}
+	for (const std::wstring* f : {&set.chains[slot], &set.chainCols[slot]}) {
+		if (!f->empty()) {
+			stamp += " " + WideToUtf8(f->substr(f->find_last_of(L"\\/") + 1).c_str()) + "=" + FileStamp(*f);
+		}
 	}
 	for (const MaterialOverride& o : set.overrides[slot]) {
 		char ob[64];
