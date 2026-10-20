@@ -19,6 +19,8 @@ void OverlayInstall();
 bool MapsWanted();
 bool MapsTryInstall(unsigned char* base);
 void MapsPatchPickers(unsigned char* base);
+// A map package was bound to online slot 13 / 14 (packages.cpp): its base map's preload list and its size class.
+void MapsRebind(int slot, int base, int size);
 
 // Enabled mod folders in load order (zip mods unpacked into ModCache), computed once.
 const std::vector<std::wstring>& ModRootList();

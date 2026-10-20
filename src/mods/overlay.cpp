@@ -154,12 +154,7 @@ void BuildIndex()
 		IndexFolder(root, L"", &count);
 		XLS_LOG_INFO("mods: overlay %s: %u files.", WideToUtf8(root.c_str()).c_str(), (unsigned)count);
 	}
-	size_t before = g_index.size();
-	PackagesIndex(&g_index);
 	PartsIndex(&g_index);
-	if (g_index.size() != before) {
-		XLS_LOG_INFO("mods: map packages: %u files.", (unsigned)(g_index.size() - before));
-	}
 }
 
 // The mod file that replaces path, or nullptr.
@@ -181,12 +176,17 @@ const std::wstring* Redirect(const std::wstring& path)
 	std::wstring rel = lower.substr(g_gameDirLower.size());
 	auto it = g_index.find(rel);
 	const std::wstring* found = it == g_index.end() ? nullptr : &it->second;
+	// the map packages bound to slots 13 / 14 right now (packages.cpp; changes between matches)
+	thread_local std::wstring mapPath;
+	if (PackagesMapFile(rel, &mapPath)) {
+		found = &mapPath;
+	}
 	// the carrier slot's part archives (as opened, or as the index maps them) -> the worn set's
 	thread_local std::wstring carrierPath;
 	if (PartsCarrierRedirect(found ? *found : std::wstring(full, length), &carrierPath)) {
 		found = &carrierPath;
 	}
-	// Shared game files that map packages add to (names), built from whatever would be opened.
+	// Shared game files that map packages add to (names, thumbnails), built from whatever would be opened.
 	if (const std::wstring* generated = PackagesGenerated(rel, found ? *found : std::wstring(full, length))) {
 		found = generated;
 	}

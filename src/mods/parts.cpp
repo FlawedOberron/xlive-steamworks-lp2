@@ -1,5 +1,7 @@
 #include "mods/parts.h"
 
+#include "core/content.h"
+#include "core/transfer.h"
 #include "core/config.h"
 #include "core/json.h"
 #include "core/log.h"
@@ -266,6 +268,7 @@ void LoadFolder(const std::wstring& dir, const std::wstring& label, std::vector<
 		}
 		set.models[s] = path;
 		set.templates[s] = part["template"].GetString(std::string());
+		set.noEffects[s] = _stricmp(part["effects"].GetString(std::string()).c_str(), "none") == 0;
 		std::string chain = part["chain"].GetString(std::string());
 		if (!chain.empty()) {
 			Bytes head;
@@ -501,7 +504,7 @@ int ChoiceItem(int item)
 {
 	return item >= kAliasFirst && item < kAliasFirst + kAliasCount ? item & ~1 : item;
 }
-const char* const kGenVersion = "lp2-partpkg 14";
+const char* const kGenVersion = "lp2-partpkg 15";
 
 std::once_flag g_pkgOnce;
 std::vector<PartPackage> g_packages;
@@ -540,9 +543,27 @@ bool EndsWith(const std::string& s, const std::string& tail)
 	return s.size() >= tail.size() && _stricmp(s.c_str() + s.size() - tail.size(), tail.c_str()) == 0;
 }
 
+// An rEffectProvider that starts no effects (26 stock parts carry this one, e.g. bd2c00; it names no
+// files): stands in for the template's when a set drops its effects (the 29xx parts' lamps).
+const char kEmptyEffectProvider[] =
+	"\x58\x46\x53\x00\x08\x00\x60\x00\x04\x00\x00\x00\x28\x01\x00\x00\x10\x00\x00\x00\x48\x00\x00\x00\x80\x00\x00\x00\xb8\x00\x00\x00"
+	"\x4c\xce\x03\x4b\x02\x00\x00\x00\xd8\x00\x00\x00\x01\x00\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+	"\xe4\x00\x00\x00\x01\x00\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x5f\xdd\x51\x32\x02\x00\x00\x00"
+	"\xed\x00\x00\x00\x01\x00\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xf9\x00\x00\x00\x01\x00\x04\x00"
+	"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x41\x4d\x13\x71\x02\x00\x00\x00\x06\x01\x00\x00\x03\x00\x01\x00"
+	"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x12\x01\x00\x00\x02\xa0\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+	"\x00\x00\x00\x00\x00\x00\x00\x00\xc7\xd8\xd8\x6f\x01\x00\x00\x00\x1a\x01\x00\x00\x01\x00\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+	"\x00\x00\x00\x00\x00\x00\x00\x00\x6d\x45\x66\x66\x65\x63\x74\x49\x6e\x66\x6f\x00\x6d\x45\x32\x44\x49\x6e\x66\x6f\x00\x6d\x45\x66"
+	"\x66\x65\x63\x74\x4c\x69\x73\x74\x00\x6d\x4d\x6f\x74\x53\x79\x6e\x63\x4c\x69\x73\x74\x00\x6d\x41\x75\x74\x6f\x44\x65\x6c\x65\x74"
+	"\x65\x00\x6d\x70\x41\x72\x72\x61\x79\x00\x6d\x47\x72\x6f\x75\x70\x41\x72\x72\x61\x79\x00\x00\x00\x01\x00\x00\x00\x5b\x00\x00\x00"
+	"\x01\x00\x00\x00\x03\x00\x01\x00\x2e\x00\x00\x00\x01\x00\x00\x00\x05\x00\x02\x00\x0d\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00"
+	"\x00\x01\x00\x00\x00\x05\x00\x03\x00\x0d\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x07\x00\x04\x00\x19\x00"
+	"\x00\x00\x01\x00\x00\x00\x05\x00\x05\x00\x0d\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00";
+
 bool CloneArc(const std::wstring& src, const std::wstring& dst, const std::vector<std::pair<std::string, std::string>>& pairs,
               const std::string& modelName, const Bytes* model, const std::string& colourFrom,
-              const std::vector<std::pair<std::string, const Bytes*>>& textures = {}, const Bytes* chain = nullptr, const Bytes* chainCol = nullptr)
+              const std::vector<std::pair<std::string, const Bytes*>>& textures = {}, const Bytes* chain = nullptr, const Bytes* chainCol = nullptr,
+              bool noEffects = false)
 {
 	Bytes file;
 	std::vector<ArcEntry> entries;
@@ -572,6 +593,9 @@ bool CloneArc(const std::wstring& src, const std::wstring& dst, const std::vecto
 	for (ArcEntry& e : entries) {
 		if (model && e.name == modelName && e.classHash == ClassHash("rModel")) {
 			e.data = *model;
+		}
+		if (noEffects && e.classHash == ClassHash("rEffectProvider")) {
+			e.data.assign(kEmptyEffectProvider, kEmptyEffectProvider + sizeof(kEmptyEffectProvider) - 1);
 		}
 		if (e.classHash == ClassHash("rTexture")) {
 			for (const auto& t : textures) {
@@ -743,7 +767,7 @@ bool BuildPackage(const PartSet& set, int slot, int item, PartPackage* out, cons
 	std::wstring dstDir = root + L"Content\\nativePC\\arcXmlTmpPC\\CustomParts\\";
 	char stampBuf[256];
 	snprintf(stampBuf, sizeof(stampBuf), "%s item %d colour %d template %s model %s", kGenVersion, item, set.colour, tmpl.c_str(), FileStamp(set.models[slot]).c_str());
-	std::string stamp = std::string(stampBuf) + (carrierBuild ? " token " + carrierTok : "");
+	std::string stamp = std::string(stampBuf) + (carrierBuild ? " token " + carrierTok : "") + (set.noEffects[slot] ? " noeffects" : "");
 	for (const auto& t : set.textures[slot]) {
 		stamp += " " + t.first + "=" + FileStamp(t.second);
 	}
@@ -808,7 +832,7 @@ bool BuildPackage(const PartSet& set, int slot, int item, PartPackage* out, cons
 				{tmpl, carrierBuild ? carrierTok : pfx + d + dv},
 			};
 			std::wstring tag = Utf8ToWide((pfx + d + dv).c_str());
-			if (!CloneArc(srcDir + Utf8ToWide(tmpl.c_str()) + L".arc", dstDir + tag + L".arc", pairs, modelName, &model, std::string(), mainTex, chainData, colData)) {
+			if (!CloneArc(srcDir + Utf8ToWide(tmpl.c_str()) + L".arc", dstDir + tag + L".arc", pairs, modelName, &model, std::string(), mainTex, chainData, colData, set.noEffects[slot])) {
 				XLS_LOG_WARN("mods: parts %s: %s: cannot clone %s.arc.", set.id.c_str(), kSlotNames[slot], tmpl.c_str());
 				return false;
 			}
@@ -1548,8 +1572,19 @@ std::string FreeToken(int s, const std::string& key)
 	return tok;
 }
 
+// The folder a set's lpc.json is in (beside its models; for zips, the unpacked copy).
+std::wstring SetFolder(const PartSet& set)
+{
+	for (const std::wstring& m : set.models) {
+		if (!m.empty()) {
+			return m.substr(0, m.find_last_of(L"\\/") + 1);
+		}
+	}
+	return std::wstring();
+}
+
 // The transport: the bundle with this hash from member. The fake member reads its library; real
-// players need the P2P transfer (not built yet).
+// players send it over xls::TransferFetch (core/transfer.cpp).
 bool FetchBundle(uint64_t member, const std::string& hash, Bytes* bundle)
 {
 	if (member == kFakeMember) {
@@ -1561,8 +1596,38 @@ bool FetchBundle(uint64_t member, const std::string& hash, Bytes* bundle)
 		}
 		return false;
 	}
-	XLS_LOG_INFO("mods: parts: set %s from player %llu: transfers between players are not built yet.", hash.c_str(), (unsigned long long)member);
-	return false;
+	std::wstring file = Cfg().modCacheDir + L"parts\\remote\\" + Utf8ToWide(hash.c_str()) + L".lpcb";
+	bool ok = xls::TransferFetch(member, "part", hash, kMaxBundle, file) && ReadWholeFile(file, bundle);
+	DeleteFileW(file.c_str());
+	return ok;
+}
+
+// What we send others: the bundle of one of our own sets, by hash.
+std::shared_ptr<xls::TransferSource> ServeBundle(const std::string& hash)
+{
+	if (hash.empty()) {
+		return nullptr;
+	}
+	for (const PartSet& set : PartSets()) {
+		if (set.hash != hash) {
+			continue;
+		}
+		auto bundle = std::make_shared<Bytes>();
+		if (!MakeBundle(SetFolder(set), set, bundle.get()) || BundleHash(*bundle) != hash) {
+			return nullptr; // changed on disk since it was loaded
+		}
+		auto source = std::make_shared<xls::TransferSource>();
+		source->size = bundle->size();
+		source->read = [bundle](uint64_t offset, uint32_t length, uint8_t* out) {
+			if (offset + length > bundle->size()) {
+				return false;
+			}
+			memcpy(out, bundle->data() + offset, length);
+			return true;
+		};
+		return source;
+	}
+	return nullptr;
 }
 
 struct RemoteJob {
@@ -1637,6 +1702,13 @@ void EnsureRemote(uint64_t member, const std::string& hash)
 {
 	{
 		std::lock_guard<std::mutex> lock(g_remoteMutex);
+		// a failed fetch is tried again (another member, or the same one once reachable) after 30 s
+		static std::map<std::string, DWORD> failedAt;
+		auto it = g_remoteState.find(hash);
+		if (it != g_remoteState.end() && it->second == -1 && failedAt.emplace(hash, GetTickCount()).first->second + 30000 < GetTickCount()) {
+			failedAt.erase(hash);
+			g_remoteState.erase(it);
+		}
 		if (!g_remoteState.emplace(hash, 0).second) {
 			return;
 		}
@@ -1753,7 +1825,17 @@ void LoadFakeMember()
 
 void PartsSyncInit()
 {
+	xls::TransferRegister("part", ServeBundle);
 	xls::MemberDataListen("parts", OnMemberParts);
+	xls::ContentAddPending([] {
+		std::lock_guard<std::mutex> lock(g_remoteMutex);
+		for (const auto& kv : g_remoteState) {
+			if (kv.second == 0) {
+				return true;
+			}
+		}
+		return false;
+	});
 	PublishParts();
 	LoadFakeMember();
 }

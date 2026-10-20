@@ -3,7 +3,9 @@
 #include "api/xlive.h"
 #include "api/xsession.h"
 
+#include "core/discord.h"
 #include "core/config.h"
+#include "core/content.h"
 #include "mods/lp2.h"
 #include "core/enumerator.h"
 #include "core/log.h"
@@ -80,6 +82,8 @@ HRESULT WINAPI XLiveInitializeEx(XLIVE_INITIALIZE_INFO* pXii, DWORD dwTitleXLive
 	xls::UsersInit();
 	xls::NetInit();
 	xls::SessionsInit();
+	xls::ContentStart();
+	xls::DiscordStart();
 
 	if (xls::SteamReady()) {
 		xls::NotifyPost(XN_SYS_SIGNINCHANGED, 1);
@@ -120,6 +124,7 @@ void WINAPI XLiveUninitialize()
 		return;
 	}
 	g_initialised = false;
+	xls::DiscordStop();
 	xls::SessionsShutdown();
 	xls::AsyncShutdown();
 	xls::EnumeratorShutdown();

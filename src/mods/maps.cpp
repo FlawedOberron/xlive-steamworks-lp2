@@ -20,7 +20,9 @@
 //
 // The game identifies online maps by these numbers (map picker values 0-19, session data). 0-12
 // and 15 are real maps and 16-19 are the Random <Small/Medium/Large/All> choices, so only 13 and
-// 14 are free. Mapping more mods than slots onto them per session is the next step.
+// 14 are free. Both are always set up (a player without map packages may join a lobby playing
+// the host's, downloaded on the spot); packages.cpp binds packages to them at runtime and calls
+// MapsRebind, which re-points the slot's preload list and size. A slot is selectable while bound.
 
 namespace xls::mods {
 
@@ -33,8 +35,8 @@ struct ModMap {
 	std::string name;
 };
 
-std::vector<ModMap> g_maps;
-bool g_slotUsed[32] = {};
+std::vector<ModMap> g_maps; // always slots 13 and 14
+uint32_t* g_remapTable = nullptr;         // {map, size} x 16
 
 // Online map availability (DX11 FUN_0080e470, thiscall on the game object, (u8 map, u8 flag)):
 // 13 and 14 are hard-disabled, 4/8/11/15 depend on DLC flag bits at +0x50d20, 2 and 9 are off when
@@ -56,6 +58,8 @@ struct DepEntry {
 	uint8_t id;
 	uint16_t pad;
 };
+DepEntry* g_preloadCopy = nullptr;        // the moved preload list (mod entries at the end)
+std::vector<DepEntry> g_preloadOriginal;  // the game's entries
 const uint32_t kDepRvas[2][2] = {{0x3d12d2, 0x3d1329}, {0x3c2462, 0x3c24b9}}; // DX11, DX9
 const uint8_t kAreaOnline = 7;
 
@@ -63,7 +67,7 @@ bool __attribute__((thiscall)) MapAvailable(uint8_t* game, uint32_t mapArg, uint
 {
 	uint32_t map = mapArg & 0xff;
 	bool flag = (flagArg & 0xff) == 1;
-	if (map < 32 && g_slotUsed[map]) {
+	if ((map == 13 || map == 14) && PackagesSlotBound((int)map)) {
 		return true;
 	}
 	switch (map) {
@@ -138,9 +142,10 @@ bool InstallPreload(uint8_t* base, int build)
 			}
 		}
 		if (!arcs) {
-			XLS_LOG_WARN("mods: map \"%s\": base map %d has no preload list, slot %d left disabled.", m.name.c_str(), m.base, m.slot);
-			g_slotUsed[m.slot] = false;
-			continue;
+			XLS_LOG_WARN("mods: map \"%s\": base map %d has no preload list, slot %d uses map 0's.", m.name.c_str(), m.base, m.slot);
+			for (size_t i = 0; i < original && !arcs; i++) {
+				arcs = entries[i].areaType == kAreaOnline && entries[i].id == 0 ? entries[i].arcs : nullptr;
+			}
 		}
 		entries.push_back({arcs, kAreaOnline, (uint8_t)m.slot, 0});
 	}
@@ -151,6 +156,8 @@ bool InstallPreload(uint8_t* base, int build)
 		return false;
 	}
 	memcpy(copy, entries.data(), entries.size() * sizeof(DepEntry));
+	g_preloadCopy = copy;
+	g_preloadOriginal.assign(entries.begin(), entries.begin() + original);
 	uint32_t addr = (uint32_t)(uintptr_t)copy;
 	for (uint8_t* s : sites) {
 		WriteCode(s + 1, &addr, 4);
@@ -193,6 +200,7 @@ bool PatchRemapTable(uint8_t* base)
 				continue;
 			}
 			auto* table = (uint32_t*)p;
+			g_remapTable = table;
 			for (const ModMap& m : g_maps) {
 				uint32_t size = m.size >= 0 ? (uint32_t)m.size : (m.base < 16 ? table[m.base * 2 + 1] : 1);
 				uint32_t entry[2] = {(uint32_t)m.slot, size};
@@ -240,7 +248,7 @@ int PatchInlineTables(uint8_t* base)
 			if (memcmp(t, layout, 11) != 0 || t[13] != layout[13] || (t[11] != layout[11] && t[11] != t[1])) {
 				continue;
 			}
-			uint8_t entries[2] = {g_slotUsed[13] ? t[1] : layout[11], g_slotUsed[14] ? t[1] : layout[12]};
+			uint8_t entries[2] = {t[1], t[1]}; // both slots always (selectable only while bound: MapAvailable)
 			if (WriteCode(t + 11, entries, 2)) {
 				patched++;
 			}
@@ -254,16 +262,58 @@ bool g_loaded = false;
 
 }
 
+ModMap* SlotEntry(int slot)
+{
+	for (ModMap& m : g_maps) {
+		if (m.slot == slot) {
+			return &m;
+		}
+	}
+	g_maps.push_back({slot, 0, -1, std::string()});
+	return &g_maps.back();
+}
+
 bool MapsWanted()
 {
 	if (!g_loaded) {
 		g_loaded = true;
+		SlotEntry(13);
+		SlotEntry(14);
 		for (const MapPackage& p : PackageMaps()) {
-			g_slotUsed[p.slot] = true;
-			g_maps.push_back({p.slot, p.base, p.size, p.name});
+			ModMap* m = SlotEntry(p.slot);
+			*m = {p.slot, p.base, p.size, p.name};
 		}
 	}
-	return !g_maps.empty();
+	return true;
+}
+
+void MapsRebind(int slot, int base, int size)
+{
+	if (slot != 13 && slot != 14) {
+		return;
+	}
+	ModMap* m = SlotEntry(slot);
+	m->base = base;
+	m->size = size;
+	if (g_preloadCopy) {
+		const char** arcs = nullptr;
+		for (const DepEntry& e : g_preloadOriginal) {
+			arcs = !arcs && e.areaType == kAreaOnline && e.id == base ? e.arcs : arcs;
+		}
+		for (DepEntry* e = g_preloadCopy + g_preloadOriginal.size(); arcs && e->arcs; e++) {
+			if (e->id == slot) {
+				e->arcs = arcs;
+			}
+		}
+	}
+	if (g_remapTable) {
+		uint32_t entry[2] = {(uint32_t)slot, size >= 0 ? (uint32_t)size : (base < 13 || base == 15 ? g_remapTable[base * 2 + 1] : 1)};
+		DWORD old = 0;
+		if (VirtualProtect(g_remapTable + slot * 2, 8, PAGE_READWRITE, &old)) {
+			memcpy(g_remapTable + slot * 2, entry, 8);
+			VirtualProtect(g_remapTable + slot * 2, 8, old, &old);
+		}
+	}
 }
 
 // Called once the whole of .text is decrypted (SteamStub decrypts it progressively, so the

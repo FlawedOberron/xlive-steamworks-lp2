@@ -86,6 +86,9 @@ struct Config {
 	// Presence.
 	std::string richPresenceKey = "status";
 	bool richPresenceSteamDisplay = true;
+	uint32_t startWaitSeconds = 180;    // "sessions": {"start_wait_seconds"}: how long a match start waits for players still downloading maps/parts.
+	bool discordEnabled = true;         // "discord": {"enabled": false} turns Discord rich presence off.
+	std::string discordAppId = "1562087240098906242"; // "Lost Planet 2 (Recolonised)" ("discord": {"app_id": ...})
 
 	// Storage.
 	bool cloudEnabled = true;

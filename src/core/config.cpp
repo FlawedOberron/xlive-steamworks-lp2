@@ -203,12 +203,15 @@ bool ConfigLoad()
 			config.lobbyKeyPrefix = sessions["lobby_key_prefix"].GetString("xl_");
 			config.lobbyDistanceFilter = (int)sessions["lobby_distance_filter"].GetInt(1);
 			config.sessionsAcceptAnyPeer = sessions["accept_any_peer"].GetBool(true);
+			config.startWaitSeconds = (uint32_t)sessions["start_wait_seconds"].GetInt(180);
 			config.relayOnly = root["network"]["relay_only"].GetBool(false);
 			config.sendRateKBytes = (uint32_t)root["network"]["send_rate_kbytes"].GetInt(0);
 
 			const Json& presence = root["presence"];
 			config.richPresenceKey = presence["key"].GetString("status");
 			config.richPresenceSteamDisplay = presence["steam_display"].GetBool(true);
+			config.discordEnabled = root["discord"]["enabled"].GetBool(true);
+			config.discordAppId = root["discord"]["app_id"].GetString(config.discordAppId);
 
 			const Json& storage = root["storage"];
 			config.cloudEnabled = storage["cloud"].GetBool(true);

@@ -4,6 +4,7 @@
 #include "api/xsession.h"
 
 #include "core/config.h"
+#include "core/content.h"
 #include "core/enumerator.h"
 #include "core/log.h"
 #include "core/memberdata.h"
@@ -689,6 +690,32 @@ CSteamID SessionPresenceLobby()
 	return fallback;
 }
 
+bool SessionPresenceInGame()
+{
+	std::lock_guard<std::recursive_mutex> lock(g_mutex);
+	CSteamID lobby = SessionPresenceLobby();
+	for (auto& entry : g_sessions) {
+		if (!entry.second->deleted && entry.second->lobby == lobby && lobby.IsValid()) {
+			return entry.second->state == XSESSION_STATE_INGAME;
+		}
+	}
+	return false;
+}
+
+bool SessionPresenceJoinable()
+{
+	std::lock_guard<std::recursive_mutex> lock(g_mutex);
+	CSteamID lobby = SessionPresenceLobby();
+	for (auto& entry : g_sessions) {
+		const Session& s = *entry.second;
+		if (!s.deleted && s.lobby == lobby && lobby.IsValid()) {
+			bool open = s.state != XSESSION_STATE_INGAME || !(s.flags & XSESSION_CREATE_JOIN_IN_PROGRESS_DISABLED);
+			return open && LobbyTypeFor(s.flags) != k_ELobbyTypeInvisible;
+		}
+	}
+	return false;
+}
+
 uint64_t SessionLobbyId(HANDLE session)
 {
 	std::lock_guard<std::recursive_mutex> lock(g_mutex);
@@ -978,19 +1005,81 @@ DWORD WINAPI XSessionCreate(DWORD dwFlags, DWORD dwUserIndex, DWORD dwMaxPublicS
 }
 
 // #5318
+// Under g_mutex: the match is on.
+void StartSession(Session& session)
+{
+	session.state = XSESSION_STATE_INGAME;
+	if (session.host && session.lobby.IsValid() && xls::SteamReady()) {
+		PublishSession(session);
+	}
+}
+
+// Held while anyone in the lobby is still downloading the match's content (the host's maps, part
+// sets), so nobody loads the stage without it; the session stays in the lobby state meanwhile,
+// which lets the mods bind what arrives. Gives up after sessions.start_wait_seconds.
 DWORD WINAPI XSessionStart(HANDLE hSession, DWORD dwFlags, XOVERLAPPED* pOverlapped)
 {
 	XLS_TRACE_FN();
-	std::lock_guard<std::recursive_mutex> lock(g_mutex);
-	std::shared_ptr<Session> session = Find(hSession);
-	if (!session) {
-		return ERROR_INVALID_HANDLE;
+	std::shared_ptr<Session> session;
+	uint64_t lobby = 0;
+	{
+		std::lock_guard<std::recursive_mutex> lock(g_mutex);
+		session = Find(hSession);
+		if (!session) {
+			return ERROR_INVALID_HANDLE;
+		}
+		if (session->lobby.IsValid() && xls::SteamReady()) {
+			lobby = session->lobby.ConvertToUint64();
+		}
 	}
-	session->state = XSESSION_STATE_INGAME;
-	if (session->host && session->lobby.IsValid() && xls::SteamReady()) {
-		PublishSession(*session);
+	int waiting = 0, percent = 100;
+	if (!lobby || xls::ContentLobbyReady(lobby, &waiting, &percent)) {
+		XLS_LOG_INFO("XSessionStart: starting (%s).", pOverlapped ? "overlapped" : "synchronous");
+		std::lock_guard<std::recursive_mutex> lock(g_mutex);
+		StartSession(*session);
+		return xls::OverlappedReturn(pOverlapped, ERROR_SUCCESS);
 	}
-	return xls::OverlappedReturn(pOverlapped, ERROR_SUCCESS);
+	XLS_LOG_INFO("XSessionStart: %d player(s) still downloading (%d%%); holding the start (%s, up to %u s).", waiting, percent,
+	             pOverlapped ? "overlapped" : "synchronous", xls::Cfg().startWaitSeconds);
+	xls::ContentStartWaiting(lobby);
+	DWORD begin = GetTickCount();
+	std::weak_ptr<Session> weak = session;
+	auto step = [weak, lobby, begin](XOVERLAPPED* overlapped) {
+		int waiting, percent;
+		bool ready = xls::ContentLobbyReady(lobby, &waiting, &percent);
+		DWORD waited = GetTickCount() - begin;
+		bool late = waited > xls::Cfg().startWaitSeconds * 1000;
+		if (!ready && !late) {
+			return false;
+		}
+		// the pump holds its own lock here: never wait for ours (the title may hold it calling in)
+		std::unique_lock<std::recursive_mutex> lock(g_mutex, std::try_to_lock);
+		if (!lock.owns_lock()) {
+			return false;
+		}
+		if (ready) {
+			XLS_LOG_INFO("XSessionStart: everyone has the content after %lu ms; starting.", waited);
+		}
+		else {
+			XLS_LOG_WARN("XSessionStart: %d player(s) still downloading (%d%%) after %lu s; starting anyway.", waiting, percent, waited / 1000);
+		}
+		xls::ContentStartWaiting(0);
+		if (std::shared_ptr<Session> s = weak.lock()) {
+			StartSession(*s);
+		}
+		xls::OverlappedComplete(overlapped, ERROR_SUCCESS);
+		return true;
+	};
+	if (pOverlapped) {
+		return xls::RunAsync(pOverlapped, step);
+	}
+	XOVERLAPPED local = {};
+	xls::OverlappedBegin(&local);
+	while (!step(&local)) {
+		xls::SteamPumpForce();
+		Sleep(50);
+	}
+	return (DWORD)local.InternalLow;
 }
 
 // #5332

@@ -824,6 +824,11 @@ void NetInit()
 			SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_SendRateMax, (int32)(Cfg().sendRateKBytes * 1024));
 			XLS_LOG_INFO("net: send rate %u KB/s per peer.", Cfg().sendRateKBytes);
 		}
+		else if (SteamNetworkingUtils()) {
+			// Steam's congestion control still decides the rate; this only lifts the cap so map /
+			// part downloads (core/transfer.cpp) aren't held to Steam's default.
+			SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_SendRateMax, 4 * 1024 * 1024);
+		}
 	}
 	else {
 		memset(&g_localXnaddr, 0, sizeof(g_localXnaddr));

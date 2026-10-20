@@ -105,8 +105,13 @@ alphabetically (or in `enabled` order) and later ones win. Nothing in the game f
 
 ```
 map.json                  {"name": "Test Arena", "size": "medium", "base": 0, "number": 0}
+thumbnail.rTexture        optional: the picture in the create-match circle
 nativePC\...              the map's files, built for online map <number>
 ```
+
+`thumbnail.rTexture` is an LP2 texture like the stock ones (`flash\dds\ID221_SC00_ID` .. `SC13` in
+`aBattlePlayerCreate.arc`): 512x512 DXT5 with the circle in its alpha. lp2-tools `lp2thumb.py` makes one from
+any picture.
 
 | Key | Meaning |
 |---|---|
@@ -144,6 +149,10 @@ else the template part's. The choice is remembered per set and part in `ModCache
 Each colour can also have its own shine: a part's `textures` may add `MM_<letter>` / `NM_<letter>`
 (that colour's mask / normal map) and `material_overrides` per colour (`spec_power`,
 `spec_colour`); see `README-parts.md` §9 "Shine per colour".
+
+A part's `"effects": "none"` drops the template part's effects (e.g. the 29xx lamps, which would
+glow where the template's own model had them): its rEffectProvider is swapped for an empty one.
+The Blender exporter writes it unless the part / set collection has `lp2_effects = "template"`.
 
 **How they appear:** at start, each part of each set is built into a small DLC content package in
 `ModCache\parts\pkg\` (the template part's archives with the custom model in place; rebuilt only

@@ -10,6 +10,10 @@ void SessionsShutdown();
 bool SessionHandleValid(HANDLE session);
 bool SessionCloseHandle(HANDLE session);
 CSteamID SessionPresenceLobby();
+// Whether the presence lobby's session is in a match (XSessionStart .. XSessionEnd).
+bool SessionPresenceInGame();
+// Whether others may join it unasked: a public or friends-only lobby, open now (not invite-only).
+bool SessionPresenceJoinable();
 // Handles a +connect_lobby launch parameter as an accepted invite.
 void SessionCheckLaunchInvite();
 uint64_t SessionLobbyId(HANDLE session);
