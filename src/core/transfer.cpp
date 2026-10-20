@@ -6,6 +6,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <condition_variable>
 #include <deque>
 #include <map>
@@ -51,6 +52,12 @@ SteamNetworkingIdentity Identity(uint64_t steamId)
 std::mutex g_loopMutex;
 std::set<uint64_t> g_loopPeers;
 std::deque<std::pair<uint64_t, std::vector<uint8_t>>> g_loop; // (peer, message) for the pump
+struct Throttle {
+	uint32_t rate = 0;   // bytes per second, 0 = as fast as it goes
+	double budget = 0;   // bytes it may deliver now (refilled at rate, may dip below 0)
+	DWORD refilled = 0;
+};
+std::map<uint64_t, Throttle> g_loopThrottle; // loopback peer -> its speed
 
 bool Send(uint64_t peer, const std::vector<uint8_t>& message)
 {
@@ -303,7 +310,25 @@ DWORD WINAPI PumpThread(LPVOID)
 		std::deque<std::pair<uint64_t, std::vector<uint8_t>>> loop;
 		{
 			std::lock_guard<std::mutex> lock(g_loopMutex);
-			loop.swap(g_loop);
+			DWORD now = GetTickCount();
+			for (auto& t : g_loopThrottle) {
+				if (t.second.rate) {
+					t.second.budget = std::min<double>(t.second.budget + (now - t.second.refilled) * (double)t.second.rate / 1000, t.second.rate);
+					t.second.refilled = now;
+				}
+			}
+			// a throttled peer's messages wait their turn (in order: once one waits, so do the rest)
+			std::deque<std::pair<uint64_t, std::vector<uint8_t>>> waiting;
+			for (auto& m : g_loop) {
+				Throttle& t = g_loopThrottle[m.first];
+				if (t.rate && t.budget <= 0) {
+					waiting.push_back(std::move(m));
+					continue;
+				}
+				t.budget -= t.rate ? (double)m.second.size() : 0;
+				loop.push_back(std::move(m));
+			}
+			g_loop.swap(waiting);
 		}
 		for (const auto& m : loop) {
 			OnMessage(m.first, m.second.data(), m.second.size());
@@ -402,10 +427,16 @@ bool TransferFetch(uint64_t steamId, const std::string& kind, const std::string&
 	return true;
 }
 
-void TransferAddLoopback(uint64_t peer)
+void TransferAddLoopback(uint64_t peer, uint32_t bytesPerSecond)
 {
 	std::lock_guard<std::mutex> lock(g_loopMutex);
 	g_loopPeers.insert(peer);
+	if (bytesPerSecond) {
+		Throttle& t = g_loopThrottle[peer];
+		t.rate = bytesPerSecond;
+		t.refilled = GetTickCount();
+		XLS_LOG_INFO("transfer: loopback %llu throttled to %u KB/s.", (unsigned long long)peer, bytesPerSecond / 1024);
+	}
 }
 
 int TransferProgress(uint64_t* received, uint64_t* total)

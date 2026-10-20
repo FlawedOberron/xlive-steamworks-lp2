@@ -1,5 +1,6 @@
 #include "mods/parts.h"
 
+#include "api/xsession.h"
 #include "core/content.h"
 #include "core/transfer.h"
 #include "core/config.h"
@@ -1593,7 +1594,10 @@ bool ParseMemberParts(const std::string& value, MemberParts* out)
 // set's) and kept apart: worn only by the players who sent them, never in our menu.
 std::mutex g_remoteMutex;
 std::deque<PartPackage> g_remoteSets[kPartSlotCount]; // deque: pointers stay valid as sets arrive
+std::atomic<uint32_t> g_lobbyGen{1};                  // bumped when members' sets or data change: lobby previews reload
 std::map<std::string, int> g_remoteState;             // hash -> 0 fetching, 1 ready, -1 failed
+int g_fakeRateKb = 0;                                 // fake_member.txt "rate <KB/s>": its downloads' loopback speed
+int g_fakeDelayMs = 0;                                // fake_member.txt "delay <s>": its downloads wait first (a slow connection)
 std::vector<PartSet> g_fakeSets;                      // the fake member's library (fake_library\)
 
 const PartPackage* RemoteSet(uint32_t cat, const std::string& hash)
@@ -1704,6 +1708,10 @@ DWORD WINAPI RemoteSetThread(LPVOID param)
 	std::wstring dir = Cfg().modCacheDir + L"parts\\remote\\" + Utf8ToWide(hash.c_str()) + L"\\";
 	bool ok = GetFileAttributesW((dir + L"verified").c_str()) != INVALID_FILE_ATTRIBUTES;
 	if (!ok) {
+		if (job->member == kFakeMember && g_fakeDelayMs > 0) {
+			XLS_LOG_INFO("mods: parts: fake member's set %s waits %d s (delay).", hash.c_str(), g_fakeDelayMs / 1000);
+			Sleep(g_fakeDelayMs);
+		}
 		DWORD start = GetTickCount();
 		Bytes bundle;
 		if (!FetchBundle(job->member, hash, &bundle)) {
@@ -1754,6 +1762,7 @@ DWORD WINAPI RemoteSetThread(LPVOID param)
 			}
 		}
 		XLS_LOG_INFO("mods: parts: player set %s (%s) ready, %d part(s); worn from the next load.", shown.c_str(), hash.c_str(), built);
+		g_lobbyGen++;
 	}
 	else if (ok) {
 		XLS_LOG_WARN("mods: parts: set %s didn't load (%zu set(s), hash %s).", hash.c_str(), sets.size(), sets.empty() ? "-" : sets[0].hash.c_str());
@@ -1827,6 +1836,7 @@ void OnMemberParts(uint64_t steamId, XUID xuid, const std::string& value)
 		}
 		g_members[steamId] = parts;
 	}
+	g_lobbyGen++;
 	XLS_LOG_INFO("mods: parts: member %llu (xuid 0x%016llx): %zu choice(s): %s", (unsigned long long)steamId, (unsigned long long)xuid, parts.choice.size(), value.c_str());
 	// get what we don't have now (in the lobby), not at the match's load
 	for (int s = 0; s < kPartSlotCount; s++) {
@@ -1865,6 +1875,15 @@ void LoadFakeMember()
 		while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) {
 			line.pop_back();
 		}
+		int delay = 0, rate = 0;
+		if (sscanf(line.c_str(), "delay %d", &delay) == 1) {
+			g_fakeDelayMs = delay * 1000;
+			continue;
+		}
+		if (sscanf(line.c_str(), "rate %d", &rate) == 1) {
+			g_fakeRateKb = rate;
+			continue;
+		}
 		if (sscanf(line.c_str(), "slot %d", &slot) == 1 || line.empty() || line[0] == '#') {
 			continue;
 		}
@@ -1886,7 +1905,7 @@ void LoadFakeMember()
 	}
 	g_fakeSlot = slot;
 	// its sets come over the transfer protocol (loopback), fresh each start
-	xls::TransferAddLoopback(kFakeMember);
+	xls::TransferAddLoopback(kFakeMember, g_fakeRateKb > 0 ? (uint32_t)g_fakeRateKb * 1024 : 0);
 	for (const PartSet& set : g_fakeSets) {
 		for (int s = 0; s < kPartSlotCount; s++) {
 			if (!set.partHash[s].empty()) {
@@ -1904,12 +1923,11 @@ void PartsSyncInit()
 	xls::MemberDataListen("parts", OnMemberParts);
 	xls::ContentAddPending([] {
 		std::lock_guard<std::mutex> lock(g_remoteMutex);
+		int n = 0;
 		for (const auto& kv : g_remoteState) {
-			if (kv.second == 0) {
-				return true;
-			}
+			n += kv.second == 0;
 		}
-		return false;
+		return n;
 	});
 	PublishParts();
 	LoadFakeMember();
@@ -1942,13 +1960,20 @@ uint64_t SlotMember(int p)
 
 // The set player p wears on carrier alias `item` in category cat, or nullptr (= the alias's own
 // choice: our own player, no data, or a set not here (yet)).
+const PartPackage* MemberSet(uint64_t member, uint32_t cat, int item);
+
 const PartPackage* PlayerSet(int p, uint32_t cat, int item)
 {
 	if (p < 0 || p >= kMaxPlayers || cat >= kPartSlotCount) {
 		return nullptr;
 	}
-	uint64_t member = SlotMember(p);
-	if (!member) {
+	return MemberSet(SlotMember(p), cat, item);
+}
+
+// The set member wears on carrier alias `item` in category cat, or nullptr (no member / data / set here yet).
+const PartPackage* MemberSet(uint64_t member, uint32_t cat, int item)
+{
+	if (!member || cat >= kPartSlotCount) {
 		return nullptr;
 	}
 	std::string entry;
@@ -1967,11 +1992,341 @@ const PartPackage* PlayerSet(int p, uint32_t cat, int item)
 		static std::mutex mutex;
 		std::lock_guard<std::mutex> lock(mutex);
 		if (missing.insert(entry).second) {
-			XLS_LOG_WARN("mods: parts: player %d wears %s %s, not here (yet): shows our choice.", p, kSlotNames[cat], entry.c_str());
+			XLS_LOG_WARN("mods: parts: player %llu wears %s %s, not here (yet): shows our choice.", (unsigned long long)member, kSlotNames[cat], entry.c_str());
 		}
 	}
 	return pkg;
 }
+
+// --- Lobby previews. The lobby screens (DX11 e97b30, ea3e80) give every member a preview
+// character (preview+0x212c = its loader character, +0x1ff0 = its parts object, +0x2084 + cat*4 =
+// codes, +0x20d4 + cat*4 = load state), dressed once from the session member table (*0x1852850 +
+// 0x148 + i*0x7c, 16 entries, +0x64 = present, codes at +0xc + cat*4) by preview apply c3db30
+// thiscall(preview, cat, code, 0), with the entry in ebx (e97b30) / edi (ea3e80). We note each
+// preview's member, so its carrier parts resolve to that member's sets; when their sets or data
+// arrive later, the preview update c3dc00 reloads them (preview set part c3b700 reloads even the same
+// code).
+// 32-player lobbies would need more than this: the member table, both screens' preview arrays and
+// their loops are 16 wide, and the part loader has 32 character slots in all (7d41f0: < 0x20),
+// of which the lobby uses 16 (9-24) and the menus a few, so 32 lobby models need the loader's
+// character table grown too.
+struct LobbyVas {
+	uint32_t table, previewApply, previewTick, previewSetPart, previewVisible, setText;
+	uint32_t screens[2][3]; // [begin, end) of each lobby screen function, register with the entry (0 ebx, 1 edi)
+};
+const LobbyVas kLobbyVasDx11 = {0x1852850, 0xc3db30, 0xc3dc00, 0xc3b700, 0xc3a0c0, 0xf4a350, {{0xe97b30, 0xe98c80, 0}, {0xea3e80, 0xea4f10, 1}}};
+const LobbyVas* g_lobbyVas = nullptr;
+uintptr_t g_lobbyRebase = 0; // module base - 0x400000
+const int kLobbyMembers = 16;
+const uint32_t kLobbyEntry = 0x7c;
+
+struct LobbyPreview {
+	int member;      // lobby table index
+	uint32_t character;
+	uint32_t gen;    // g_lobbyGen it was last dressed for
+};
+std::mutex g_lobbyMutex;
+std::map<uint8_t*, LobbyPreview> g_lobbyPreviews;
+int g_lobbyXuidOffset = -1;
+
+using PreviewSetPartFn = void(__attribute__((thiscall)) *)(uint8_t*, uint32_t, uint32_t);
+PreviewSetPartFn g_previewSetPart = nullptr;
+
+uint8_t* LobbyTable()
+{
+	return g_lobbyVas ? *(uint8_t**)(g_lobbyRebase + g_lobbyVas->table) : nullptr;
+}
+
+uint64_t LobbyMemberId(int i, bool self);
+
+// The Steam id of lobby table entry i (0 = none, or our own: the menu's choice).
+uint64_t LobbyMember(int i)
+{
+	if (i == g_fakeSlot) {
+		return kFakeMember;
+	}
+	return LobbyMemberId(i, false);
+}
+
+// The Steam id of lobby table entry i (0 = none; ours only when self).
+uint64_t LobbyMemberId(int i, bool self)
+{
+	uint8_t* table = LobbyTable();
+	if (!table || i < 0 || i >= kLobbyMembers || table[0x148 + i * kLobbyEntry + 0x64] != 1 || !xls::SteamReady()) {
+		return 0;
+	}
+	if (g_lobbyXuidOffset < 0) {
+		// where an entry keeps the XUID: ours, in our own entry
+		static bool reported = false;
+		XUID ours = xls::XuidFromSteamId(xls::SteamLocalId());
+		XUID oursOffline = XUID_OFFLINE_FLAG | (ours & 0xFFFFFFFF);
+		for (int j = 0; j < kLobbyMembers && g_lobbyXuidOffset < 0; j++) {
+			uint8_t* entry = table + 0x148 + j * kLobbyEntry;
+			for (int o = 0; entry[0x64] == 1 && o + 8 <= (int)kLobbyEntry; o += 4) {
+				XUID x = *(XUID*)(entry + o);
+				if (x == ours || x == oursOffline) {
+					g_lobbyXuidOffset = o;
+					XLS_LOG_INFO("mods: parts: lobby members keep the XUID at +0x%x.", o);
+					break;
+				}
+			}
+		}
+		if (g_lobbyXuidOffset < 0) {
+			if (!reported) {
+				reported = true;
+				XLS_LOG_WARN("mods: parts: our XUID is not in the lobby member table; lobby previews show our choices.");
+			}
+			return 0;
+		}
+	}
+	uint64_t id = InfoSteamId(*(XUID*)(table + 0x148 + i * kLobbyEntry + g_lobbyXuidOffset));
+	return !self && id == xls::SteamLocalId().ConvertToUint64() ? 0 : id;
+}
+
+// Only while we're in a lobby: previews met earlier are gone (their memory may be another's now).
+bool LobbyPreviewsLive()
+{
+	if (!g_lobbyVas) {
+		return false;
+	}
+	if (!xls::SessionPresenceLobby().IsValid()) { // before our lock (the session code calls in under its own)
+		std::lock_guard<std::mutex> lock(g_lobbyMutex);
+		g_lobbyPreviews.clear();
+		return false;
+	}
+	return true;
+}
+
+// The lobby member a preview's loader character / parts object is dressed for, or -1.
+int LobbyMemberOfCharacter(uint32_t character)
+{
+	if (!LobbyPreviewsLive()) {
+		return -1;
+	}
+	std::lock_guard<std::mutex> lock(g_lobbyMutex);
+	for (const auto& lp : g_lobbyPreviews) {
+		if (lp.second.character == character && *(uint32_t*)(lp.first + 0x212c) == character) {
+			return lp.second.member;
+		}
+	}
+	return -1;
+}
+
+int LobbyMemberOfParts(uint8_t* parts)
+{
+	if (!LobbyPreviewsLive()) {
+		return -1;
+	}
+	std::lock_guard<std::mutex> lock(g_lobbyMutex);
+	for (const auto& lp : g_lobbyPreviews) {
+		if (*(uint8_t**)(lp.first + 0x1ff0) == parts) {
+			return lp.second.member;
+		}
+	}
+	return -1;
+}
+
+// Whether member's part in category cat (alias item) is theirs and still on its way (asked for or
+// downloading), as opposed to here, failed (shown as our choice), or not theirs.
+bool MemberPartPending(uint64_t member, uint32_t cat, int item)
+{
+	if (!member || cat >= kPartSlotCount || MemberSet(member, cat, item)) {
+		return false;
+	}
+	std::string entry;
+	{
+		std::lock_guard<std::mutex> lock(g_membersMutex);
+		auto it = g_members.find(member);
+		if (it == g_members.end()) {
+			return false;
+		}
+		auto c = it->second.choice.find(ChoiceItem(item) * kPartSlotCount + (int)cat);
+		entry = c != it->second.choice.end() ? c->second : it->second.worn[cat];
+	}
+	size_t colon = entry.find(':');
+	if (colon == std::string::npos) {
+		return false;
+	}
+	std::lock_guard<std::mutex> lock(g_remoteMutex);
+	auto it = g_remoteState.find(entry.substr(colon + 1));
+	return it == g_remoteState.end() || it->second == 0;
+}
+
+// Preview visible check c3a0c0 fastcall(preview) (its result gates the whole draw; the game already
+// hides a preview while its parts load): a lobby preview stays hidden while its member's parts are
+// still downloading, and shows once they're here (the update then reloads it, see PreviewTick).
+using PreviewVisibleFn = uint32_t(__attribute__((fastcall)) *)(uint8_t*);
+PreviewVisibleFn g_previewVisibleOriginal = nullptr;
+
+uint32_t __attribute__((fastcall)) PreviewVisible(uint8_t* preview)
+{
+	uint32_t visible = g_previewVisibleOriginal(preview);
+	if (!(visible & 0xff)) {
+		return visible;
+	}
+	int member;
+	{
+		std::lock_guard<std::mutex> lock(g_lobbyMutex);
+		auto it = g_lobbyPreviews.find(preview);
+		if (it == g_lobbyPreviews.end()) {
+			return visible;
+		}
+		member = it->second.member;
+	}
+	if (!LobbyPreviewsLive()) {
+		return visible;
+	}
+	uint64_t id = LobbyMember(member);
+	bool waiting = false;
+	for (uint32_t cat = 0; cat < kPartSlotCount && !waiting; cat++) {
+		uint32_t code = *(uint32_t*)(preview + 0x2084 + cat * 4);
+		waiting = IsCarrier(code) && MemberPartPending(id, cat, (code >> 16) & 0xff);
+	}
+	static std::mutex mutex;
+	static std::map<uint8_t*, bool> shown; // preview -> hidden, for the log
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		bool& was = shown[preview];
+		if (was != waiting) {
+			was = waiting;
+			XLS_LOG_INFO("mods: parts: lobby member %d %s.", member, waiting ? "hidden while their parts download" : "shown");
+		}
+	}
+	return waiting ? visible & ~0xffu : visible;
+}
+
+// Flash text set f4a350 thiscall(screen, field, text): the lobby screens set each member's name
+// from their table entry (+0x2c), every frame; a member downloading content gets
+// "<name> [DL 1/3 45%]" (ours from our own batch, the others' from what they publish), one with
+// everything "<name> [READY]" (players without the mod loader publish nothing: no tag). The fake
+// member stands in for its slot.
+using SetTextFn = void(__attribute__((thiscall)) *)(uint8_t*, int, const char*);
+SetTextFn g_setTextOriginal = nullptr;
+
+void __attribute__((thiscall)) SetText(uint8_t* screen, int field, const char* text)
+{
+	uint8_t* table = LobbyTable();
+	uint32_t va = (uint32_t)((uintptr_t)__builtin_return_address(0) - g_lobbyRebase);
+	bool lobbyScreen = false;
+	for (const auto& range : g_lobbyVas->screens) {
+		lobbyScreen = lobbyScreen || (va >= range[0] && va < range[1]);
+	}
+	intptr_t at = table && text ? (const uint8_t*)text - (table + 0x148 + 0x2c) : -1;
+	if (!lobbyScreen || at < 0 || at >= kLobbyMembers * (intptr_t)kLobbyEntry || at % kLobbyEntry) {
+		g_setTextOriginal(screen, field, text);
+		return;
+	}
+	int i = (int)(at / kLobbyEntry);
+	{
+		// how often the list sets names (once per change, or every frame), for the notes
+		static DWORD first = GetTickCount();
+		static int calls = 0;
+		static bool reported = false;
+		if (!reported && ++calls && GetTickCount() - first > 5000) {
+			reported = true;
+			XLS_LOG_INFO("mods: parts: lobby names set %d time(s) in 5 s.", calls);
+		}
+	}
+	int file, files, percent;
+	uint64_t id = i == g_fakeSlot ? kFakeMember : LobbyMemberId(i, true);
+	// ours (and the fake member's, which publishes nothing: its downloads are ours) from our batch
+	bool local = id == kFakeMember || (id && id == xls::SteamLocalId().ConvertToUint64());
+	bool downloading = local ? xls::ContentLocalProgress(&file, &files, &percent) : id && xls::ContentMemberProgress(id, &file, &files, &percent);
+	bool ready = !downloading && (local || (id && xls::ContentMemberReady(id)));
+	if (!downloading && !ready) {
+		g_setTextOriginal(screen, field, text);
+		return;
+	}
+	thread_local char shown[96];
+	if (downloading) {
+		snprintf(shown, sizeof(shown), "%.16s [DL %d/%d %d%%]", text, file, files, percent);
+	}
+	else {
+		snprintf(shown, sizeof(shown), "%.16s [READY]", text);
+	}
+	g_setTextOriginal(screen, field, shown);
+}
+
+// Preview apply c3db30, before the game: from a lobby screen, which member the preview is for.
+extern "C" __attribute__((used)) void __stdcall PreviewApplied(uint8_t* preview, uint8_t* ebx, uint8_t* edi, uintptr_t ret)
+{
+	uint8_t* table = LobbyTable();
+	if (!table || !preview) {
+		return;
+	}
+	uint32_t va = (uint32_t)(ret - g_lobbyRebase);
+	for (const auto& screen : g_lobbyVas->screens) {
+		if (va < screen[0] || va >= screen[1]) {
+			continue;
+		}
+		intptr_t at = (screen[2] ? edi : ebx) - (table + 0x148);
+		if (at < 0 || at >= kLobbyMembers * (intptr_t)kLobbyEntry || at % kLobbyEntry) {
+			return;
+		}
+		int member = (int)(at / kLobbyEntry);
+		uint32_t character = *(uint32_t*)(preview + 0x212c);
+		std::lock_guard<std::mutex> lock(g_lobbyMutex);
+		auto it = g_lobbyPreviews.find(preview);
+		if (it != g_lobbyPreviews.end() && it->second.member == member && it->second.character == character) {
+			return;
+		}
+		XLS_LOG_INFO("mods: parts: lobby preview 0x%p (character %u) shows member %d.", preview, character, member);
+		// gen 0: the next update reloads its carrier parts, so what it loaded (and the game may not
+		// load again for the same code) matches the paths that now resolve to this member's sets
+		g_lobbyPreviews[preview] = LobbyPreview{member, character, 0};
+		return;
+	}
+}
+
+// Preview update c3dc00, every frame: a lobby preview whose member's sets or data changed since it
+// was dressed reloads its carrier parts (once none is mid-load).
+extern "C" __attribute__((used)) void __stdcall PreviewTick(uint8_t* preview)
+{
+	uint32_t gen = g_lobbyGen;
+	{
+		std::lock_guard<std::mutex> lock(g_lobbyMutex);
+		auto it = g_lobbyPreviews.find(preview);
+		if (it == g_lobbyPreviews.end() || it->second.gen == gen) {
+			return;
+		}
+		for (uint32_t cat = 0; cat < kPartSlotCount; cat++) {
+			int32_t state = *(int32_t*)(preview + 0x20d4 + cat * 4);
+			if (IsCarrier(*(uint32_t*)(preview + 0x2084 + cat * 4)) && (state == 1 || state == 4)) {
+				return; // loading: next frame
+			}
+		}
+		it->second.gen = gen;
+	}
+	for (uint32_t cat = 0; cat < kPartSlotCount; cat++) {
+		uint32_t code = *(uint32_t*)(preview + 0x2084 + cat * 4);
+		if (IsCarrier(code)) {
+			g_previewSetPart(preview, cat, code);
+		}
+	}
+}
+
+extern "C" void* g_previewApplyTramp;
+extern "C" void* g_previewTickTramp;
+__attribute__((used)) void* g_previewApplyTramp = nullptr;
+__attribute__((used)) void* g_previewTickTramp = nullptr;
+extern "C" void PreviewApplyStub();
+extern "C" void PreviewTickStub();
+asm(".text\n"
+    "_PreviewApplyStub:\n"
+    "  pushal\n"
+    "  pushl 32(%esp)\n" // the return address
+    "  push %edi\n"
+    "  push %ebx\n"
+    "  push %ecx\n"
+    "  call _PreviewApplied@16\n"
+    "  popal\n"
+    "  jmp *_g_previewApplyTramp\n"
+    "_PreviewTickStub:\n"
+    "  pushal\n"
+    "  push %ecx\n"
+    "  call _PreviewTick@4\n"
+    "  popal\n"
+    "  jmp *_g_previewTickTramp\n");
 
 // Finds where a player info keeps the XUID: our own XUID in our own entry (once).
 void FindInfoXuid(uint8_t* game)
@@ -2062,7 +2417,8 @@ int PartsPlayer(uint8_t* parts)
 // The set the carrier part a parts object wears in category cat (alias item) stands for.
 const PartPackage* CarrierFor(uint8_t* parts, uint32_t cat, int item)
 {
-	if (const PartPackage* own = PlayerSet(PartsPlayer(parts), cat, item)) {
+	int member = LobbyMemberOfParts(parts);
+	if (const PartPackage* own = member >= 0 ? MemberSet(LobbyMember(member), cat, item) : PlayerSet(PartsPlayer(parts), cat, item)) {
 		return own;
 	}
 	return CarrierWorn(cat, item);
@@ -2514,6 +2870,13 @@ void __attribute__((thiscall)) PartRequest(void* loader, uint32_t character, uin
 			XLS_LOG_INFO("mods: parts: stage request player %d %s -> %s.", player, kSlotNames[cat], own->setId.c_str());
 		}
 	}
+	else if (IsCarrier(code)) {
+		int member = LobbyMemberOfCharacter(character);
+		own = member >= 0 ? MemberSet(LobbyMember(member), cat, (code >> 16) & 0xff) : nullptr;
+		if (own) {
+			XLS_LOG_INFO("mods: parts: lobby member %d %s -> %s.", member, kSlotNames[cat], own->setId.c_str());
+		}
+	}
 	if (t_stagePlayerCount > 0) {
 		t_stageRequest++;
 	}
@@ -2565,6 +2928,10 @@ void __attribute__((thiscall)) StageRequest(void* loader, uint32_t character, ui
 				t_stagePlayers[t_stagePlayerCount++] = p;
 			}
 		}
+	}
+	{
+		std::lock_guard<std::mutex> lock(g_lobbyMutex);
+		g_lobbyPreviews.clear(); // the lobby's previews go away under the match; met again after it
 	}
 	static std::atomic<int> logged{0};
 	if (logged++ < 16) {
@@ -2677,6 +3044,40 @@ const MenuVas kMenuVas[] = {
 	{0xedbb80, 0xed5240, 0xed4e20, 0xedd900, 0xf4cb40, 0xf4cdc0, 0xf4cc80, 0xed4ca0, 0x855df0, 0xee0e00, 0x20c4, 0x7c5120,
 	 0x7c53b0, {0x7c51e7, 0x7c5268}, 0x1213e59, 0x1842020, 0x6f60, 0x7d6e50}, // DX9
 };
+
+const uint8_t kPreviewApplyPrologue[] = {0x8b, 0x44, 0x24, 0x08, 0x56, 0x57, 0x8b, 0x7c, 0x24, 0x0c}; // mov eax,[esp+8]; push esi; push edi; mov edi,[esp+0xc]
+const uint8_t kPreviewTickPrologue[] = {0x51, 0x53, 0x55, 0x56, 0x33, 0xdb, 0x57};                  // push ecx; push ebx; push ebp; push esi; xor ebx,ebx; push edi
+const uint8_t kPreviewVisiblePrologue[] = {0x8b, 0x41, 0x04, 0x8b, 0xd0, 0x80, 0xe2, 0x07};         // mov eax,[ecx+4]; mov edx,eax; and dl,7
+const uint8_t kSetTextPrologue[] = {0x8b, 0x44, 0x24, 0x08, 0x8b, 0x54, 0x24, 0x04};                // mov eax,[esp+8]; mov edx,[esp+4]
+const uint8_t kPreviewSetPartPrologue[] = {0x56, 0x8b, 0xf1, 0x8b, 0x4c, 0x24, 0x0c, 0x57};         // push esi; mov esi,ecx; mov ecx,[esp+0xc]; push edi
+
+// Lobby previews wear their members' sets (DX11 only for now).
+void InstallLobbyPreviews(uint8_t* base, const LobbyVas& va)
+{
+	auto at = [&](uint32_t v) { return base + (v - 0x400000); };
+	if (memcmp(at(va.previewSetPart), kPreviewSetPartPrologue, sizeof(kPreviewSetPartPrologue)) != 0) {
+		XLS_LOG_WARN("mods: parts: preview code not as expected; lobby previews show our choices.");
+		return;
+	}
+	g_lobbyRebase = (uintptr_t)base - 0x400000;
+	g_previewSetPart = (PreviewSetPartFn)at(va.previewSetPart);
+	g_previewTickTramp = Detour(at(va.previewTick), kPreviewTickPrologue, sizeof(kPreviewTickPrologue), (void*)&PreviewTickStub);
+	if (!g_previewTickTramp) {
+		XLS_LOG_WARN("mods: parts: preview update not as expected; lobby previews show our choices.");
+		return;
+	}
+	g_lobbyVas = &va; // before the apply hook can run
+	g_previewApplyTramp = Detour(at(va.previewApply), kPreviewApplyPrologue, sizeof(kPreviewApplyPrologue), (void*)&PreviewApplyStub);
+	g_previewVisibleOriginal = (PreviewVisibleFn)Detour(at(va.previewVisible), kPreviewVisiblePrologue, sizeof(kPreviewVisiblePrologue), (void*)&PreviewVisible);
+	if (!g_previewVisibleOriginal) {
+		XLS_LOG_WARN("mods: parts: preview visibility not as expected; lobby members show our choices while downloading.");
+	}
+	g_setTextOriginal = (SetTextFn)Detour(at(va.setText), kSetTextPrologue, sizeof(kSetTextPrologue), (void*)&SetText);
+	if (!g_setTextOriginal) {
+		XLS_LOG_WARN("mods: parts: text setter not as expected; lobby names show no download progress.");
+	}
+	XLS_LOG_INFO("mods: parts: lobby previews %s.", g_previewApplyTramp ? "wear their members' sets" : "not hooked (preview apply not as expected)");
+}
 
 void InstallMenuColours(uint8_t* base, const MenuVas& va)
 {
@@ -2853,6 +3254,9 @@ bool PartsTryInstallPathHook(unsigned char* base)
 	FlushInstructionCache(GetCurrentProcess(), fn, len);
 	XLS_LOG_INFO("mods: parts: path builder hooked at 0x%p.", fn);
 	InstallMenuColours(base, kMenuVas[fn == base + kPathRvas[0] ? 0 : 1]);
+	if (fn == base + kPathRvas[0]) {
+		InstallLobbyPreviews(base, kLobbyVasDx11);
+	}
 	return true;
 }
 

@@ -554,8 +554,13 @@ void Load()
 		LoadMaps();
 	}
 	xls::TransferRegister("map", ServeMap);
-	if (GetFileAttributesW((Cfg().modCacheDir + L"maps\\loopback.txt").c_str()) != INVALID_FILE_ATTRIBUTES) {
-		xls::TransferAddLoopback(kLoopbackHost);
+	Bytes loopback;
+	if (ReadWholeFile(Cfg().modCacheDir + L"maps\\loopback.txt", &loopback)) {
+		// "rate <KB/s>" throttles it (a slow host)
+		std::string text(loopback.begin(), loopback.end());
+		size_t at = text.find("rate ");
+		uint32_t rate = at == std::string::npos ? 0 : (uint32_t)atoi(text.c_str() + at + 5);
+		xls::TransferAddLoopback(kLoopbackHost, rate * 1024);
 		XLS_LOG_INFO("mods: loopback test on (maps\\loopback.txt): fetching our maps from ourselves.");
 		HANDLE t = CreateThread(nullptr, 0, LoopbackThread, nullptr, 0, nullptr);
 		if (t) {
@@ -564,7 +569,7 @@ void Load()
 	}
 	xls::ContentAddPending([] {
 		std::lock_guard<std::recursive_mutex> lock(g_mutex);
-		return g_unbound || !g_downloading.empty();
+		return (int)g_downloading.size() + (g_unbound && g_downloading.empty()); // unbound: about to start one
 	});
 	xls::MemberDataListen("maps", [](uint64_t steamId, XUID, const std::string& value) {
 		std::lock_guard<std::recursive_mutex> lock(g_mutex);
