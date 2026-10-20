@@ -1,5 +1,6 @@
 #include "mods/lp2.h"
 #include "mods/packages.h"
+#include "mods/parts.h"
 
 #include "core/config.h"
 #include "core/json.h"
@@ -316,6 +317,87 @@ void MapsRebind(int slot, int base, int size)
 	}
 }
 
+// The create-match rule stepper (DX11 FUN_00e8c910, thiscall(screen, key, u8* value, max, min,
+// rule, wrap) -> changed; key 10 right / 11 left, rule 0x1b = map): on slot 13 left / right step
+// through the map packages first, so any number of them can be picked. Unbound 13 / 14 are
+// skipped. The map name (MsgOnline 126 + slot) comes from the message lookup (DX11 FUN_0077b280,
+// thiscall(messages, file, id, lang) -> text), which answers with the bound package's name.
+struct PickerVas {
+	uint32_t step, message, sound, soundOwner, soundIds;
+};
+const PickerVas kPickerVas[] = {
+	{0xe8c910, 0x77b280, 0x832f00, 0x185289c, 0x18e0860}, // DX11
+	{0xe7c880, 0x76c0c0, 0x824110, 0x18427fc, 0x18ce774}, // DX9
+};
+const uint8_t kStepPrologue[] = {0x83, 0xec, 0x08, 0x8b, 0x44, 0x24, 0x10, 0x53}; // sub esp,8; mov eax,[esp+0x10]; push ebx
+const uint8_t kMessagePrologue[] = {0x8b, 0x44, 0x24, 0x04, 0x56, 0x50, 0x8b, 0xf1}; // mov eax,[esp+4]; push esi; push eax; mov esi,ecx
+const int kRuleMap = 0x1b;
+const uint32_t kMsgMapName = 126;
+int g_build = -1;
+
+using StepFn = int(__attribute__((thiscall)) *)(void*, int, uint8_t*, int, int, int, char);
+using MessageFn = const char*(__attribute__((thiscall)) *)(void*, const char*, uint32_t, uint32_t);
+using SoundFn = void(__attribute__((thiscall)) *)(void*, uint32_t, uint32_t, void*, uint32_t);
+StepFn g_stepOriginal = nullptr;
+MessageFn g_messageOriginal = nullptr;
+
+int __attribute__((thiscall)) RuleStep(void* screen, int key, uint8_t* value, int max, int min, int rule, char wrap)
+{
+	if (rule != kRuleMap || (key != 10 && key != 11)) {
+		return g_stepOriginal(screen, key, value, max, min, rule, wrap);
+	}
+	int step = key == 10 ? 1 : -1;
+	uint8_t was = *value;
+	if (was == 13 && PackagesPick(step, false)) {
+		const PickerVas& va = kPickerVas[g_build];
+		auto sound = (SoundFn)(uintptr_t)va.sound;
+		sound(*(void**)(uintptr_t)va.soundOwner, *(uint32_t*)(*(uint8_t**)(uintptr_t)va.soundIds + 0x78), 7, screen, 0);
+		return 1;
+	}
+	int changed = g_stepOriginal(screen, key, value, max, min, rule, wrap);
+	for (int i = 0; i < 2 && changed && (*value == 13 || *value == 14); i++) {
+		if (*value == 13 && PackagesPick(step, true)) {
+			break;
+		}
+		if (*value == 14 && PackagesSlotBound(14)) {
+			break;
+		}
+		if (!g_stepOriginal(screen, key, value, max, min, rule, wrap)) { // nothing there: on to the next map
+			*value = was;
+			return 0;
+		}
+	}
+	return *value != was;
+}
+
+const char* __attribute__((thiscall)) Message(void* messages, const char* file, uint32_t id, uint32_t lang)
+{
+	if ((id == kMsgMapName + 13 || id == kMsgMapName + 14) && file && strcmp(file, "MsgOnline") == 0) {
+		if (const char* name = PackagesSlotName((int)(id - kMsgMapName))) {
+			static bool logged = false;
+			if (!logged) {
+				logged = true;
+				XLS_LOG_INFO("mods: maps: map name %u asked by 0x%p.", id, __builtin_return_address(0));
+			}
+			return name;
+		}
+	}
+	return g_messageOriginal(messages, file, id, lang);
+}
+
+void InstallPicker(uint8_t* base)
+{
+	if (g_build < 0) {
+		return;
+	}
+	const PickerVas& va = kPickerVas[g_build];
+	uint8_t* exe = (uint8_t*)0x400000;
+	auto at = [&](uint32_t v) { return base + (v - (uintptr_t)exe); };
+	g_stepOriginal = (StepFn)Detour(at(va.step), kStepPrologue, sizeof(kStepPrologue), (void*)&RuleStep);
+	g_messageOriginal = (MessageFn)Detour(at(va.message), kMessagePrologue, sizeof(kMessagePrologue), (void*)&Message);
+	XLS_LOG_INFO("mods: maps: create-match map picker %s, map names %s.", g_stepOriginal ? "hooked" : "NOT hooked (unknown code)", g_messageOriginal ? "hooked" : "NOT hooked");
+}
+
 // Called once the whole of .text is decrypted (SteamStub decrypts it progressively, so the
 // pickers can still be encrypted when MapsTryInstall succeeds).
 void MapsPatchPickers(unsigned char* base)
@@ -323,6 +405,7 @@ void MapsPatchPickers(unsigned char* base)
 	if (g_maps.empty()) {
 		return;
 	}
+	InstallPicker(base);
 	int tables = PatchInlineTables(base);
 	XLS_LOG_INFO("mods: maps: %d map availability check(s) patched.", tables);
 	if (!PatchRemapTable(base)) {
@@ -345,6 +428,7 @@ bool MapsTryInstall(unsigned char* base)
 			XLS_LOG_WARN("mods: maps: availability check not recognised, mod map slots stay hidden.");
 			return true;
 		}
+		g_build = build;
 		XLS_LOG_INFO("mods: maps: %u mod map slot(s) enabled (%s).", (unsigned)g_maps.size(), build == 0 ? "DX11" : "DX9");
 		return true;
 	}

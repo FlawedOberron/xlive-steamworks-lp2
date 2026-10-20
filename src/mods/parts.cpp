@@ -8,6 +8,7 @@
 #include "core/log.h"
 #include "core/memberdata.h"
 #include "core/steam.h"
+#include "core/users.h"
 #include "core/utils.h"
 #include "mods/package.h"
 
@@ -1998,6 +1999,8 @@ const PartPackage* MemberSet(uint64_t member, uint32_t cat, int item)
 	return pkg;
 }
 
+void LogOurIdentity(const char* what, int index, const uint8_t* block, size_t size);
+
 // --- Lobby previews. The lobby screens (DX11 e97b30, ea3e80) give every member a preview
 // character (preview+0x212c = its loader character, +0x1ff0 = its parts object, +0x2084 + cat*4 =
 // codes, +0x20d4 + cat*4 = load state), dressed once from the session member table (*0x1852850 +
@@ -2013,8 +2016,13 @@ const PartPackage* MemberSet(uint64_t member, uint32_t cat, int item)
 struct LobbyVas {
 	uint32_t table, previewApply, previewTick, previewSetPart, previewVisible, setText;
 	uint32_t screens[2][3]; // [begin, end) of each lobby screen function, register with the entry (0 ebx, 1 edi)
+	int shift;              // the preview's fields sit this far from DX11's (DX9: 0x10 lower)
 };
-const LobbyVas kLobbyVasDx11 = {0x1852850, 0xc3db30, 0xc3dc00, 0xc3b700, 0xc3a0c0, 0xf4a350, {{0xe97b30, 0xe98c80, 0}, {0xea3e80, 0xea4f10, 1}}};
+// DX9 by signature (lp2-tools/sigport.py); the member table's layout is the same in both.
+const LobbyVas kLobbyVas[] = {
+	{0x1852850, 0xc3db30, 0xc3dc00, 0xc3b700, 0xc3a0c0, 0xf4a350, {{0xe97b30, 0xe98c80, 0}, {0xea3e80, 0xea4f10, 1}}, 0},      // DX11
+	{0x18427b0, 0xc2df40, 0xc2e010, 0xc2bb10, 0xc2a4d0, 0xf3a620, {{0xe87a60, 0xe88bb0, 0}, {0xe940d0, 0xe95160, 1}}, -0x10}, // DX9
+};
 const LobbyVas* g_lobbyVas = nullptr;
 uintptr_t g_lobbyRebase = 0; // module base - 0x400000
 const int kLobbyMembers = 16;
@@ -2032,6 +2040,12 @@ int g_lobbyXuidOffset = -1;
 using PreviewSetPartFn = void(__attribute__((thiscall)) *)(uint8_t*, uint32_t, uint32_t);
 PreviewSetPartFn g_previewSetPart = nullptr;
 
+// The preview's fields (DX11 offsets, moved for the exe).
+uint32_t& PvCharacter(uint8_t* preview) { return *(uint32_t*)(preview + 0x212c + g_lobbyVas->shift); }
+uint8_t*& PvParts(uint8_t* preview) { return *(uint8_t**)(preview + 0x1ff0 + g_lobbyVas->shift); }
+uint32_t& PvCode(uint8_t* preview, uint32_t cat) { return *(uint32_t*)(preview + 0x2084 + g_lobbyVas->shift + cat * 4); }
+int32_t& PvState(uint8_t* preview, uint32_t cat) { return *(int32_t*)(preview + 0x20d4 + g_lobbyVas->shift + cat * 4); }
+
 uint8_t* LobbyTable()
 {
 	return g_lobbyVas ? *(uint8_t**)(g_lobbyRebase + g_lobbyVas->table) : nullptr;
@@ -2048,8 +2062,52 @@ uint64_t LobbyMember(int i)
 	return LobbyMemberId(i, false);
 }
 
-// The Steam id of lobby table entry i (0 = none; ours only when self).
+// The Steam id of lobby table entry i (0 = none; ours only when self). The entries hold no XUID
+// or account id, only the gamertag (+0x2c, 16 bytes): matched against the Steam lobby's members'
+// gamertags (refreshed once a second).
 uint64_t LobbyMemberId(int i, bool self)
+{
+	uint8_t* table = LobbyTable();
+	if (!table || i < 0 || i >= kLobbyMembers || table[0x148 + i * kLobbyEntry + 0x64] != 1 || !xls::SteamReady()) {
+		return 0;
+	}
+	std::string name((const char*)table + 0x148 + i * kLobbyEntry + 0x2c, strnlen((const char*)table + 0x148 + i * kLobbyEntry + 0x2c, 16));
+	static std::mutex mutex;
+	static std::map<std::string, uint64_t> byName;
+	static DWORD built = 0;
+	CSteamID lobby = xls::SessionPresenceLobby(); // before our lock
+	std::lock_guard<std::mutex> lock(mutex);
+	if (!built || GetTickCount() - built > 1000) {
+		built = GetTickCount() | 1;
+		byName.clear();
+		ISteamMatchmaking* mm = xls::SteamMatchmaking();
+		int count = lobby.IsValid() && mm ? mm->GetNumLobbyMembers(lobby) : 0;
+		for (int m = 0; m < count; m++) {
+			CSteamID member = xls::LobbyMember(mm, lobby, m);
+			std::string tag = xls::GamertagForSteamId(member);
+			byName[tag.substr(0, 15)] = member.ConvertToUint64(); // the game keeps 15 characters
+			byName[tag.substr(0, 16)] = member.ConvertToUint64();
+		}
+		if (!lobby.IsValid() || !count) {
+			byName[xls::GamertagForSteamId(xls::SteamLocalId()).substr(0, 15)] = xls::SteamLocalId().ConvertToUint64();
+		}
+	}
+	auto it = byName.find(name);
+	if (it == byName.end()) {
+		static std::set<std::string> missing;
+		if (missing.insert(name).second) {
+			XLS_LOG_WARN("mods: parts: lobby entry %d \"%s\" matches no lobby member's gamertag.", i, name.c_str());
+		}
+		return 0;
+	}
+	static std::set<uint64_t> logged;
+	if (logged.insert(it->second).second) {
+		XLS_LOG_INFO("mods: parts: lobby entry %d \"%s\" is %llu.", i, name.c_str(), (unsigned long long)it->second);
+	}
+	return !self && it->second == xls::SteamLocalId().ConvertToUint64() ? 0 : it->second;
+}
+
+uint64_t LobbyMemberIdByXuid(int i, bool self)
 {
 	uint8_t* table = LobbyTable();
 	if (!table || i < 0 || i >= kLobbyMembers || table[0x148 + i * kLobbyEntry + 0x64] != 1 || !xls::SteamReady()) {
@@ -2075,6 +2133,11 @@ uint64_t LobbyMemberId(int i, bool self)
 			if (!reported) {
 				reported = true;
 				XLS_LOG_WARN("mods: parts: our XUID is not in the lobby member table; lobby previews show our choices.");
+				for (int j = 0; j < kLobbyMembers; j++) {
+					if (table[0x148 + j * kLobbyEntry + 0x64] == 1) {
+						LogOurIdentity("lobby entry", j, table + 0x148 + j * kLobbyEntry, kLobbyEntry);
+					}
+				}
 			}
 			return 0;
 		}
@@ -2105,7 +2168,7 @@ int LobbyMemberOfCharacter(uint32_t character)
 	}
 	std::lock_guard<std::mutex> lock(g_lobbyMutex);
 	for (const auto& lp : g_lobbyPreviews) {
-		if (lp.second.character == character && *(uint32_t*)(lp.first + 0x212c) == character) {
+		if (lp.second.character == character && PvCharacter(lp.first) == character) {
 			return lp.second.member;
 		}
 	}
@@ -2119,7 +2182,7 @@ int LobbyMemberOfParts(uint8_t* parts)
 	}
 	std::lock_guard<std::mutex> lock(g_lobbyMutex);
 	for (const auto& lp : g_lobbyPreviews) {
-		if (*(uint8_t**)(lp.first + 0x1ff0) == parts) {
+		if (PvParts(lp.first) == parts) {
 			return lp.second.member;
 		}
 	}
@@ -2179,7 +2242,7 @@ uint32_t __attribute__((fastcall)) PreviewVisible(uint8_t* preview)
 	uint64_t id = LobbyMember(member);
 	bool waiting = false;
 	for (uint32_t cat = 0; cat < kPartSlotCount && !waiting; cat++) {
-		uint32_t code = *(uint32_t*)(preview + 0x2084 + cat * 4);
+		uint32_t code = PvCode(preview, cat);
 		waiting = IsCarrier(code) && MemberPartPending(id, cat, (code >> 16) & 0xff);
 	}
 	static std::mutex mutex;
@@ -2264,13 +2327,18 @@ extern "C" __attribute__((used)) void __stdcall PreviewApplied(uint8_t* preview,
 			return;
 		}
 		int member = (int)(at / kLobbyEntry);
-		uint32_t character = *(uint32_t*)(preview + 0x212c);
+		uint32_t character = PvCharacter(preview);
 		std::lock_guard<std::mutex> lock(g_lobbyMutex);
 		auto it = g_lobbyPreviews.find(preview);
 		if (it != g_lobbyPreviews.end() && it->second.member == member && it->second.character == character) {
 			return;
 		}
 		XLS_LOG_INFO("mods: parts: lobby preview 0x%p (character %u) shows member %d.", preview, character, member);
+		static bool probed = false;
+		if (!probed) {
+			probed = true;
+			LobbyMemberId(member, true); // finds (and logs) where entries keep the XUID
+		}
 		// gen 0: the next update reloads its carrier parts, so what it loaded (and the game may not
 		// load again for the same code) matches the paths that now resolve to this member's sets
 		g_lobbyPreviews[preview] = LobbyPreview{member, character, 0};
@@ -2290,15 +2358,15 @@ extern "C" __attribute__((used)) void __stdcall PreviewTick(uint8_t* preview)
 			return;
 		}
 		for (uint32_t cat = 0; cat < kPartSlotCount; cat++) {
-			int32_t state = *(int32_t*)(preview + 0x20d4 + cat * 4);
-			if (IsCarrier(*(uint32_t*)(preview + 0x2084 + cat * 4)) && (state == 1 || state == 4)) {
+			int32_t state = PvState(preview, cat);
+			if (IsCarrier(PvCode(preview, cat)) && (state == 1 || state == 4)) {
 				return; // loading: next frame
 			}
 		}
 		it->second.gen = gen;
 	}
 	for (uint32_t cat = 0; cat < kPartSlotCount; cat++) {
-		uint32_t code = *(uint32_t*)(preview + 0x2084 + cat * 4);
+		uint32_t code = PvCode(preview, cat);
 		if (IsCarrier(code)) {
 			g_previewSetPart(preview, cat, code);
 		}
@@ -2328,6 +2396,24 @@ asm(".text\n"
     "  popal\n"
     "  jmp *_g_previewTickTramp\n");
 
+// Diagnostics for slot -> player: where our account id (the low dword of every XUID form and Steam
+// id) and our gamertag sit in a block (a lobby entry, a player info).
+void LogOurIdentity(const char* what, int index, const uint8_t* block, size_t size)
+{
+	uint32_t account = (uint32_t)xls::SteamLocalId().GetAccountID();
+	std::string tag = xls::GamertagForSteamId(xls::SteamLocalId());
+	std::string hits;
+	for (size_t o = 0; o + 4 <= size; o++) {
+		if (*(const uint32_t*)(block + o) == account) {
+			hits += FormatA(" id@+0x%x(%016llx)", (unsigned)o, o >= 4 ? (unsigned long long)*(const uint64_t*)(block + o - 4) : 0ull);
+		}
+		if (!tag.empty() && o + tag.size() <= size && memcmp(block + o, tag.data(), tag.size()) == 0) {
+			hits += FormatA(" name@+0x%x", (unsigned)o);
+		}
+	}
+	XLS_LOG_INFO("mods: parts: %s %d: our account %08x / \"%s\":%s", what, index, account, tag.c_str(), hits.empty() ? " not here" : hits.c_str());
+}
+
 // Finds where a player info keeps the XUID: our own XUID in our own entry (once).
 void FindInfoXuid(uint8_t* game)
 {
@@ -2356,6 +2442,14 @@ void FindInfoXuid(uint8_t* game)
 	if (!logged) {
 		logged = true;
 		XLS_LOG_WARN("mods: parts: our xuid 0x%016llx not found in the player infos, online or offline (remote players fall back).", (unsigned long long)ours);
+		for (int p = 0; p < kMaxPlayers; p++) {
+			uint8_t* info = *(uint8_t**)(game + 0x28 + p * 4);
+			MEMORY_BASIC_INFORMATION mbi;
+			if (info && VirtualQuery(info, &mbi, sizeof(mbi)) && mbi.State == MEM_COMMIT && !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) &&
+			    (size_t)((uint8_t*)mbi.BaseAddress + mbi.RegionSize - info) >= 0x900 && (info[8] & 1)) {
+				LogOurIdentity("player info", p, info, 0x900);
+			}
+		}
 	}
 }
 
@@ -2990,34 +3084,6 @@ uint32_t __cdecl PartId(uint32_t code, uint32_t cat)
 	return id;
 }
 
-void* Detour(uint8_t* fn, const uint8_t* expect, size_t length, void* detour)
-{
-	if (memcmp(fn, expect, length) != 0) {
-		return nullptr;
-	}
-	auto* tramp = (uint8_t*)VirtualAlloc(nullptr, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-	if (!tramp) {
-		return nullptr;
-	}
-	memcpy(tramp, fn, length);
-	tramp[length] = 0xe9;
-	int32_t back = (int32_t)((fn + length) - (tramp + length + 5));
-	memcpy(tramp + length + 1, &back, 4);
-	FlushInstructionCache(GetCurrentProcess(), tramp, 32);
-	uint8_t patch[16];
-	memset(patch, 0x90, sizeof(patch));
-	patch[0] = 0xe9;
-	int32_t rel = (int32_t)((uint8_t*)detour - (fn + 5));
-	memcpy(patch + 1, &rel, 4);
-	DWORD old = 0;
-	if (!VirtualProtect(fn, length, PAGE_EXECUTE_READWRITE, &old)) {
-		return nullptr;
-	}
-	memcpy(fn, patch, length);
-	VirtualProtect(fn, length, old, &old);
-	FlushInstructionCache(GetCurrentProcess(), fn, length);
-	return tramp;
-}
 
 const uint8_t kColourStepPrologue[] = {0x8a, 0x44, 0x24, 0x08, 0x56, 0x8b, 0xf1};      // mov al,[esp+8]; push esi; mov esi,ecx
 const uint8_t kColourStepBody[] = {0x8a, 0x4c, 0x24, 0x10, 0x57, 0x8b, 0x7c, 0x24, 0x0c}; // at +0x34: mov cl,[esp+0x10]; push edi; mov edi,[esp+0xc]
@@ -3051,7 +3117,7 @@ const uint8_t kPreviewVisiblePrologue[] = {0x8b, 0x41, 0x04, 0x8b, 0xd0, 0x80, 0
 const uint8_t kSetTextPrologue[] = {0x8b, 0x44, 0x24, 0x08, 0x8b, 0x54, 0x24, 0x04};                // mov eax,[esp+8]; mov edx,[esp+4]
 const uint8_t kPreviewSetPartPrologue[] = {0x56, 0x8b, 0xf1, 0x8b, 0x4c, 0x24, 0x0c, 0x57};         // push esi; mov esi,ecx; mov ecx,[esp+0xc]; push edi
 
-// Lobby previews wear their members' sets (DX11 only for now).
+// Lobby previews wear their members' sets.
 void InstallLobbyPreviews(uint8_t* base, const LobbyVas& va)
 {
 	auto at = [&](uint32_t v) { return base + (v - 0x400000); };
@@ -3254,10 +3320,38 @@ bool PartsTryInstallPathHook(unsigned char* base)
 	FlushInstructionCache(GetCurrentProcess(), fn, len);
 	XLS_LOG_INFO("mods: parts: path builder hooked at 0x%p.", fn);
 	InstallMenuColours(base, kMenuVas[fn == base + kPathRvas[0] ? 0 : 1]);
-	if (fn == base + kPathRvas[0]) {
-		InstallLobbyPreviews(base, kLobbyVasDx11);
-	}
+	InstallLobbyPreviews(base, kLobbyVas[fn == base + kPathRvas[0] ? 0 : 1]);
 	return true;
+}
+
+
+void* Detour(uint8_t* fn, const uint8_t* expect, size_t length, void* detour)
+{
+	if (memcmp(fn, expect, length) != 0) {
+		return nullptr;
+	}
+	auto* tramp = (uint8_t*)VirtualAlloc(nullptr, 32, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+	if (!tramp) {
+		return nullptr;
+	}
+	memcpy(tramp, fn, length);
+	tramp[length] = 0xe9;
+	int32_t back = (int32_t)((fn + length) - (tramp + length + 5));
+	memcpy(tramp + length + 1, &back, 4);
+	FlushInstructionCache(GetCurrentProcess(), tramp, 32);
+	uint8_t patch[16];
+	memset(patch, 0x90, sizeof(patch));
+	patch[0] = 0xe9;
+	int32_t rel = (int32_t)((uint8_t*)detour - (fn + 5));
+	memcpy(patch + 1, &rel, 4);
+	DWORD old = 0;
+	if (!VirtualProtect(fn, length, PAGE_EXECUTE_READWRITE, &old)) {
+		return nullptr;
+	}
+	memcpy(fn, patch, length);
+	VirtualProtect(fn, length, old, &old);
+	FlushInstructionCache(GetCurrentProcess(), fn, length);
+	return tramp;
 }
 
 }

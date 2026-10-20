@@ -27,6 +27,12 @@ void PackagesLoad();
 std::vector<MapPackage> PackageMaps();
 // Whether a package is bound to online map slot (13 / 14) right now.
 bool PackagesSlotBound(int slot);
+// The create-match map picker: slot 13 holds one of our own packages at a time. Steps the choice
+// by step (+1 / -1), or with enter picks the first (step > 0) or last one; false when there is no
+// package that way (the picker then moves on to the stock maps).
+bool PackagesPick(int step, bool enter);
+// The name of the package bound to slot 13 / 14 (stays valid), or nullptr.
+const char* PackagesSlotName(int slot);
 // The bound package's file for rel (lower game-relative path, "nativepc\..."), if it has one.
 bool PackagesMapFile(const std::wstring& rel, std::wstring* out);
 // A generated replacement for the shared game file rel (lower game-relative path), built from

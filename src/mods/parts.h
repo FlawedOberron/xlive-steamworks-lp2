@@ -88,6 +88,10 @@ bool PartsCarrierRedirect(const std::wstring& path, std::wstring* out);
 // lpc resources from the slot archives; returns true once hooked.
 bool PartsTryInstallPathHook(unsigned char* base);
 
+// Jumps fn's first length bytes (which must equal expect) to detour; returns the original's
+// trampoline, or nullptr.
+void* Detour(uint8_t* fn, const uint8_t* expect, size_t length, void* detour);
+
 // Keeps the generated parts unlocked in the player's profile (a fresh save has DLC ids locked).
 void PartsStartUnlocker();
 

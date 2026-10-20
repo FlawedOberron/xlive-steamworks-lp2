@@ -60,6 +60,7 @@ std::vector<MapPackage> g_all;  // every package: Maps\*.zip, then downloaded on
 Binding g_bind[2];              // per kSlots entry
 int g_default[2] = {-1, -1};    // what each slot holds outside other players' lobbies
 std::atomic<bool> g_bound[2];
+std::atomic<int> g_picked{-1};  // picked in create match, bound by the sync thread (unpacking takes a while)
 std::map<uint64_t, std::string> g_memberMaps; // member -> their "maps" member data
 std::set<std::string> g_downloading;          // hashes being fetched
 bool g_unbound = false;                        // the host's maps aren't all bound here yet
@@ -333,18 +334,22 @@ void LoadMaps()
 			g_all.push_back(map);
 		}
 	}
-	int k = 0;
-	for (size_t i = 0; i < g_all.size() && k < 2; i++) {
-		if (!g_all[i].remote && Bind(k, (int)i, "default")) {
-			g_default[k++] = (int)i;
+	// slot 13 holds the last package picked in create match (or the first one); 14 only the hosts'
+	std::string last;
+	Bytes saved;
+	if (ReadWholeFile(Cfg().modCacheDir + L"maps\\last.txt", &saved)) {
+		last.assign(saved.begin(), saved.end());
+		last = last.substr(0, last.find_first_of("\r\n "));
+	}
+	int pick = FindHash(last);
+	if (pick < 0 || g_all[pick].remote) {
+		pick = -1;
+		for (size_t i = 0; i < g_all.size() && pick < 0; i++) {
+			pick = g_all[i].remote ? -1 : (int)i;
 		}
 	}
-	size_t local = 0;
-	for (const MapPackage& m : g_all) {
-		local += !m.remote;
-	}
-	if (local > 2) {
-		XLS_LOG_INFO("mods: %zu map packages: the first two are in slots 13 / 14, the others play when a host picks them.", local);
+	if (pick >= 0 && Bind(0, pick, "default")) {
+		g_default[0] = pick;
 	}
 }
 
@@ -417,8 +422,15 @@ void Reconcile()
 	std::lock_guard<std::recursive_mutex> lock(g_mutex);
 	g_unbound = false;
 	if (!host || host == SteamLocalId().ConvertToUint64()) {
+		int picked = g_picked;
+		bool ok = true;
 		for (int k = 0; k < 2; k++) {
-			Bind(k, g_default[k], "own maps");
+			ok &= Bind(k, g_default[k], picked >= 0 && k == 0 ? "picked" : "own maps") || k;
+		}
+		if (picked >= 0 && (g_bind[0].package == picked || !ok)) { // a pick that fails to unpack doesn't hold match starts
+			const std::string& hash = g_all[picked].hash;
+			WriteWholeFile(Cfg().modCacheDir + L"maps\\last.txt", Bytes(hash.begin(), hash.end()));
+			g_picked.compare_exchange_strong(picked, -1);
 		}
 		return;
 	}
@@ -569,7 +581,8 @@ void Load()
 	}
 	xls::ContentAddPending([] {
 		std::lock_guard<std::recursive_mutex> lock(g_mutex);
-		return (int)g_downloading.size() + (g_unbound && g_downloading.empty()); // unbound: about to start one
+		// unbound: about to start one; picked: our pick isn't bound yet
+		return (int)g_downloading.size() + (g_unbound && g_downloading.empty()) + (g_picked >= 0);
 	});
 	xls::MemberDataListen("maps", [](uint64_t steamId, XUID, const std::string& value) {
 		std::lock_guard<std::recursive_mutex> lock(g_mutex);
@@ -603,9 +616,15 @@ bool GenerateNames(const std::wstring& source, const std::wstring& out)
 	return changed && WriteWholeFile(out, ArcWrite(entries));
 }
 
-// The create-match pictures (ID221_SC<slot>_ID) of the bound maps that ship a thumbnail, for aBattlePlayerCreate.arc.
+// The create-match pictures of the bound maps that ship a thumbnail, for aBattlePlayerCreate.arc.
+// NOT YET: the picture is the id221 Flash's mc_monitor frame map + 2, and the frames for 13 / 14 are
+// empty (the 14 pictures ID221_SC00..SC13 are maps 0-12 and 15: SC13 is Frozen Wasteland's), so a
+// thumbnail needs those frames given a picture in the Flash; until then nothing is replaced.
 bool GenerateThumbnails(const std::wstring& source, const std::wstring& out)
 {
+	if (source.size() || out.size()) {
+		return false;
+	}
 	Bytes file;
 	std::vector<ArcEntry> entries;
 	if (!ReadWholeFile(source, &file) || !ArcRead(file, &entries)) {
@@ -650,6 +669,41 @@ std::vector<MapPackage> PackageMaps()
 		}
 	}
 	return out;
+}
+
+bool PackagesPick(int step, bool enter)
+{
+	PackagesLoad();
+	std::lock_guard<std::recursive_mutex> lock(g_mutex);
+	std::vector<int> own;
+	int at = -1;
+	for (size_t i = 0; i < g_all.size(); i++) {
+		if (!g_all[i].remote) {
+			at = (int)i == g_default[0] ? (int)own.size() : at;
+			own.push_back((int)i);
+		}
+	}
+	int next = enter ? (step > 0 ? 0 : (int)own.size() - 1) : at < 0 ? -1 : at + step;
+	if (next < 0 || next >= (int)own.size()) {
+		return false;
+	}
+	g_default[0] = own[next];
+	g_picked = own[next];
+	return true;
+}
+
+const char* PackagesSlotName(int slot)
+{
+	static char names[2][128];
+	std::lock_guard<std::recursive_mutex> lock(g_mutex);
+	for (int k = 0; k < 2; k++) {
+		int i = k == 0 && g_picked >= 0 ? (int)g_picked : g_bind[k].package;
+		if (kSlots[k] == slot && i >= 0) {
+			snprintf(names[k], sizeof(names[k]), "%s", g_all[i].name.c_str());
+			return names[k];
+		}
+	}
+	return nullptr;
 }
 
 bool PackagesSlotBound(int slot)

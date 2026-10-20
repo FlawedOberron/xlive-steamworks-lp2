@@ -120,8 +120,10 @@ any picture.
 | `base` | Online map whose vehicles, weapons and objects it preloads |
 | `number` | The online map number its files were built for (renumbered automatically) |
 
-The game has two free map numbers (13 and 14), so **two map packages at a time for now**.
-Mapping more packages onto those slots per session is planned.
+Any number of map packages can be installed. The game has only two free map numbers (13 and 14):
+in create match, pressing left / right on the map row at the first custom map steps through every
+package before moving on to the stock maps. The last pick is remembered. Players joining get the
+host's pick sent to them.
 
 ## Parts\ (custom character parts)
 
@@ -206,7 +208,7 @@ game files, like the Test Arena prototype's copied Desecration archives, is not 
 2. Textures and skins for parts (colour variants, reusing game textures by reference).
 3. Sending maps and parts to other players in the lobby.
 4. Split on-foot / VS / scoped controls.
-5. More than two map packages per session.
+5. More than two map packages per session (done: the create-match picker).
 6. Windows LAA patcher; a raised player cap later.
 
 ## Credits

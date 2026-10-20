@@ -87,27 +87,34 @@ const Row kRows[] = {
 const size_t kRowCount = sizeof(kRows) / sizeof(kRows[0]);
 Row g_table[kRowCount + 8]; // padding: the original table was followed by more rows
 
-// LP2DX11.exe addresses.
-const uint32_t kTableSlot = 0x1636c74;
-const uint32_t kTableRefs[] = {0xf0522c, 0xf05b07, 0xf05dc9, 0xf06955, 0xf06a0a, 0xf06be1, 0xf07283, 0xf074d0};
-const uint32_t kCountMov = 0xf06f82; // mov ecx,0x23; lea edx,[ecx-0x1f] (edx = 4, the capture state!)
-const uint32_t kCountCmp = 0xf06a46; // cmp edx,0x23
-const uint32_t kDraw = 0xf056a0;
-const uint32_t kStateList = 0xf074b0;
-const uint32_t kStateNumber = 0xf069f0;
-const uint32_t kStartCapture = 0xf06480;
-const uint32_t kLabelIds = 0x1636dd0;
-const uint32_t kMsgPc = 0x1373294;  // "MsgPC" message file name
-const uint32_t kMsgMgr = 0x18e0860; // message / input manager pointer
-const uint32_t kSetList = 0xf04d90, kSetListData = 0xf04e10, kSetArrowState = 0xf04f40;
-const uint32_t kMessage = 0x77b280, kKeyName = 0xf04b60;
-const uint32_t kInvoke = 0xf4a390;   // thiscall(screen, result*, "path", args, count): call ActionScript
-const uint32_t kValueFree = 0x77a680; // thiscall(value*): release an ActionScript value
-const uint32_t kKeyNames = 0x17fd228; // 100 x {char* "<KEY_..>", i32 virtual key, i32 mouse code}
+// Addresses per exe (DX9 by signature, lp2-tools/sigport.py: the page's code sits 0xfde0 lower,
+// the screen's fields are the same).
+struct MenuAddrs {
+	uint32_t tableSlot;
+	uint32_t tableRefs[8];
+	uint32_t countMov; // mov ecx,0x23; lea edx,[ecx-0x1f] (edx = 4, the capture state!)
+	uint32_t countCmp; // cmp edx,0x23
+	uint32_t draw, stateList, stateNumber, startCapture;
+	uint32_t labelIds;
+	uint32_t msgPc;  // "MsgPC" message file name
+	uint32_t msgMgr; // message / input manager pointer
+	uint32_t setList, setListData, setArrowState;
+	uint32_t message, keyName;
+	uint32_t invoke;    // thiscall(screen, result*, "path", args, count): call ActionScript
+	uint32_t valueFree; // thiscall(value*): release an ActionScript value
+	uint32_t keyNames;  // 100 x {char* "<KEY_..>", i32 virtual key, i32 mouse code}
+};
+const MenuAddrs kDx11 = {0x1636c74, {0xf0522c, 0xf05b07, 0xf05dc9, 0xf06955, 0xf06a0a, 0xf06be1, 0xf07283, 0xf074d0}, 0xf06f82, 0xf06a46,
+                         0xf056a0, 0xf074b0, 0xf069f0, 0xf06480, 0x1636dd0, 0x1373294, 0x18e0860, 0xf04d90, 0xf04e10, 0xf04f40,
+                         0x77b280, 0xf04b60, 0xf4a390, 0x77a680, 0x17fd228};
+const MenuAddrs kDx9 = {0x1626b2c, {0xef544c, 0xef5d27, 0xef5fe9, 0xef6b75, 0xef6c2a, 0xef6e01, 0xef74a3, 0xef76f0}, 0xef71a2, 0xef6c66,
+                        0xef58c0, 0xef76d0, 0xef6c10, 0xef66a0, 0x1626c88, 0x13630c4, 0x18ce774, 0xef4fb0, 0xef5030, 0xef5160,
+                        0x76c0c0, 0xef4d80, 0xf3a660, 0x76b4e0, 0x17ed1c8};
+const MenuAddrs* A = &kDx11;
 
 const uint8_t kDrawPrologue[] = {0x83, 0xec, 0x20, 0x53, 0x55, 0x56, 0x8b, 0xf1};
 const uint8_t kListPrologue[] = {0x83, 0xec, 0x0c, 0x56, 0x6a, 0x16, 0x6a, 0x4a, 0x8b, 0xf1};
-const uint8_t kNumberPrologue[] = {0x83, 0xec, 0x40, 0x53, 0x55, 0x8b, 0x2d, 0x60, 0x08, 0x8e, 0x01};
+const uint8_t kNumberPrologue[] = {0x83, 0xec, 0x40, 0x53, 0x55, 0x8b, 0x2d}; // + the message manager's address
 const uint8_t kCapturePrologue[] = {0x56, 0x57, 0x8b, 0x7c, 0x24, 0x0c, 0x6a, 0x00};
 
 using ScreenFn = void(__attribute__((thiscall)) *)(uint8_t*);
@@ -154,8 +161,8 @@ void CallRow(uint8_t* screen, const char* path, int row)
 	AsValue arg = {};
 	arg.type = 3;
 	arg.number = (float)row;
-	((InvokeFn)(uintptr_t)kInvoke)(screen, nullptr, path, &arg, 1);
-	((ValueFreeFn)(uintptr_t)kValueFree)(&arg);
+	((InvokeFn)(uintptr_t)A->invoke)(screen, nullptr, path, &arg, 1);
+	((ValueFreeFn)(uintptr_t)A->valueFree)(&arg);
 }
 
 // Header rows show the row clip's "ERROR" frame (selectError); the game resets rows when the
@@ -177,7 +184,7 @@ bool g_captureArmed = false; // all keys were up since the capture started
 std::string KeyText(int vk)
 {
 	int mouse = vk == VK_LBUTTON ? 3 : vk == VK_RBUTTON ? 4 : vk == VK_MBUTTON ? 5 : vk == 0x10c ? 12 : vk == 0x10d ? 13 : -1;
-	const uint8_t* records = (const uint8_t*)(uintptr_t)kKeyNames;
+	const uint8_t* records = (const uint8_t*)(uintptr_t)A->keyNames;
 	for (int i = 0; i < 100; i++) {
 		int recordVk = *(const int*)(records + i * 12 + 4);
 		int recordMouse = *(const int*)(records + i * 12 + 8);
@@ -193,7 +200,7 @@ std::string BindingText(uint8_t* screen, int slot)
 	if (slot < 0 || slot >= 45) {
 		return "-";
 	}
-	const char* key = ((KeyNameFn)(uintptr_t)kKeyName)((uint32_t*)(screen + 0x1e0 + slot * 4));
+	const char* key = ((KeyNameFn)(uintptr_t)A->keyName)((uint32_t*)(screen + 0x1e0 + slot * 4));
 	return key ? key : "";
 }
 
@@ -225,9 +232,9 @@ std::string RemapText(uint8_t* screen, const RemapRow& r)
 
 void __attribute__((thiscall)) Draw(uint8_t* screen)
 {
-	auto setList = (RowTextFn)(uintptr_t)kSetList;
-	auto setData = (RowTextFn)(uintptr_t)kSetListData;
-	auto setArrow = (ArrowFn)(uintptr_t)kSetArrowState;
+	auto setList = (RowTextFn)(uintptr_t)A->setList;
+	auto setData = (RowTextFn)(uintptr_t)A->setListData;
+	auto setArrow = (ArrowFn)(uintptr_t)A->setArrowState;
 	int first = Cursor(screen) - Visible(screen);
 	for (int r = 0; r < 8; r++) {
 		const Row* row = RowAt(first + r);
@@ -262,9 +269,9 @@ void __attribute__((thiscall)) Draw(uint8_t* screen)
 			label = "Aim"; // the game's "Zoom In": it toggles (or, held, aims); zoom steps are separate
 		}
 		else {
-			void* messages = *(void**)(uintptr_t)kMsgMgr;
-			uint32_t id = ((uint32_t*)(uintptr_t)kLabelIds)[row->label];
-			label = ((MessageFn)(uintptr_t)kMessage)(messages, kMsgPc, id, 0x16);
+			void* messages = *(void**)(uintptr_t)A->msgMgr;
+			uint32_t id = ((uint32_t*)(uintptr_t)A->labelIds)[row->label];
+			label = ((MessageFn)(uintptr_t)A->message)(messages, A->msgPc, id, 0x16);
 		}
 		setList(screen, r, label ? label : "", 1);
 		if (row->slot == 0x2e || row->slot == 0x2f) {
@@ -274,7 +281,7 @@ void __attribute__((thiscall)) Draw(uint8_t* screen)
 			setArrow(screen, r, 0, 0);
 			continue;
 		}
-		const char* key = ((KeyNameFn)(uintptr_t)kKeyName)((uint32_t*)(screen + 0x1e0 + row->slot * 4));
+		const char* key = ((KeyNameFn)(uintptr_t)A->keyName)((uint32_t*)(screen + 0x1e0 + row->slot * 4));
 		setData(screen, r, key ? key : "", 1);
 		bool conflict = *(int*)(screen + 0x294 + row->slot * 4) == 1;
 		setArrow(screen, r, conflict, conflict);
@@ -327,7 +334,7 @@ void RunSkippingHeaders(uint8_t* screen)
 
 bool LeftOrRight()
 {
-	uint8_t* input = *(uint8_t**)(uintptr_t)kMsgMgr;
+	uint8_t* input = *(uint8_t**)(uintptr_t)A->msgMgr;
 	return input && (*(uint32_t*)(input + 0x330) & 0x300) != 0;
 }
 
@@ -443,16 +450,14 @@ void* Detour(uint8_t* fn, size_t length, void* detour)
 
 bool MenuTryInstall(unsigned char* base)
 {
-	if (g_host->game_exe != LP2MOD_EXE_DX11) {
-		return true; // DX9 not mapped yet
-	}
+	A = g_host->game_exe == LP2MOD_EXE_DX11 ? &kDx11 : &kDx9;
 	auto at = [&](uint32_t va) { return base + (va - 0x400000); };
 	// Every site must look exactly as expected, else leave the menu alone.
-	for (uint32_t ref : kTableRefs) {
+	for (uint32_t ref : A->tableRefs) {
 		uint8_t* p = at(ref);
 		bool found = false;
 		for (int i = 0; i < 8 && !found; i++) {
-			found = *(uint32_t*)(p + i) == kTableSlot;
+			found = *(uint32_t*)(p + i) == A->tableSlot;
 		}
 		if (!found) {
 			return false;
@@ -460,10 +465,10 @@ bool MenuTryInstall(unsigned char* base)
 	}
 	const uint8_t mov23[] = {0xb9, 0x23, 0x00, 0x00, 0x00, 0x8d, 0x51, 0xe1};
 	const uint8_t cmp23[] = {0x83, 0xfa, 0x23};
-	if (memcmp(at(kCountMov), mov23, sizeof(mov23)) != 0 || memcmp(at(kCountCmp), cmp23, sizeof(cmp23)) != 0 ||
-	    memcmp(at(kDraw), kDrawPrologue, sizeof(kDrawPrologue)) != 0 || memcmp(at(kStateList), kListPrologue, sizeof(kListPrologue)) != 0 ||
-	    memcmp(at(kStateNumber), kNumberPrologue, sizeof(kNumberPrologue)) != 0 ||
-	    memcmp(at(kStartCapture), kCapturePrologue, sizeof(kCapturePrologue)) != 0) {
+	if (memcmp(at(A->countMov), mov23, sizeof(mov23)) != 0 || memcmp(at(A->countCmp), cmp23, sizeof(cmp23)) != 0 ||
+	    memcmp(at(A->draw), kDrawPrologue, sizeof(kDrawPrologue)) != 0 || memcmp(at(A->stateList), kListPrologue, sizeof(kListPrologue)) != 0 ||
+	    memcmp(at(A->stateNumber), kNumberPrologue, sizeof(kNumberPrologue)) != 0 || *(uint32_t*)(at(A->stateNumber) + 7) != A->msgMgr ||
+	    memcmp(at(A->startCapture), kCapturePrologue, sizeof(kCapturePrologue)) != 0) {
 		return false;
 	}
 	memcpy(g_table, kRows, sizeof(kRows));
@@ -471,10 +476,10 @@ bool MenuTryInstall(unsigned char* base)
 		g_table[i] = {0, kSlotHeader + 0xf};
 	}
 	uint32_t slotField = (uint32_t)(uintptr_t)&g_table[0].slot;
-	for (uint32_t ref : kTableRefs) {
+	for (uint32_t ref : A->tableRefs) {
 		uint8_t* p = at(ref);
 		for (int i = 0; i < 8; i++) {
-			if (*(uint32_t*)(p + i) == kTableSlot) {
+			if (*(uint32_t*)(p + i) == A->tableSlot) {
 				g_host->write_code(p + i, &slotField, 4);
 				break;
 			}
@@ -482,18 +487,18 @@ bool MenuTryInstall(unsigned char* base)
 	}
 	uint32_t count = (uint32_t)kRowCount;
 	uint8_t count8 = (uint8_t)kRowCount;
-	g_host->write_code(at(kCountMov) + 1, &count, 4);
+	g_host->write_code(at(A->countMov) + 1, &count, 4);
 	// The compiler derives the key capture state (4) from the count: keep edx = 4.
 	int8_t stateFromCount = (int8_t)(4 - (int)kRowCount);
-	g_host->write_code(at(kCountMov) + 7, &stateFromCount, 1);
-	g_host->write_code(at(kCountCmp) + 2, &count8, 1);
+	g_host->write_code(at(A->countMov) + 7, &stateFromCount, 1);
+	g_host->write_code(at(A->countCmp) + 2, &count8, 1);
 	uint8_t jmp[8] = {0xe9, 0, 0, 0, 0, 0x90, 0x90, 0x90};
-	int32_t rel = (int32_t)((uint8_t*)&Draw - (at(kDraw) + 5));
+	int32_t rel = (int32_t)((uint8_t*)&Draw - (at(A->draw) + 5));
 	memcpy(jmp + 1, &rel, 4);
-	g_host->write_code(at(kDraw), jmp, sizeof(jmp));
-	g_list = (ScreenFn)Detour(at(kStateList), sizeof(kListPrologue), (void*)&ListState);
-	g_number = (ScreenFn)Detour(at(kStateNumber), sizeof(kNumberPrologue), (void*)&NumberState);
-	g_capture = (CaptureFn)Detour(at(kStartCapture), sizeof(kCapturePrologue), (void*)&StartCapture);
+	g_host->write_code(at(A->draw), jmp, sizeof(jmp));
+	g_list = (ScreenFn)Detour(at(A->stateList), sizeof(kListPrologue), (void*)&ListState);
+	g_number = (ScreenFn)Detour(at(A->stateNumber), sizeof(kNumberPrologue) + 4, (void*)&NumberState);
+	g_capture = (CaptureFn)Detour(at(A->startCapture), sizeof(kCapturePrologue), (void*)&StartCapture);
 	LOG_INFO("menu: Controls page regrouped (%u rows).", (unsigned)kRowCount);
 	return true;
 }
