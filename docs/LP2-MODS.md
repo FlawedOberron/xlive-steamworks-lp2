@@ -127,13 +127,14 @@ host's pick sent to them.
 
 ## Match rules
 
-Create match → **Settings 2** has three extra rows, saved with the match settings:
+Create match → **Settings 2** has three extra rows and **Settings 3** one, saved with the match settings:
 
 | Row | Values |
 |---|---|
-| Default Secondary | None / Sidearm / Standard / Short / Long / Heavy / Special: spawn with it as the carried second weapon |
+| Default Secondary | None / Handguns / Standard / Short Range / Long Range / Heavy Weapons / Support Weapons: spawn with it as the carried second weapon |
 | Unlimited Ammo | Off / On: the reserve never drops (shown as ∞); the magazine still empties and reloads |
 | Unlimited Grenades | Off / On: throwing doesn't use them up |
+| Ammo Supply (Settings 3) | Default (the game's amounts) / Dry 1 / Scarce 2 / Less 3 / Normal 5 / Abundant 8 / Excessive 12: guns start with that many magazines (loaded one included, at most the weapon's cap); ammo pickups scale by the same ratio. Grenades unchanged |
 
 The host's rules apply to everyone in its lobby (every player needs this DLL, since each PC runs its
 own weapons). Until create match has been opened once, `"mods": {"rules": {"unlimited_ammo": true,

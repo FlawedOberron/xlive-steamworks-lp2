@@ -350,9 +350,12 @@ void StepSound(void* screen)
 
 int __attribute__((thiscall)) RuleStep(void* screen, int key, uint8_t* value, int max, int min, int rule, char wrap)
 {
-	if (RulesStep(rule, key, value)) {
-		StepSound(screen);
-		return 1;
+	int ours = RulesStep(rule, key, value);
+	if (ours >= 0) {
+		if (ours) {
+			StepSound(screen);
+		}
+		return ours;
 	}
 	if (rule != kRuleMap || (key != 10 && key != 11)) {
 		return g_stepOriginal(screen, key, value, max, min, rule, wrap);
@@ -381,6 +384,9 @@ int __attribute__((thiscall)) RuleStep(void* screen, int key, uint8_t* value, in
 
 const char* __attribute__((thiscall)) Message(void* messages, const char* file, uint32_t id, uint32_t lang)
 {
+	if (file && strcmp(file, "MsgOnline") == 0 && RulesMessageAlias(id) != id) {
+		return g_messageOriginal(messages, file, RulesMessageAlias(id), lang);
+	}
 	if (const char* text = file && strcmp(file, "MsgOnline") == 0 ? RulesMessage(id) : nullptr) {
 		return text;
 	}

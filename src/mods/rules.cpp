@@ -30,6 +30,11 @@
 // -0x10). Weapon kind at +0x1e: 8 and 0x15-0x19 are grenades (magazine = total).
 //   Unlimited ammo: the total is put back after a shot, so the magazine still empties and reloads.
 //   Unlimited grenades: both are put back.
+//   Ammo supply (guns, not grenades): the start total (magazine included) becomes N magazines. It is
+//   the weapon data's +0x30, set by the weapon setup (DX11 FUN_00c86160), so before that runs every
+//   data entry's start total is set from its magazine (+0x32), at most the cap (+0x34; -1 =
+//   infinite, left alone). Pickups (positive deltas) scale by the same new / original start of the
+//   weapon's entry; the game clamps them to the cap.
 //
 // Secondary: a player spawns (DX11 FUN_008fb130, thiscall(spawner, bool remote, ...), player index at
 // spawner+0xb0) with the weapons whose ids are in its player info (game->+0x28[index]) at +0x10 +
@@ -65,10 +70,15 @@ struct RulesVas {
 	uint32_t pushRules; // the create screen's push of every rule to its Flash: thiscall(screen, rules)
 	uint32_t setNumber; // the screen's Flash number setter: thiscall(screen, dataNo, value)
 	uint32_t rowTable;  // create-match rows (see RowTable)
+	uint32_t setup;     // weapon setup (DX11 FUN_00c86160, thiscall(weapon, bool)): start reserve from its data
+	uint32_t data;      // weapon -> its 3 data entries (0x54 bytes: +0x30 start total, +0x32 magazine, +0x34 cap)
+	uint32_t transfer;  // return address of the add-ammo call that moves a picked-up weapon's ammo (DX11 FUN_00c7cee0)
+	uint32_t leftCounter; // the HUD's left (grenade) counter draw, as counter (DX11 FUN_00ecac50)
+	uint32_t icon;        // the HUD's icon for an item: thiscall(hud, weapon, a, b, c) -> icon (DX11 FUN_00ed1e00)
 };
 const RulesVas kRulesVas[] = {
-	{0xc7aa20, 0xc7a820, 0xeca930, 0x20fc, 0x8fb130, 0xe8c270, 0xf4a330, 0x17e9840}, // DX11
-	{0xc6ae10, 0xc6ac10, 0xebab30, 0x20ec, 0x8eb7d0, 0xe7c1e0, 0xf3a600, 0x17d97e0}, // DX9
+	{0xc7aa20, 0xc7a820, 0xeca930, 0x20fc, 0x8fb130, 0xe8c270, 0xf4a330, 0x17e9840, 0xc86160, 0x2180, 0xc7cf15, 0xecac50, 0xed1e00}, // DX11
+	{0xc6ae10, 0xc6ac10, 0xebab30, 0x20ec, 0x8eb7d0, 0xe7c1e0, 0xf3a600, 0x17d97e0, 0xc76550, 0x2170, 0xc6d305, 0xebae50, 0xec1ff0}, // DX9
 };
 // push esi; push edi; mov edi,[esp+0xc]; test di,di; (then jge rel32, left in place)
 const uint8_t kAddAmmoPrologue[] = {0x56, 0x57, 0x8b, 0x7c, 0x24, 0x0c, 0x66, 0x85, 0xff};
@@ -78,29 +88,58 @@ const uint8_t kReservePrologue[] = {0x80, 0x7c, 0x24, 0x04, 0x00};
 // sub esp,0x7c; push ebp; mov ebp,ecx
 const uint8_t kCounterPrologue[] = {0x83, 0xec, 0x7c, 0x55, 0x8b, 0xe9};
 const int kStyleInfinite = 6;
+// sub esp,0x8c; push edi; mov edi,ecx
+const uint8_t kLeftCounterPrologue[] = {0x81, 0xec, 0x8c, 0x00, 0x00, 0x00, 0x57, 0x8b, 0xf9};
+// mov edx,[esp+0x10]; push esi; mov esi,ecx
+const uint8_t kIconPrologue[] = {0x8b, 0x54, 0x24, 0x10, 0x56, 0x8b, 0xf1};
 
-const int kOffsetSecondary = 0x2e;
-const int kOffsetAmmo = 0x2f;
-const int kOffsetGrenades = 0x30;
-const int kRows = 3;
-const int kRowOffsets[kRows] = {kOffsetSecondary, kOffsetAmmo, kOffsetGrenades};
 // secondary values: none, then the weapon kinds of kSecondaryKinds
 const int kSecondaryKinds[] = {0, 0x0c, 0x30, 0x31, 0x32, 0x33, 0x34};
-const char* const kSecondaryNames[] = {"None", "Sidearm", "Standard", "Short", "Long", "Heavy", "Special"};
+const char* const kSecondaryNames[] = {"None", "Handguns", "Standard", "Short Range", "Long Range", "Heavy Weapons", "Support Weapons"};
+// Values that reuse the game's Default Weapon texts (MsgOnline 149-153: Standard, Short Range, Long
+// Range, Heavy Weapons, Handguns) so they follow the language; 0 = ours.
+const int kSecondaryGameMsg[] = {0, 153, 149, 150, 151, 152, 0};
 const int kSecondaryValues = (int)(sizeof(kSecondaryKinds) / sizeof(kSecondaryKinds[0]));
-const int kRowValues[kRows] = {kSecondaryValues, 2, 2};
-const int kRowItems[kRows] = {500, 501, 502};     // Flash item ids
-const int kRowDataNo[kRows] = {75, 76, 77};
-const int kMsgItemName = 38;                      // MsgOnline label of item i: 38 + i
-const int kMsgSecondary = 600;                    // our value texts
-const int kMsgOffOn = 362;                        // MsgOnline MSG_COMMON_OFF (Off, On)
-const int kPageSettings1 = 1;
-const int kStockRows = 7;
+// ammo supply values: magazines to start with (0 = the game's own amounts, as in settings saved
+// before the row existed)
+const int kSupplyMagazines[] = {0, 1, 2, 3, 5, 8, 12};
+const char* const kSupplyNames[] = {"Default", "Dry", "Scarce", "Less", "Normal", "Abundant", "Excessive"};
+const int kSupplyValues = (int)(sizeof(kSupplyMagazines) / sizeof(kSupplyMagazines[0]));
+
+const int kMsgItemName = 38; // MsgOnline label of item i: 38 + i
+const int kMsgOffOn = 362;   // MsgOnline MSG_COMMON_OFF (Off, On)
+const int kMsgSecondary = 600;
+const int kMsgSupply = 610;
+
+// The pages' Flash arrays (Settings 2 = sub1, Settings 3 = sub2) and their stock row counts here
+// (Settings 3 also has a cross-play row last in the Flash, hidden on PC and not counted here).
+const int kPageSettings2 = 1;
+const int kPageSettings3 = 2;
+struct Row {
+	int page;
+	int offset;  // in the rules bytes
+	int values;
+	int item;    // Flash item id (label MsgOnline 38 + item)
+	int dataNo;
+	int msgBase; // value texts: MsgOnline msgBase + value
+	const char* label;
+};
+const Row kRowDefs[] = {
+	{kPageSettings2, 0x2e, kSecondaryValues, 500, 75, kMsgSecondary, "Default Secondary"},
+	{kPageSettings2, 0x2f, 2, 501, 76, kMsgOffOn, "Unlimited Ammo"},
+	{kPageSettings2, 0x30, 2, 502, 77, kMsgOffOn, "Unlimited Grenades"},
+	{kPageSettings3, 0x31, kSupplyValues, 503, 78, kMsgSupply, "Ammo Supply"},
+};
+const int kRows = (int)(sizeof(kRowDefs) / sizeof(kRowDefs[0]));
+enum { kRowSecondary, kRowAmmo, kRowGrenades, kRowSupply };
+// Categories 0-13 have the full pages (14 / 15, numbered battle and random, have one row there).
+const int kRowCategories = 14;
 
 struct Rules {
 	bool ammo = false;
 	bool grenades = false;
 	int secondary = 0; // weapon kind, 0 = none
+	int supply = 0;     // magazines to start with, 0 = the game's amounts (pickups scale with it)
 };
 const int kSlotSecond = 7;
 
@@ -109,11 +148,12 @@ std::map<uint64_t, Rules> g_memberRules;
 std::atomic<bool> g_ammo{false};
 std::atomic<bool> g_grenades{false};
 std::atomic<int> g_secondary{0};
+std::atomic<int> g_supply{0};
 uint32_t g_magazine = 0;
 
 std::string Format(const Rules& r)
 {
-	return FormatA("ammo=%d;grenades=%d;secondary=%d", r.ammo, r.grenades, r.secondary);
+	return FormatA("ammo=%d;grenades=%d;secondary=%d;magazines=%d", r.ammo, r.grenades, r.secondary, r.supply);
 }
 
 Rules Parse(const std::string& s)
@@ -123,6 +163,11 @@ Rules Parse(const std::string& s)
 	r.grenades = s.find("grenades=1") != std::string::npos;
 	size_t at = s.find("secondary=");
 	r.secondary = at == std::string::npos ? 0 : atoi(s.c_str() + at + 10) & 0xff;
+	at = s.find("magazines=");
+	r.supply = at == std::string::npos ? 0 : atoi(s.c_str() + at + 10);
+	if (r.supply < 0 || r.supply > 100) {
+		r.supply = 0;
+	}
 	return r;
 }
 
@@ -133,9 +178,10 @@ Rules Own()
 {
 	Rules r;
 	if (g_menuSeen) {
-		r.ammo = g_menu[1] != 0;
-		r.grenades = g_menu[2] != 0;
-		r.secondary = kSecondaryKinds[g_menu[0] % kSecondaryValues];
+		r.ammo = g_menu[kRowAmmo] != 0;
+		r.grenades = g_menu[kRowGrenades] != 0;
+		r.secondary = kSecondaryKinds[g_menu[kRowSecondary] % kSecondaryValues];
+		r.supply = kSupplyMagazines[g_menu[kRowSupply] % kSupplyValues];
 		return r;
 	}
 	r.ammo = Cfg().rulesUnlimitedAmmo;
@@ -172,10 +218,11 @@ DWORD WINAPI SyncThread(LPVOID)
 		g_ammo = r.ammo;
 		g_grenades = r.grenades;
 		g_secondary = r.secondary;
+		g_supply = r.supply;
 		std::string now = Format(r);
 		if (now != logged) {
 			logged = now;
-			XLS_LOG_INFO("mods: rules: unlimited ammo %s, unlimited grenades %s, secondary kind 0x%02x.", r.ammo ? "on" : "off", r.grenades ? "on" : "off", r.secondary);
+			XLS_LOG_INFO("mods: rules: unlimited ammo %s, unlimited grenades %s, secondary kind 0x%02x, ammo supply %d magazines (0 = default).", r.ammo ? "on" : "off", r.grenades ? "on" : "off", r.secondary, r.supply);
 		}
 	}
 }
@@ -207,6 +254,31 @@ CounterFn g_counterOriginal = nullptr;
 void __attribute__((thiscall)) Counter(void* hud, uint32_t slot, uint32_t icon, int32_t count, uint32_t style, uint32_t counterOnly)
 {
 	g_counterOriginal(hud, slot, icon, count, count < 0 ? kStyleInfinite : style, counterOnly);
+}
+
+// The grenade counter (left side) gets its count clamped to 0 or more by the HUD update, so it can't
+// say "infinite" by count: the icons the HUD picks for grenades are noted, and with unlimited
+// grenades a counter showing one of them gets the infinity style.
+std::atomic<uint32_t> g_grenadeIcons[8];
+using IconFn = uint32_t(__attribute__((thiscall)) *)(void*, uint8_t*, uint32_t, uint32_t, uint32_t);
+IconFn g_iconOriginal = nullptr;
+CounterFn g_leftCounterOriginal = nullptr;
+
+uint32_t __attribute__((thiscall)) Icon(void* hud, uint8_t* weapon, uint32_t a, uint32_t b, uint32_t c)
+{
+	uint32_t icon = g_iconOriginal(hud, weapon, a, b, c);
+	if ((uintptr_t)weapon >= 0x10000 && icon < 256 && Grenade(weapon) && !(g_grenadeIcons[icon / 32] & (1u << (icon % 32)))) {
+		g_grenadeIcons[icon / 32] |= 1u << (icon % 32);
+		XLS_LOG_INFO("mods: rules: grenade kind 0x%02x has HUD icon 0x%02x.", weapon[0x1e], icon);
+	}
+	return icon;
+}
+
+void __attribute__((thiscall)) LeftCounter(void* hud, uint32_t slot, uint32_t icon, int32_t count, uint32_t style, uint32_t counterOnly)
+{
+	uint8_t i = icon & 0xff;
+	bool grenade = g_grenades && (g_grenadeIcons[i / 32] & (1u << (i % 32)));
+	g_leftCounterOriginal(hud, slot, icon, count, grenade ? kStyleInfinite : style, counterOnly);
 }
 
 // sub esp,0x10; push ebp; push esi; mov esi,ecx; then mov al,[esi+0xb0]
@@ -252,12 +324,12 @@ void __attribute__((thiscall)) PushRules(void* screen, uint8_t* rules)
 		return;
 	}
 	for (int i = 0; i < kRows; i++) {
-		uint8_t v = rules[kRowOffsets[i]];
-		if (v >= kRowValues[i]) {
-			v = rules[kRowOffsets[i]] = 0; // saved before these rows existed
+		uint8_t v = rules[kRowDefs[i].offset];
+		if (v >= kRowDefs[i].values) {
+			v = rules[kRowDefs[i].offset] = 0; // saved before these rows existed
 		}
 		g_menu[i] = v;
-		g_setNumber(screen, kRowDataNo[i], v);
+		g_setNumber(screen, kRowDefs[i].dataNo, v);
 	}
 	g_menuSeen = true;
 }
@@ -269,23 +341,85 @@ bool PatchRowTable(uint8_t* table)
 		return false;
 	}
 	int patched = 0;
-	for (int c = 0; c < 16 && table[c * 0x23] != 0xff; c++) {
-		uint8_t* page = table + c * 0x23 + 2 + kPageSettings1 * 0xb;
-		if (page[0] == kStockRows) {
-			for (int i = 0; i < kRows; i++) {
-				page[1 + kStockRows + i] = (uint8_t)kRowOffsets[i];
+	for (int c = 0; c < kRowCategories && table[c * 0x23] != 0xff; c++) {
+		for (int pageNo : {kPageSettings2, kPageSettings3}) {
+			uint8_t* page = table + c * 0x23 + 2 + pageNo * 0xb;
+			for (const Row& r : kRowDefs) {
+				if (r.page == pageNo && page[0] < 10) {
+					page[1 + page[0]++] = (uint8_t)r.offset;
+				}
 			}
-			page[0] = kStockRows + kRows;
-			patched++;
 		}
+		patched++;
 	}
 	VirtualProtect(table, 16 * 0x23, old, &old);
 	XLS_LOG_INFO("mods: rules: %d create-match categories got the rule rows.", patched);
 	return patched > 0;
 }
 
+using SetupFn = void(__attribute__((thiscall)) *)(uint8_t*, uint32_t);
+SetupFn g_setupOriginal = nullptr;
+uint32_t g_dataAt = 0;
+uintptr_t g_transfer = 0;
+const uint8_t kSetupPrologue[] = {0x56, 0x8b, 0xf1, 0x8b, 0x0d}; // push esi; mov esi,ecx; mov ecx,[game] (9 bytes copied)
+const size_t kSetupCopy = 9;
+const int kDataEntries = 3;
+const size_t kDataEntry = 0x54;
+std::mutex g_supplyMutex;
+std::map<uint8_t*, int16_t> g_startOriginal; // data entry -> its original start total
+std::map<uint8_t*, std::pair<int, int>> g_pickupScale; // weapon -> new / original start total
+
+void __attribute__((thiscall)) Setup(uint8_t* weapon, uint32_t arg)
+{
+	if (!weapon || Grenade(weapon)) {
+		g_setupOriginal(weapon, arg);
+		return;
+	}
+	int magazines = g_supply;
+	uint8_t* data = *(uint8_t**)(weapon + g_dataAt);
+	std::lock_guard<std::mutex> lock(g_supplyMutex);
+	for (int k = 0; data && k < kDataEntries; k++) {
+		uint8_t* e = data + k * kDataEntry;
+		auto* start = (int16_t*)(e + 0x30);
+		int16_t magazine = *(int16_t*)(e + 0x32), cap = *(int16_t*)(e + 0x34);
+		auto it = g_startOriginal.find(e);
+		if (it == g_startOriginal.end()) {
+			if (magazines == 0) {
+				continue;
+			}
+			it = g_startOriginal.emplace(e, *start).first;
+		}
+		if (cap < 0 || it->second <= 0 || magazine <= 0) {
+			continue;
+		}
+		int want = magazines == 0 ? it->second : magazine * magazines;
+		*start = (int16_t)(want > cap ? cap : want);
+	}
+	g_setupOriginal(weapon, arg);
+	// the entry the weapon took is the one whose start it now holds
+	g_pickupScale.erase(weapon);
+	int16_t total = *(int16_t*)(weapon + g_magazine + 2);
+	for (int k = 0; data && magazines != 0 && k < kDataEntries; k++) {
+		uint8_t* e = data + k * kDataEntry;
+		auto it = g_startOriginal.find(e);
+		if (it != g_startOriginal.end() && it->second > 0 && *(int16_t*)(e + 0x30) == total) {
+			g_pickupScale[weapon] = {total, it->second};
+			break;
+		}
+	}
+}
+
 uint32_t __attribute__((thiscall)) AddAmmo(uint8_t* weapon, int16_t delta)
 {
+	// not ammo moved over from a picked-up weapon: that was given (and scaled) already
+	if (delta > 0 && weapon && g_supply != 0 && !Grenade(weapon) && (uintptr_t)__builtin_return_address(0) != g_transfer) {
+		std::lock_guard<std::mutex> lock(g_supplyMutex);
+		auto it = g_pickupScale.find(weapon);
+		if (it != g_pickupScale.end()) {
+			int scaled = delta * it->second.first / it->second.second;
+			delta = (int16_t)(scaled > 32767 ? 32767 : scaled < 1 ? 1 : scaled); // the game clamps to the cap
+		}
+	}
 	if (delta >= 0 || !weapon) {
 		return g_addAmmoOriginal(weapon, delta);
 	}
@@ -329,10 +463,30 @@ void RulesInstall(unsigned char* base)
 	g_addAmmoOriginal = (AddAmmoFn)Detour(base + (kRulesVas[build].addAmmo - 0x400000), kAddAmmoPrologue, sizeof(kAddAmmoPrologue), (void*)&AddAmmo);
 	g_reserveOriginal = (ReserveFn)Detour(base + (kRulesVas[build].reserve - 0x400000), kReservePrologue, sizeof(kReservePrologue), (void*)&Reserve);
 	g_counterOriginal = (CounterFn)Detour(base + (kRulesVas[build].counter - 0x400000), kCounterPrologue, sizeof(kCounterPrologue), (void*)&Counter);
+	uint8_t* left = base + (kRulesVas[build].leftCounter - 0x400000);
+	uint8_t* icon = base + (kRulesVas[build].icon - 0x400000);
+	if (memcmp(left, kLeftCounterPrologue, sizeof(kLeftCounterPrologue)) == 0 && memcmp(icon, kIconPrologue, sizeof(kIconPrologue)) == 0) {
+		g_iconOriginal = (IconFn)Detour(icon, kIconPrologue, sizeof(kIconPrologue), (void*)&Icon);
+		g_leftCounterOriginal = g_iconOriginal ? (CounterFn)Detour(left, kLeftCounterPrologue, sizeof(kLeftCounterPrologue), (void*)&LeftCounter) : nullptr;
+	}
+	if (!g_leftCounterOriginal) {
+		XLS_LOG_WARN("mods: rules: grenade counter not hooked, no infinity sign for unlimited grenades.");
+	}
 	g_setNumber = (SetNumberFn)(uintptr_t)kRulesVas[build].setNumber;
 	g_pushRulesOriginal = (PushRulesFn)Detour(base + (kRulesVas[build].pushRules - 0x400000), kPushRulesPrologue, sizeof(kPushRulesPrologue), (void*)&PushRules);
 	if (g_pushRulesOriginal) {
 		PatchRowTable(base + (kRulesVas[build].rowTable - 0x400000));
+	}
+	uint8_t* setup = base + (kRulesVas[build].setup - 0x400000);
+	if (memcmp(setup, kSetupPrologue, sizeof(kSetupPrologue)) == 0) {
+		uint8_t expect[kSetupCopy];
+		memcpy(expect, setup, kSetupCopy);
+		g_dataAt = kRulesVas[build].data;
+		g_transfer = (uintptr_t)(base + (kRulesVas[build].transfer - 0x400000));
+		g_setupOriginal = (SetupFn)Detour(setup, expect, kSetupCopy, (void*)&Setup);
+	}
+	if (!g_setupOriginal) {
+		XLS_LOG_WARN("mods: rules: weapon setup not hooked, ammo supply only scales pickups.");
 	}
 	uint8_t* spawn = base + (kRulesVas[build].spawn - 0x400000);
 	g_game = *(uint8_t***)(spawn + kSpawnGameAt);
@@ -349,10 +503,13 @@ void RulesInstall(unsigned char* base)
 	if (ReadWholeFile(Cfg().modCacheDir + L"rules.txt", &saved)) {
 		Rules r = Parse(std::string(saved.begin(), saved.end()));
 		for (int i = 0; i < kSecondaryValues; i++) {
-			g_menu[0] = kSecondaryKinds[i] == r.secondary ? i : (int)g_menu[0];
+			g_menu[kRowSecondary] = kSecondaryKinds[i] == r.secondary ? i : (int)g_menu[kRowSecondary];
 		}
-		g_menu[1] = r.ammo;
-		g_menu[2] = r.grenades;
+		for (int i = 0; i < kSupplyValues; i++) {
+			g_menu[kRowSupply] = kSupplyMagazines[i] == r.supply ? i : (int)g_menu[kRowSupply];
+		}
+		g_menu[kRowAmmo] = r.ammo;
+		g_menu[kRowGrenades] = r.grenades;
 		g_menuSeen = true;
 	}
 	MemberDataSet("rules", Format(Own()));
@@ -364,17 +521,34 @@ void RulesInstall(unsigned char* base)
 }
 
 
-bool RulesStep(int rule, int key, uint8_t* value)
+int RulesStep(int rule, int key, uint8_t* value)
 {
 	for (int i = 0; i < kRows; i++) {
-		if (rule == kRowOffsets[i] && (key == 10 || key == 11)) {
-			*value = (uint8_t)((*value + (key == 10 ? 1 : kRowValues[i] - 1)) % kRowValues[i]);
-			g_menu[i] = *value;
-			g_menuSeen = true;
-			return true;
+		if (rule != kRowDefs[i].offset || (key != 10 && key != 11)) {
+			continue;
 		}
+		int n = kRowDefs[i].values;
+		uint8_t was = *value % n;
+		if (i == kRowSupply) { // least to most, no wrap
+			int at = was + (key == 10 ? 1 : -1);
+			*value = at < 0 || at >= n ? was : (uint8_t)at;
+		}
+		else {
+			*value = (uint8_t)((was + (key == 10 ? 1 : n - 1)) % n);
+		}
+		g_menu[i] = *value;
+		g_menuSeen = true;
+		return *value != was;
 	}
-	return false;
+	return -1;
+}
+
+uint32_t RulesMessageAlias(uint32_t id)
+{
+	if (id >= (uint32_t)kMsgSecondary && id < (uint32_t)(kMsgSecondary + kSecondaryValues) && kSecondaryGameMsg[id - kMsgSecondary]) {
+		return kSecondaryGameMsg[id - kMsgSecondary];
+	}
+	return id;
 }
 
 const char* RulesMessage(uint32_t id)
@@ -382,12 +556,15 @@ const char* RulesMessage(uint32_t id)
 	if (id >= (uint32_t)kMsgSecondary && id < (uint32_t)(kMsgSecondary + kSecondaryValues)) {
 		return kSecondaryNames[id - kMsgSecondary];
 	}
-	switch (id) {
-	case kMsgItemName + 500: return "Default Secondary";
-	case kMsgItemName + 501: return "Unlimited Ammo";
-	case kMsgItemName + 502: return "Unlimited Grenades";
-	default: return nullptr;
+	if (id >= (uint32_t)kMsgSupply && id < (uint32_t)(kMsgSupply + kSupplyValues)) {
+		return kSupplyNames[id - kMsgSupply];
 	}
+	for (const Row& r : kRowDefs) {
+		if (id == (uint32_t)(kMsgItemName + r.item)) {
+			return r.label;
+		}
+	}
+	return nullptr;
 }
 
 namespace {
@@ -427,25 +604,55 @@ Bytes RowsScript()
 {
 	const uint8_t kGetVariable = 0x1c, kGetMember = 0x4e, kSetMember = 0x4f, kCallMethod = 0x52, kPop = 0x17, kInitArray = 0x42;
 	Avm1 a;
-	for (int c = 0; c < 14; c++) { // the categories with the 7 stock rows (the C++ table agrees)
-		a.Push({kRowItems[2], kRowItems[1], kRowItems[0], kRows});
+	const uint8_t kSubtract = 0x0b;
+	auto pageArray = [&](int pageNo, int c) {
 		a.Push("OnlineRule");
 		a.Action(kGetVariable);
-		a.Push("sub1ItemArray");
+		a.Push(pageNo == kPageSettings2 ? "sub1ItemArray" : "sub2ItemArray");
 		a.Action(kGetMember);
 		a.Push({c});
 		a.Action(kGetMember);
+	};
+	for (int c = 0; c < kRowCategories; c++) { // the same categories as PatchRowTable
+		// Settings 2: sub1ItemArray[c].push(items...)
+		int n = 0;
+		for (int i = kRows - 1; i >= 0; i--) {
+			if (kRowDefs[i].page == kPageSettings2) {
+				a.Push({kRowDefs[i].item});
+				n++;
+			}
+		}
+		a.Push({n});
+		pageArray(kPageSettings2, c);
 		a.Push("push");
 		a.Action(kCallMethod);
 		a.Action(kPop);
+		// Settings 3: sub2ItemArray[c].splice(length - 1, 0, items...) (before the cross-play row)
+		n = 0;
+		for (int i = kRows - 1; i >= 0; i--) {
+			if (kRowDefs[i].page == kPageSettings3) {
+				a.Push({kRowDefs[i].item});
+				n++;
+			}
+		}
+		a.Push({0});
+		pageArray(kPageSettings3, c);
+		a.Push("length");
+		a.Action(kGetMember);
+		a.Push({1});
+		a.Action(kSubtract);
+		a.Push({n + 2});
+		pageArray(kPageSettings3, c);
+		a.Push("splice");
+		a.Action(kCallMethod);
+		a.Action(kPop);
 	}
-	const int bases[kRows] = {kMsgSecondary, kMsgOffOn, kMsgOffOn};
-	for (int i = 0; i < kRows; i++) {
+	for (const Row& r : kRowDefs) {
 		a.Push("OnlineRule");
 		a.Action(kGetVariable);
 		a.Push("offsetArray");
 		a.Action(kGetMember);
-		a.Push({kRowItems[i], kRowDataNo[i], bases[i], 2});
+		a.Push({r.item, r.dataNo, r.msgBase, 2});
 		a.Action(kInitArray);
 		a.Action(kSetMember);
 	}
