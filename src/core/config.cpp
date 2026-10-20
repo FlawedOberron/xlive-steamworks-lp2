@@ -237,6 +237,8 @@ bool ConfigLoad()
 			config.mapsDir = PathSetting(root["mods"]["maps_dir"], config.mapsDir);
 			config.partsDir = PathSetting(root["mods"]["parts_dir"], config.partsDir);
 			config.partsAnyFaction = root["mods"]["parts_any_faction"].GetBool(false);
+			config.rulesUnlimitedAmmo = root["mods"]["rules"]["unlimited_ammo"].GetBool(false);
+			config.rulesUnlimitedGrenades = root["mods"]["rules"]["unlimited_grenades"].GetBool(false);
 			config.modCacheDir = PathSetting(root["mods"]["cache_dir"], config.modCacheDir);
 			for (const Json& name : root["mods"]["disabled"].Elements()) {
 				if (name.IsString() && !name.GetString(std::string()).empty()) {
