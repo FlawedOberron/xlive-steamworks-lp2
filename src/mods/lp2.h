@@ -1,6 +1,8 @@
 // Lost Planet 2 specific mods, enabled from the "mods" section of the configuration.
 #pragma once
 
+#include <stdint.h>
+
 #include <string>
 #include <vector>
 
@@ -21,6 +23,11 @@ bool MapsTryInstall(unsigned char* base);
 void MapsPatchPickers(unsigned char* base);
 // Extra match rules (rules.cpp): unlimited ammo / grenades. The host's apply in its lobby.
 void RulesInstall(unsigned char* base);
+// The create-match rows of our rules (offsets 0x2e.. of the rules bytes): steps one (true when it
+// was ours), answers our MsgOnline texts, adds the rows to the menu's Flash (id221 GFx).
+bool RulesStep(int rule, int key, uint8_t* value);
+const char* RulesMessage(uint32_t id);
+bool RulesPatchMenuFlash(std::vector<uint8_t>* gfx);
 // A map package was bound to online slot 13 / 14 (packages.cpp): its base map's preload list and its size class.
 void MapsRebind(int slot, int base, int size);
 

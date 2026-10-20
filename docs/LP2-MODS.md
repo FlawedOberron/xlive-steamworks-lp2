@@ -125,6 +125,20 @@ in create match, pressing left / right on the map row at the first custom map st
 package before moving on to the stock maps. The last pick is remembered. Players joining get the
 host's pick sent to them.
 
+## Match rules
+
+Create match → **Settings 2** has three extra rows, saved with the match settings:
+
+| Row | Values |
+|---|---|
+| Default Secondary | None / Sidearm / Standard / Short / Long / Heavy / Special: spawn with it as the carried second weapon |
+| Unlimited Ammo | Off / On: the reserve never drops (shown as ∞); the magazine still empties and reloads |
+| Unlimited Grenades | Off / On: throwing doesn't use them up |
+
+The host's rules apply to everyone in its lobby (every player needs this DLL, since each PC runs its
+own weapons). Until create match has been opened once, `"mods": {"rules": {"unlimited_ammo": true,
+"unlimited_grenades": true, "secondary": "sidearm"}}` in the configuration sets them.
+
 ## Parts\ (custom character parts)
 
 Drop the exporter's `LPC_<id>` folder in as is, or zip it:

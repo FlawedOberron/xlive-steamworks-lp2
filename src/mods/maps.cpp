@@ -341,17 +341,26 @@ using SoundFn = void(__attribute__((thiscall)) *)(void*, uint32_t, uint32_t, voi
 StepFn g_stepOriginal = nullptr;
 MessageFn g_messageOriginal = nullptr;
 
+void StepSound(void* screen)
+{
+	const PickerVas& va = kPickerVas[g_build];
+	auto sound = (SoundFn)(uintptr_t)va.sound;
+	sound(*(void**)(uintptr_t)va.soundOwner, *(uint32_t*)(*(uint8_t**)(uintptr_t)va.soundIds + 0x78), 7, screen, 0);
+}
+
 int __attribute__((thiscall)) RuleStep(void* screen, int key, uint8_t* value, int max, int min, int rule, char wrap)
 {
+	if (RulesStep(rule, key, value)) {
+		StepSound(screen);
+		return 1;
+	}
 	if (rule != kRuleMap || (key != 10 && key != 11)) {
 		return g_stepOriginal(screen, key, value, max, min, rule, wrap);
 	}
 	int step = key == 10 ? 1 : -1;
 	uint8_t was = *value;
 	if (was == 13 && PackagesPick(step, false)) {
-		const PickerVas& va = kPickerVas[g_build];
-		auto sound = (SoundFn)(uintptr_t)va.sound;
-		sound(*(void**)(uintptr_t)va.soundOwner, *(uint32_t*)(*(uint8_t**)(uintptr_t)va.soundIds + 0x78), 7, screen, 0);
+		StepSound(screen);
 		return 1;
 	}
 	int changed = g_stepOriginal(screen, key, value, max, min, rule, wrap);
@@ -372,6 +381,9 @@ int __attribute__((thiscall)) RuleStep(void* screen, int key, uint8_t* value, in
 
 const char* __attribute__((thiscall)) Message(void* messages, const char* file, uint32_t id, uint32_t lang)
 {
+	if (const char* text = file && strcmp(file, "MsgOnline") == 0 ? RulesMessage(id) : nullptr) {
+		return text;
+	}
 	if ((id == kMsgMapName + 13 || id == kMsgMapName + 14) && file && strcmp(file, "MsgOnline") == 0) {
 		if (const char* name = PackagesSlotName((int)(id - kMsgMapName))) {
 			static bool logged = false;
