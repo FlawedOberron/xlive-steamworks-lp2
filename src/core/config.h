@@ -116,6 +116,7 @@ struct Config {
 	bool partsAnyFaction = false;       // "mods": {"parts_any_faction": true}: every part (stock and custom) for every faction.
 	bool rulesUnlimitedAmmo = false;    // "mods": {"rules": {"unlimited_ammo": true}}: our matches' extra rules (until the
 	bool rulesUnlimitedGrenades = false; // create-match rows exist); hosts' rules apply in their lobbies.
+	std::string rulesSecondary;         // "mods": {"rules": {"secondary": "sidearm"}}: spawn with it as the second weapon.
 	std::wstring partsDir;              // <exe dir>\Parts\ ("mods": {"parts_dir": ...}): part packages (.zip).
 	std::wstring modCacheDir;           // <exe dir>\ModCache\: unpacked and generated files.
 	std::vector<std::wstring> modsEnabled; // If set, only these overlay mods, in this order (later ones win).

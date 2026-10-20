@@ -239,6 +239,7 @@ bool ConfigLoad()
 			config.partsAnyFaction = root["mods"]["parts_any_faction"].GetBool(false);
 			config.rulesUnlimitedAmmo = root["mods"]["rules"]["unlimited_ammo"].GetBool(false);
 			config.rulesUnlimitedGrenades = root["mods"]["rules"]["unlimited_grenades"].GetBool(false);
+			config.rulesSecondary = root["mods"]["rules"]["secondary"].GetString(std::string());
 			config.modCacheDir = PathSetting(root["mods"]["cache_dir"], config.modCacheDir);
 			for (const Json& name : root["mods"]["disabled"].Elements()) {
 				if (name.IsString() && !name.GetString(std::string()).empty()) {
