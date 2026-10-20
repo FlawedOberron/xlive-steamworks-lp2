@@ -1,6 +1,7 @@
 #include "core/json.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 
 namespace xls {
@@ -364,6 +365,62 @@ int64_t Json::GetInt(int64_t fallback) const
 		}
 	}
 	return fallback;
+}
+
+std::string Json::Quote(const std::string& text)
+{
+	std::string out = "\"";
+	for (unsigned char c : text) {
+		if (c == '"' || c == '\\') {
+			out += '\\';
+			out += (char)c;
+		}
+		else if (c < 0x20) {
+			char esc[8];
+			snprintf(esc, sizeof(esc), "\\u%04x", c);
+			out += esc;
+		}
+		else {
+			out += (char)c;
+		}
+	}
+	return out + "\"";
+}
+
+std::string Json::Write() const
+{
+	switch (m_type) {
+	case Type::Bool:
+		return m_bool ? "true" : "false";
+	case Type::Number: {
+		char text[32];
+		if (m_number == (double)(int64_t)m_number && m_number > -1e15 && m_number < 1e15) {
+			snprintf(text, sizeof(text), "%lld", (long long)m_number);
+		}
+		else {
+			snprintf(text, sizeof(text), "%.17g", m_number);
+		}
+		return text;
+	}
+	case Type::String:
+		return Quote(m_string);
+	case Type::Array: {
+		std::string out = "[";
+		for (size_t i = 0; i < m_array.size(); i++) {
+			out += (i ? "," : "") + m_array[i].Write();
+		}
+		return out + "]";
+	}
+	case Type::Object: {
+		std::string out = "{";
+		for (size_t i = 0; i < m_object.size(); i++) {
+			out += (i ? "," : "") + Quote(m_object[i].first) + ":" + m_object[i].second.Write();
+		}
+		return out + "}";
+	}
+	default:
+		return "null";
+	}
 }
 
 }

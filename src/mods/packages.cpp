@@ -502,6 +502,50 @@ std::shared_ptr<xls::TransferSource> ServeMap(const std::string& hash)
 	return source;
 }
 
+// The transfer test (ModCache\maps\loopback.txt): our bound maps come again from a loopback
+// "host" over the transfer protocol, and those downloaded copies play instead (packages
+// "loopback-<hash>", unpacked from the downloaded zip). Match starts wait for it like for a host's.
+const uint64_t kLoopbackHost = 0x01100001fffffff1ull;
+
+DWORD WINAPI LoopbackThread(LPVOID)
+{
+	std::vector<std::pair<int, std::string>> wanted; // (slot index, hash)
+	{
+		std::lock_guard<std::recursive_mutex> lock(g_mutex);
+		for (int k = 0; k < 2; k++) {
+			if (g_default[k] >= 0 && g_downloading.insert(g_all[g_default[k]].hash).second) {
+				wanted.emplace_back(k, g_all[g_default[k]].hash);
+			}
+		}
+	}
+	for (const auto& w : wanted) {
+		const std::string& hash = w.second;
+		std::wstring path = Cfg().modCacheDir + L"maps\\loopback\\" + Utf8ToWide(hash.c_str()) + L".zip";
+		MapPackage map;
+		map.hash = hash;
+		map.package = L"loopback-" + Utf8ToWide(hash.c_str());
+		map.zip = path;
+		map.remote = true;
+		Zip zip;
+		bool ok = xls::TransferFetch(kLoopbackHost, "map", hash, kMaxMapDownload, path);
+		if (ok && HashFile(path) != hash) {
+			XLS_LOG_WARN("mods: loopback test: map %s arrived different from what was sent.", hash.c_str());
+			ok = false;
+		}
+		ok = ok && zip.Open(path) && ReadManifest(zip, map.package, &map);
+		std::lock_guard<std::recursive_mutex> lock(g_mutex);
+		g_downloading.erase(hash);
+		if (!ok) {
+			XLS_LOG_WARN("mods: loopback test: map %s failed; the original stays in slot %d.", hash.c_str(), kSlots[w.first]);
+			continue;
+		}
+		g_all.push_back(map);
+		g_default[w.first] = (int)g_all.size() - 1; // bound by the next Reconcile (outside matches)
+		XLS_LOG_INFO("mods: loopback test: map \"%s\" (%s) came through intact; slot %d plays the downloaded copy.", map.name.c_str(), hash.c_str(), kSlots[w.first]);
+	}
+	return 0;
+}
+
 void Load()
 {
 	ConfigEnsureLoaded();
@@ -510,6 +554,14 @@ void Load()
 		LoadMaps();
 	}
 	xls::TransferRegister("map", ServeMap);
+	if (GetFileAttributesW((Cfg().modCacheDir + L"maps\\loopback.txt").c_str()) != INVALID_FILE_ATTRIBUTES) {
+		xls::TransferAddLoopback(kLoopbackHost);
+		XLS_LOG_INFO("mods: loopback test on (maps\\loopback.txt): fetching our maps from ourselves.");
+		HANDLE t = CreateThread(nullptr, 0, LoopbackThread, nullptr, 0, nullptr);
+		if (t) {
+			CloseHandle(t);
+		}
+	}
 	xls::ContentAddPending([] {
 		std::lock_guard<std::recursive_mutex> lock(g_mutex);
 		return g_unbound || !g_downloading.empty();

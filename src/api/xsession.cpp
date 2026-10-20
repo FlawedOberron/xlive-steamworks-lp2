@@ -811,6 +811,7 @@ void OnLobbyChatUpdate(const LobbyChatUpdate_t& update)
 	if (update.m_rgfChatMemberStateChange & k_EChatMemberStateChangeEntered) {
 		SteamFriends()->SetPlayedWith(changed);
 		NetSecureAddrFor(changed);
+		xls::ContentSettle();
 		XLS_LOG_DEBUG("session: %llu joined lobby %llu.", changed.ConvertToUint64(), update.m_ulSteamIDLobby);
 	}
 	else if (BChatMemberStateChangeRemoved(update.m_rgfChatMemberStateChange)) {
@@ -939,6 +940,7 @@ DWORD WINAPI XSessionCreate(DWORD dwFlags, DWORD dwUserIndex, DWORD dwMaxPublicS
 			session->info.sessionID = KidFromLobby(session->lobby);
 			PublishSession(*session);
 			PublishRichPresenceConnect(session.get());
+			xls::ContentSettle();
 			xls::MemberDataLobbyEntered(session->lobby.ConvertToUint64());
 			*pqwSessionNonce = session->nonce;
 			*pSessionInfo = session->info;
@@ -995,6 +997,7 @@ DWORD WINAPI XSessionCreate(DWORD dwFlags, DWORD dwUserIndex, DWORD dwMaxPublicS
 			xls::SteamFriends()->SetPlayedWith(host);
 		}
 		PublishRichPresenceConnect(session.get());
+		xls::ContentSettle();
 		xls::MemberDataLobbyEntered(session->lobby.ConvertToUint64());
 		*pqwSessionNonce = session->nonce;
 		*pSessionInfo = session->info;

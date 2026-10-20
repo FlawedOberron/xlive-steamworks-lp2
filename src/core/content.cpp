@@ -21,6 +21,8 @@ std::map<uint64_t, std::string> g_values; // member -> their "content"
 uint64_t g_waitLobby = 0;
 bool g_localReady = true;
 int g_localPercent = 100;
+DWORD g_settleUntil = 0; // GetTickCount() until which lobbies count as not ready (0 = none)
+const DWORD kSettleMs = 2500;
 
 // "dl <percent>" -> percent; "ready" (or anything else) -> 100.
 int PercentOf(const std::string& value)
@@ -113,6 +115,10 @@ bool ContentLobbyReady(uint64_t lobby, int* waiting, int* percent)
 	std::lock_guard<std::mutex> lock(g_mutex);
 	*waiting = 0;
 	*percent = 100;
+	if (g_settleUntil && (int32_t)(GetTickCount() - g_settleUntil) < 0) {
+		++*waiting; // a member just arrived: their content isn't known yet
+		*percent = 0;
+	}
 	if (!g_localReady) {
 		++*waiting;
 		*percent = g_localPercent;
@@ -126,6 +132,12 @@ bool ContentLobbyReady(uint64_t lobby, int* waiting, int* percent)
 		*percent = std::min(*percent, PercentOf(it->second));
 	}
 	return *waiting == 0;
+}
+
+void ContentSettle()
+{
+	std::lock_guard<std::mutex> lock(g_mutex);
+	g_settleUntil = (GetTickCount() + kSettleMs) | 1;
 }
 
 void ContentStartWaiting(uint64_t lobby)

@@ -45,6 +45,9 @@ public:
 
 	const std::vector<std::pair<std::string, Json>>& Items() const { return m_object; }
 	const std::vector<Json>& Elements() const { return m_array; }
+	// Compact text, objects in their order (the same text for the same value on every PC).
+	std::string Write() const;
+	static std::string Quote(const std::string& text);
 
 private:
 	struct Parser;

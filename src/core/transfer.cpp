@@ -7,8 +7,10 @@
 #include <windows.h>
 
 #include <condition_variable>
+#include <deque>
 #include <map>
 #include <mutex>
+#include <set>
 #include <vector>
 
 namespace xls {
@@ -46,8 +48,19 @@ SteamNetworkingIdentity Identity(uint64_t steamId)
 	return identity;
 }
 
+std::mutex g_loopMutex;
+std::set<uint64_t> g_loopPeers;
+std::deque<std::pair<uint64_t, std::vector<uint8_t>>> g_loop; // (peer, message) for the pump
+
 bool Send(uint64_t peer, const std::vector<uint8_t>& message)
 {
+	{
+		std::lock_guard<std::mutex> lock(g_loopMutex);
+		if (g_loopPeers.count(peer)) {
+			g_loop.emplace_back(peer, message);
+			return true;
+		}
+	}
 	for (int tries = 0; tries < 200; tries++) {
 		if (!SteamReady() || !SteamNetworkingMessages()) {
 			return false;
@@ -287,6 +300,15 @@ DWORD WINAPI PumpThread(LPVOID)
 			OnMessage(messages[i]->m_identityPeer.GetSteamID64(), (const uint8_t*)messages[i]->m_pData, (size_t)messages[i]->m_cbSize);
 			messages[i]->Release();
 		}
+		std::deque<std::pair<uint64_t, std::vector<uint8_t>>> loop;
+		{
+			std::lock_guard<std::mutex> lock(g_loopMutex);
+			loop.swap(g_loop);
+		}
+		for (const auto& m : loop) {
+			OnMessage(m.first, m.second.data(), m.second.size());
+		}
+		count += (int)loop.size();
 		Sleep(count ? 0 : 5);
 	}
 }
@@ -378,6 +400,12 @@ bool TransferFetch(uint64_t steamId, const std::string& kind, const std::string&
 	XLS_LOG_INFO("transfer: got %s %s (%llu bytes) in %lu ms (%llu KB/s).", kind.c_str(), hash.c_str(), (unsigned long long)f.size, ms,
 	             (unsigned long long)(ms ? f.size / ms : 0));
 	return true;
+}
+
+void TransferAddLoopback(uint64_t peer)
+{
+	std::lock_guard<std::mutex> lock(g_loopMutex);
+	g_loopPeers.insert(peer);
 }
 
 int TransferProgress(uint64_t* received, uint64_t* total)

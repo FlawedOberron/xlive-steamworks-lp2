@@ -118,12 +118,49 @@ bool ParseManifest(const Bytes& text, const std::wstring& source, PartSet* set)
 }
 
 // Set bundle: the files a set is made of (lpc.json, its models and textures; flat names), sorted
-// by lower-case name: "LPCB" u32 count, then per file u16 name length, name, u32 size, data. What
-// players send each other; its FNV-1a 64 (16 hex) names the set's content on every PC.
+// by lower-case name: "LPCB" u32 count, then per file u16 name length, name, u32 size, data. Its
+// FNV-1a 64 (16 hex) names the content on every PC. Players send each other part bundles (only = a
+// PartSlot): that part's files and an lpc.json cut down to it, so a player wearing one part of a
+// big set gets only that part, and editing one part leaves the others' hashes alone.
 const size_t kMaxBundle = 64u << 20;
 
-bool MakeBundle(const std::wstring& dir, const PartSet& set, Bytes* out)
+// dir's lpc.json with "parts" cut down to part s (compact; the same text on every PC).
+bool PartManifest(const std::wstring& dir, int s, Bytes* out)
 {
+	Bytes text;
+	Json root;
+	std::string error;
+	if (!ReadWholeFile(dir + L"lpc.json", &text) || !Json::Parse(std::string(text.begin(), text.end()), root, &error) || !root.IsObject()) {
+		return false;
+	}
+	std::string json = "{";
+	for (const auto& item : root.Items()) {
+		json += (json.size() > 1 ? "," : "") + Json::Quote(item.first) + ":";
+		if (item.first == "parts") {
+			// the slot names as the manifest spells them ("Body" and "body" both load)
+			std::string part;
+			for (const auto& p : item.second.Items()) {
+				if (_stricmp(p.first.c_str(), kSlotNames[s]) == 0) {
+					part = Json::Quote(p.first) + ":" + p.second.Write();
+				}
+			}
+			json += "{" + part + "}";
+		}
+		else {
+			json += item.second.Write();
+		}
+	}
+	json += "}";
+	out->assign(json.begin(), json.end());
+	return true;
+}
+
+bool MakeBundle(const std::wstring& dir, const PartSet& set, Bytes* out, int only = -1)
+{
+	Bytes manifest;
+	if (only >= 0 && !PartManifest(dir, only, &manifest)) {
+		return false;
+	}
 	std::map<std::string, std::wstring> files; // lower-case name -> path
 	auto add = [&](const std::wstring& path) {
 		std::wstring leaf = path.substr(path.find_last_of(L"\\/") + 1);
@@ -136,6 +173,9 @@ bool MakeBundle(const std::wstring& dir, const PartSet& set, Bytes* out)
 	};
 	add(dir + L"lpc.json");
 	for (int s = 0; s < kPartSlotCount; s++) {
+		if (only >= 0 && s != only) {
+			continue;
+		}
 		if (!set.models[s].empty()) {
 			add(set.models[s]);
 		}
@@ -158,7 +198,13 @@ bool MakeBundle(const std::wstring& dir, const PartSet& set, Bytes* out)
 	put32((uint32_t)files.size());
 	for (const auto& f : files) {
 		Bytes data;
-		if (!ReadWholeFile(f.second, &data) || out->size() + data.size() > kMaxBundle) {
+		if (only >= 0 && f.first == "lpc.json") {
+			data = manifest;
+		}
+		else if (!ReadWholeFile(f.second, &data)) {
+			return false;
+		}
+		if (out->size() + data.size() > kMaxBundle) {
 			return false;
 		}
 		out->push_back((uint8_t)f.first.size());
@@ -380,6 +426,14 @@ void LoadFolder(const std::wstring& dir, const std::wstring& label, std::vector<
 	Bytes bundle;
 	if (MakeBundle(dir, set, &bundle)) {
 		set.hash = BundleHash(bundle);
+	}
+	for (int s = 0; s < kPartSlotCount; s++) {
+		if (!set.models[s].empty() && MakeBundle(dir, set, &bundle, s)) {
+			set.partHash[s] = BundleHash(bundle);
+		}
+		else if (!set.models[s].empty()) {
+			XLS_LOG_WARN("mods: parts %ls: %s is over %zu MB; other players won't get it.", label.c_str(), kSlotNames[s], kMaxBundle >> 20);
+		}
 	}
 	XLS_LOG_INFO("mods: part set \"%s\" (%s, %s, %s): %s.", set.name.c_str(), set.id.c_str(), set.faction.c_str(), set.hash.c_str(), slots.c_str());
 	target->push_back(set);
@@ -1249,7 +1303,7 @@ void BuildPackages()
 			} while (!tokens.insert(tok).second);
 			PartPackage pkg;
 			if (!set->models[s].empty() && BuildPackage(*set, s, kCarrierItem, &pkg, tok)) {
-				pkg.setHash = set->hash;
+				pkg.setHash = set->partHash[s];
 				g_carrierSets[s].push_back(pkg);
 			}
 		}
@@ -1583,37 +1637,45 @@ std::wstring SetFolder(const PartSet& set)
 	return std::wstring();
 }
 
-// The transport: the bundle with this hash from member. The fake member reads its library; real
-// players send it over xls::TransferFetch (core/transfer.cpp).
+// The transport: the bundle with this hash from member, over xls::TransferFetch
+// (core/transfer.cpp). The fake member is a loopback peer: its library is served by ServeBundle.
 bool FetchBundle(uint64_t member, const std::string& hash, Bytes* bundle)
 {
-	if (member == kFakeMember) {
-		for (const PartSet& set : g_fakeSets) {
-			if (set.hash == hash) {
-				std::wstring dir = set.source + L"\\";
-				return MakeBundle(dir, set, bundle);
-			}
-		}
-		return false;
-	}
 	std::wstring file = Cfg().modCacheDir + L"parts\\remote\\" + Utf8ToWide(hash.c_str()) + L".lpcb";
 	bool ok = xls::TransferFetch(member, "part", hash, kMaxBundle, file) && ReadWholeFile(file, bundle);
 	DeleteFileW(file.c_str());
 	return ok;
 }
 
-// What we send others: the bundle of one of our own sets, by hash.
+// What we send others: the bundle of one of our own sets (or the fake member's library), by hash.
 std::shared_ptr<xls::TransferSource> ServeBundle(const std::string& hash)
 {
 	if (hash.empty()) {
 		return nullptr;
 	}
+	std::vector<std::pair<PartSet, std::wstring>> sets; // (set, its folder)
 	for (const PartSet& set : PartSets()) {
-		if (set.hash != hash) {
+		sets.emplace_back(set, SetFolder(set));
+	}
+	for (const PartSet& set : g_fakeSets) {
+		sets.emplace_back(set, set.source + L"\\");
+	}
+	for (const auto& entry : sets) {
+		const PartSet& set = entry.first;
+		int only = -2; // -1 = the whole set (what older builds ask for), else the part
+		for (int s = 0; s < kPartSlotCount; s++) {
+			if (set.partHash[s] == hash) {
+				only = s;
+			}
+		}
+		if (set.hash == hash) {
+			only = -1;
+		}
+		if (only == -2) {
 			continue;
 		}
 		auto bundle = std::make_shared<Bytes>();
-		if (!MakeBundle(SetFolder(set), set, bundle.get()) || BundleHash(*bundle) != hash) {
+		if (!MakeBundle(entry.second, set, bundle.get(), only) || BundleHash(*bundle) != hash) {
 			return nullptr; // changed on disk since it was loaded
 		}
 		auto source = std::make_shared<xls::TransferSource>();
@@ -1665,7 +1727,11 @@ DWORD WINAPI RemoteSetThread(LPVOID param)
 		LoadFolder(dir, L"remote " + Utf8ToWide(hash.c_str()), &sets);
 	}
 	int built = 0;
-	if (sets.size() == 1 && sets[0].hash == hash) {
+	bool matches = sets.size() == 1 && sets[0].hash == hash; // a part bundle (or an older build's whole set)
+	for (int s = 0; s < kPartSlotCount && sets.size() == 1; s++) {
+		matches = matches || sets[0].partHash[s] == hash;
+	}
+	if (matches) {
 		PartSet set = sets[0];
 		std::string shown = set.id;
 		set.id += "-" + hash.substr(0, 8); // its build folder and model names apart from any local set
@@ -1809,7 +1875,7 @@ void LoadFakeMember()
 		for (const PartSet& set : g_fakeSets) {
 			for (int s = 0; s < kPartSlotCount; s++) {
 				if (!set.models[s].empty()) {
-					value += std::string(";d.") + kSlotNames[s] + "=" + set.id + ":" + set.hash;
+					value += std::string(";d.") + kSlotNames[s] + "=" + set.id + ":" + set.partHash[s];
 				}
 			}
 		}
@@ -1819,7 +1885,16 @@ void LoadFakeMember()
 		return;
 	}
 	g_fakeSlot = slot;
-	XLS_LOG_INFO("mods: parts: fake member plays slot %d (%zu library set(s)).", slot, g_fakeSets.size());
+	// its sets come over the transfer protocol (loopback), fresh each start
+	xls::TransferAddLoopback(kFakeMember);
+	for (const PartSet& set : g_fakeSets) {
+		for (int s = 0; s < kPartSlotCount; s++) {
+			if (!set.partHash[s].empty()) {
+				RemoveTree(Cfg().modCacheDir + L"parts\\remote\\" + Utf8ToWide(set.partHash[s].c_str()) + L"\\");
+			}
+		}
+	}
+	XLS_LOG_INFO("mods: parts: fake member plays slot %d (%zu library set(s), sent over the transfer loopback).", slot, g_fakeSets.size());
 	xls::MemberDataInject(kFakeMember, "parts", value);
 }
 

@@ -28,6 +28,11 @@ void TransferRegister(const std::string& kind, TransferProvider provider);
 bool TransferFetch(uint64_t steamId, const std::string& kind, const std::string& hash, uint64_t maxBytes,
                    const std::wstring& path, uint32_t stallMs = 20000);
 
+// Test peers that never leave this process (the mods' fake member / fake host): what we send one
+// is handled here as if it came from it, so a fetch from it runs the whole protocol against our
+// own providers.
+void TransferAddLoopback(uint64_t peer);
+
 // Downloads running now: how many, and their bytes received / total (sizes not yet known count 0).
 int TransferProgress(uint64_t* received, uint64_t* total);
 
