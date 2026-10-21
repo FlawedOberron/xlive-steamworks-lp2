@@ -1,108 +1,86 @@
-# xlive-steamworks
+# Lost Planet 2 (Recolonised)
 
-A Games for Windows LIVE `xlive.dll` wrapper that routes to the Steamworks SDK backend.
+Online play and a mod loader for **Lost Planet 2** on Steam: a replacement `xlive.dll` that swaps
+the dead Games for Windows LIVE for Steamworks, with quality-of-life options, extra match rules and
+custom map packages on top.
 
-Two ways to use it:
+## Thanks
 
-- **Drop-in dll.** Ship `xlive.dll` and `steam_api.dll` next to the exe. No source change.
-- **SDK.** Link the static library, include `xlive/xfuncs.h` in place of the GFWL headers, and
-  call `xlive/xlive_steamworks.h` where you want to reach the Steam objects behind an XUID, a
-  session handle or a secure address.
+This project is built on **[xlive-steamworks](https://github.com/sokie/xlive-steamworks) by sokie**
+(MIT), the GFWL → Steamworks replacement that gets LP2's multiplayer working again: sign-in,
+lobbies, invites, networking, achievements and saves all come from sokie's work. Its original
+README, with how every GFWL call maps to Steam, is kept in
+[docs/XLIVE-STEAMWORKS.md](docs/XLIVE-STEAMWORKS.md).
 
-## Why
+Also thanks to [rlabrecque's Steamworks SDK mirror](https://github.com/rlabrecque/SteamworksSDK),
+which the build fetches.
 
-GFWL is long unsupported, and the titles built on it keep losing online play, achievements and
-cloud saves as publishers strip `xlive.dll` from their Steam builds. 
+## Download
 
-It is a work in progress. The export table is complete and there are initial tests,
-but only a few titles have been run with it (see below), and each new title
-turns up something. The Steamworks SDK is fetched from
-[rlabrecque's mirror](https://github.com/rlabrecque/SteamworksSDK). This project is not
-affiliated with Microsoft or Valve.
+Test builds are on the [Releases page](https://github.com/FlawedOberron/xlive-steamworks-lp2/releases)
+(marked *Pre-release*, so they don't show as "Latest"). Take the newest `lp2-recolonised-test.zip`.
 
-## Titles
+> **Experimental.** Expect bugs. Everyone in a match needs the same build for the match rules to apply
+> to them.
 
-Street Fighter X Tekken (the GFWL and the Steam build), Lost Planet 2 and Resident Evil: Operation
-Raccoon City run with the drop-in dll. Per-title folders, configs and notes live in
-[xlive-steamworks-games](https://github.com/sokie/xlive-steamworks-games). A title that imports
-nothing but `xlive.dll` needs only the two dlls and a config next to the exe.
+## Install
 
-## Status
+1. Steam → Lost Planet 2 → Manage → **Browse local files**.
+2. Rename the existing `xlive.dll` to `xlive.dll.capcom` (keeps a backup).
+3. Copy `xlive.dll`, `steam_api.dll` and `xlive_steamworks.json` from the zip into that folder.
+4. Linux / Steam Deck: set the launch option `WINE_LARGE_ADDRESS_AWARE=1 %command%`
+   (Windows: see [Memory](docs/LP2-MODS.md#memory-large-address-aware-recommended)).
+5. Play either the DirectX 9 or the DirectX 11 version. Online play uses Steam lobbies: invite through
+   Steam or Discord.
 
-| Area | State | Steam side |
-| --- | --- | --- |
-| Init, render, input, overlapped, enumerators, notifications | implemented | `SteamAPI_RunCallbacks` pump, `GameOverlayActivated_t` -> `XN_SYS_UI` |
-| Users, sign-in, privileges, contexts, properties | implemented | `ISteamUser`, `ISteamFriends` (persona), rich presence |
-| Achievements (write, enumerate, pictures) | implemented | `ISteamUserStats` achievements, SPA for text and art, stored to a file when the app has no Steam achievement schema |
-| Profile settings | implemented | one Steam Cloud file, defaults from Steam for the read-only ones |
-| Title managed storage (`XStorage*`) | implemented | Steam Cloud per user, local files next to the exe when the app's Cloud refuses API writes |
-| Friends, presence, invites | implemented | `ISteamFriends`, lobby invites, `+connect_lobby` |
-| Sessions, search, arbitration | implemented | `ISteamMatchmaking` lobbies and lobby data |
-| Stats and leaderboards | implemented | `ISteamUserStats` leaderboards, details array for extra columns |
-| Networking (`XNet*`, `XSocket*`, QoS) | implemented, UDP is the exercised path | `ISteamNetworkingMessages` (UDP), `ISteamNetworkingSockets` P2P (TCP), Winsock for title servers |
-| Guide UI (`XShow*`) | implemented | Steam overlay pages, native dialogs for keyboard and message box |
-| Content and marketplace (DLC) | implemented | `ISteamApps` DLC list, store overlay |
-| XLocator server list | implemented for peer hosted | tagged public lobbies |
-| Title servers (XLSP) | config driven | real addresses through Winsock |
-| Voice (`XHVCreateEngine`) | implemented, basic | Steam voice capture/decode, waveOut playback |
-| Protected data, PBuffer, data sections, updates | pass-through | not needed on Steam |
-| Guide custom actions, gamer picture awards, TrueSkill service | stubs | no Steam counterpart |
+**Undo:** delete the three files and rename `xlive.dll.capcom` back. Steam's "Verify integrity of game
+files" (or a game update) also puts Capcom's `xlive.dll` back; copy ours again afterwards.
 
-## How identity maps
+**Problems:** send `xlive_steamworks.log` from the game folder.
 
-Every identifier a title sees is derived from Steam's own, so two players never collide:
+## What it adds
 
-| GFWL | Value on Steam |
-| --- | --- |
-| `XUID` | `0x0009000000000000 | SteamAccountID` (LIVE-enabled, `IsOnlineXUID` holds). The inverse is `CSteamID(accountId, Public, Individual)` |
-| `XNKID` (session id) | the 64-bit Steam lobby id |
-| `XNKEY` | 16 random bytes made by the host, shared through lobby data |
-| `XNADDR` | pseudo 10.x.y.z from the account id, MAC from the account id, `abOnline` = SteamID64 + magic |
-| secure `IN_ADDR` | the peer's XNADDR `ina`, the same 10.x.y.z on every machine |
-| machine id | `0xFA00000000000000 | SteamAccountID` |
-| UDP port | SteamNetworkingMessages channel |
-| TCP port | SteamNetworkingSockets virtual port |
+- **Online play** through Steam lobbies, invites and Discord ("Playing Lost Planet 2 (Recolonised)").
+- **Match rules** in Create Match: default secondary weapon, unlimited ammo / grenades, ammo supply
+  (Dry to Excessive). The host's rules apply to everyone.
+- **Map packages** (`Maps\`): extra maps in the create-match picker.
+- **File mods** (`Mods\`) and **code plugins**, loaded from the game folder.
+- DirectX 9 and DirectX 11 both get every feature.
+
+In progress: Survival and Team Survival (limited respawns, last player / team standing, spectator
+camera, also for training's AI Enemy Battle), custom character parts, sharing maps and parts with the
+lobby. The full guide, folder layout and settings are in [docs/LP2-MODS.md](docs/LP2-MODS.md).
+
+## No game files
+
+Releases contain only this project's `xlive.dll`, Valve's `steam_api.dll` redistributable and an
+example settings file. Nothing from Capcom is shipped: anything the mods change is patched at run
+time from your own copy of the game.
 
 ## Building
 
+The dll is 32-bit (LP2 is a 32-bit game). The Steamworks SDK is fetched at a pinned revision unless
+`-DSTEAMWORKS_SDK_DIR=path/to/sdk` is given.
+
+Windows (Visual Studio):
+
 ```
-cmake -B build -G "Visual Studio 16 2019" -A Win32 -DSTEAMWORKS_SDK_DIR=path/to/sdk
+cmake -B build -G "Visual Studio 16 2019" -A Win32
 cmake --build build --config Release
 ```
 
-- GFWL titles are 32-bit, so build with `-A Win32`. A 64-bit build works and links
-  `steam_api64`.
-- Without `STEAMWORKS_SDK_DIR` the rlabrecque mirror of the SDK is fetched at the pinned
-  revision (v1.62).
-- The runtime is the static CRT. The dll depends on `steam_api.dll`, `ws2_32`, `winmm`,
-  `kernel32` and `user32` only.
-- `-DXLS_BUILD_TESTS=ON` adds `bin/xlive_smoke.exe`, which does tests against a running Steam
-  client: sign-in, notifications, achievements, profile and storage on Cloud, friends, sockets,
-  a real lobby, a leaderboard write and read. Put `steam_appid.txt` with the app id
-  next to it, or `480` (Spacewar) for testing only. `--spa Game.exe` loads a real title's SPA for the achievement list.
-  `--filters` checks Steam's lobby filters against a lobby shaped like GTA IV's ranked search,
-  `--query "4:0x10000056=9,..."` runs an XLAST query of the loaded SPA and logs the filters sent,
-  `--voice` runs the voice engine in loopback, and `--pair-host CODE` / `--pair-join CODE`
-  (`--relay-only`) run the two-machine network test.
-- Per-title release files in [xlive-steamworks-games](https://github.com/sokie/xlive-steamworks-games).
+Linux (MinGW-w64 cross compiler, `i686-w64-mingw32-g++`):
 
-## Known limits
+```
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=cmake/mingw32.cmake
+cmake --build build
+```
 
-- Host migration keeps the lobby. The elected host claims the lobby through its member data and
-  the current owner's wrapper hands it over. Until that happens, or until Steam times out a dead
-  owner, searchers still see the old host. Members follow the claim at once.
-- `XUserCreateStatsEnumeratorByRating` returns the top of the board since Steam cannot seek a
-  leaderboard by score. `XUserEstimateRankForRating` answers rank 1.
-- Other players' title managed storage is not readable (Steam Cloud is per account).
-- Headless dedicated servers advertised through `XLocator` are out of scope, but a listen server that
-  runs under a Steam client works. `XLocator` filter groups and sorters are not applied, so the
-  enumerator returns every advertised server of the title.
-- `XShowCustomPlayerListUI` opens the overlay's Players page and reports cancel, the title's
-  custom buttons cannot be shown.
-- Voice playback goes through waveOut with a simple per-talker stream, there is no mixing into
-  the title's audio device.
+The dll lands in `bin/xlive.dll`, with `steam_api.dll` and the example configuration next to it.
+More build options (tests, smoke tool) are in [docs/XLIVE-STEAMWORKS.md](docs/XLIVE-STEAMWORKS.md#building).
 
 ## License
 
-MIT. `src/third-party` carries its own licenses (zlib for puff, public domain for stb_image). The
-Steamworks SDK is Valve's and is not redistributed here.
+MIT, like xlive-steamworks (see [LICENSE](LICENSE)). `src/third-party` carries its own licenses. The
+Steamworks SDK is Valve's and is not redistributed here. Lost Planet 2 © Capcom; this project is not
+affiliated with Capcom, Microsoft or Valve.
