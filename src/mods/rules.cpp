@@ -100,10 +100,21 @@ struct RulesVas {
 	uint32_t menuHelp;    // a training menu's bottom bar text: thiscall(menu, MsgCinesco id) (DX11 FUN_00f45eb0)
 	uint32_t resultsSkip; // the results screen's `je` skipping its slot-present check offline (74 13)
 	uint32_t status;      // global -> the game status: +0x14594 flag bits (0x80000000 >> id), 0x4000000 = cockpit off
+	uint32_t listValue;   // the battle HUD's player list (DX11 FUN_00ed4c00): its sprintf call for a row's value
+	uint32_t sprintfFn;   // that sprintf
+	uint32_t gaugeFormat; // the "%d" it formats the Battle Gauge with
+	uint32_t listSlotAt[3]; // the list's calls of the results' slot at a rank (thiscall(results, rank) -> s8)
+	uint32_t listRankOf;    // its call of the results' rank of a slot (thiscall(results, slot) -> rank, from 1)
+	uint32_t listDraw;      // the list's draw, thiscall(list) (see TeamRows)
+	uint32_t flashGet;      // a movie's Flash variable get: thiscall(movie, name, value*) -> bool
+	uint32_t flashSet;      // and set: thiscall(movie, name, const value*) -> bool
+	uint32_t flashFree;     // a Flash value's release, thiscall(value)
+	uint32_t hudUpdate;     // the HUD manager's update, thiscall(hud): no HUD while +0x2c's player has no body
+	uint32_t teamBar;       // the cockpit's team gauge bar update (flash\cockpit\id755 mc_TEAM, top centre), thiscall(cockpit)
 };
 const RulesVas kRulesVas[] = {
-	{0xc7aa20, 0xc7a820, 0xeca930, 0x20fc, 0x8fb130, 0xe8c270, 0xf4a330, 0x17e9840, 0xc86160, 0x2180, 0xc7cf15, 0xecac50, 0xed1e00, 0x18e086c, 0x1852850, 0x8029c0, 0x1852144, 0x8ff650, 0x1852080, 0x8e5e30, 0x16f7c6c, 0x1008ef0, 0x1852238, 0x1009b90, 0x18520c0, 0xf44680, 0xf44760, 0xf4a390, 0x18e0860, 0x873b80, 0x873df6, 0x873d1f, 0x873d5d, 0xf45eb0, 0xeaa1ba, 0x18d08ac}, // DX11
-	{0xc6ae10, 0xc6ac10, 0xebab30, 0x20ec, 0x8eb7d0, 0xe7c1e0, 0xf3a600, 0x17d97e0, 0xc76550, 0x2170, 0xc6d305, 0xebae50, 0xec1ff0, 0x18ce780, 0x18427b0, 0x7f3b00, 0x18420a4, 0x8efcf0, 0x1841fe0, 0x8d64d0, 0x16e7098, 0xff8b10, 0x1842198, 0xff97b0, 0x1842020, 0xf34940, 0xf34a20, 0xf3a660, 0x18ce774, 0x8644d0, 0x864746, 0x86466f, 0x8646ad, 0xf36170, 0xe9a44a, 0x18c080c}, // DX9
+	{0xc7aa20, 0xc7a820, 0xeca930, 0x20fc, 0x8fb130, 0xe8c270, 0xf4a330, 0x17e9840, 0xc86160, 0x2180, 0xc7cf15, 0xecac50, 0xed1e00, 0x18e086c, 0x1852850, 0x8029c0, 0x1852144, 0x8ff650, 0x1852080, 0x8e5e30, 0x16f7c6c, 0x1008ef0, 0x1852238, 0x1009b90, 0x18520c0, 0xf44680, 0xf44760, 0xf4a390, 0x18e0860, 0x873b80, 0x873df6, 0x873d1f, 0x873d5d, 0xf45eb0, 0xeaa1ba, 0x18d08ac, 0xed506d, 0x1224239, 0x16d9ab4, {0xed4c78, 0xed4cc1, 0xed4cdc}, 0xed4e92, 0xed4c00, 0xf4a570, 0xf4a550, 0x77a680, 0xee09d0, 0xed61e0}, // DX11
+	{0xc6ae10, 0xc6ac10, 0xebab30, 0x20ec, 0x8eb7d0, 0xe7c1e0, 0xf3a600, 0x17d97e0, 0xc76550, 0x2170, 0xc6d305, 0xebae50, 0xec1ff0, 0x18ce780, 0x18427b0, 0x7f3b00, 0x18420a4, 0x8efcf0, 0x1841fe0, 0x8d64d0, 0x16e7098, 0xff8b10, 0x1842198, 0xff97b0, 0x1842020, 0xf34940, 0xf34a20, 0xf3a660, 0x18ce774, 0x8644d0, 0x864746, 0x86466f, 0x8646ad, 0xf36170, 0xe9a44a, 0x18c080c, 0xec525d, 0x1213e59, 0x16c9a24, {0xec4e68, 0xec4eb1, 0xec4ecc}, 0xec5082, 0xec4df0, 0xf3a840, 0xf3a820, 0x76b4e0, 0xed0bc0, 0xec63d0}, // DX9
 };
 // push esi; push edi; mov edi,[esp+0xc]; test di,di; (then jge rel32, left in place)
 const uint8_t kAddAmmoPrologue[] = {0x56, 0x57, 0x8b, 0x7c, 0x24, 0x0c, 0x66, 0x85, 0xff};
@@ -389,6 +400,9 @@ LocalSlotFn g_localSlot = nullptr;
 void** g_net = nullptr;
 std::atomic<int> g_localIndex{-1}; // the local player's match slot
 std::atomic<bool> g_out{false};     // Survival: the local player has no lives left
+// Team Survival: the slots out (bit by slot). The team's respawns are shared (lives - 1, as one
+// player's); once they are used up each player's next death is their last, the others play on.
+std::atomic<uint32_t> g_teamOut{0};
 
 // Survival: the match manager (global, DX11 0x18e086c) holds the match info owner at +0x144b4, whose
 // cInfoGame (+0x3e0) has mNetWork.dieCountPerson (+0x35c, s32 x 16 by match slot) and dieCountTeam
@@ -436,6 +450,13 @@ int32_t SlotTeam(int slot)
 	return setup && slot >= 0 && slot < 16 ? *(int32_t*)(setup + kSetupSlots + slot * kSetupSlot) : -1;
 }
 
+// Survival: the slot's deaths so far (synced to every PC), 0 when unknown.
+int SlotDeaths(int slot)
+{
+	uint8_t *mgr = *g_matchMgr ? (uint8_t*)*g_matchMgr : nullptr, *owner = mgr ? *(uint8_t**)(mgr + kMgrInfoOwner) : nullptr;
+	return owner && slot >= 0 && slot < 16 ? ((int32_t*)(owner + kOwnerInfoGame + kInfoDiePerson))[slot] : 0;
+}
+
 // Survival: the slot has no respawns left (its team none, in Team Survival).
 bool SlotOut(int slot)
 {
@@ -446,8 +467,17 @@ bool SlotOut(int slot)
 	if (!g_team) {
 		return ((int32_t*)(owner + kOwnerInfoGame + kInfoDiePerson))[slot] >= g_lives;
 	}
-	int32_t team = SlotTeam(slot);
-	return team >= 0 && team < 16 && ((int32_t*)(owner + kOwnerInfoGame + kInfoDieTeam))[team] >= g_lives;
+	return (g_teamOut >> slot) & 1;
+}
+
+// Team Survival: the team's deaths, summed from its players' (the order they came in decides who is out).
+int TeamDeaths(int team)
+{
+	int deaths = 0;
+	for (int slot = 0; slot < 16; slot++) {
+		deaths += SlotTeam(slot) == team ? SlotDeaths(slot) : 0;
+	}
+	return deaths;
 }
 
 // A slot worth watching: in play, alive (state 0), not out and, in Team Survival, on our team.
@@ -533,35 +563,330 @@ void RemoveBody(uint8_t* ctl)
 	XLS_LOG_INFO("mods: rules: survival: player %d is out, body removed.", slot);
 }
 
-// The cockpit (HUD) is off while the local player spectates: the game's own status flag (events set it;
-// the HUD update DX11 0xee1063 skips the cockpit while it is on). Only ever cleared if we set it; the
-// survival thread clears it too once nobody spectates (match over, quit).
-uint8_t** g_status = nullptr;
-const uint32_t kStatusFlags = 0x14594, kStatusCockpitOff = 0x4000000;
+// While the local player spectates, the cockpit's own-state parts are hidden (see CockpitShow; the
+// game's cockpit-off status flag would take the whole HUD). The survival thread ends it once nobody
+// spectates (match over, quit).
 std::atomic<bool> g_hudHidden{false};
 std::atomic<DWORD> g_hudTouched{0};
 
 void HideHud(bool hide)
 {
-	LONG* flags = g_status && *g_status ? (LONG*)(*g_status + kStatusFlags) : nullptr;
-	if (!flags || hide == g_hudHidden) {
-		if (hide) {
-			g_hudTouched = GetTickCount();
-		}
-		return;
-	}
-	if (hide && (*flags & kStatusCockpitOff)) {
-		return; // already off (an event): not ours to clear
-	}
 	if (hide) {
-		InterlockedOr(flags, kStatusCockpitOff);
 		g_hudTouched = GetTickCount();
-	} else {
-		InterlockedAnd(flags, ~(LONG)kStatusCockpitOff);
+	}
+	if (hide == g_hudHidden) {
+		return;
 	}
 	g_hudHidden = hide;
 	XLS_LOG_INFO("mods: rules: survival: HUD %s.", hide ? "hidden while spectating" : "back");
 }
+
+// The battle HUD's player list (top left: rank, name, value) shows each player's Battle Gauge
+// (results +0x103c, s32 by slot) in Elimination. In Survival (free for all) it shows the respawns left
+// instead, or ELIMINATED in red. Its sprintf call is redirected here; the gauge's slot comes from
+// the pointer the game holds in esi, the row's colour (ABGR) is the edi it draws with next.
+const char* g_gaugeFormat = nullptr;
+uint8_t** g_results = nullptr;
+const uint32_t kResultsGauge = 0x103c, kColourEliminated = 0xff3c3cff;
+
+extern "C" int __attribute__((cdecl)) ListValue(char* buf, const char* format, int value, uint8_t* gauge, uint32_t* colour)
+{
+	uint8_t* results = g_results ? *g_results : nullptr;
+	uint8_t* first = results ? results + kResultsGauge : nullptr;
+	if (g_survival && !g_team && g_lives > 0 && format == g_gaugeFormat && first && gauge >= first && gauge < first + 16 * 4) {
+		int slot = (int)(gauge - first) / 4;
+		if (SlotOut(slot)) {
+			*colour = kColourEliminated;
+			return sprintf(buf, "ELIMINATED");
+		}
+		int left = std::max(g_lives - 1 - SlotDeaths(slot), 0); // 0 on the last life
+		return left == 0 ? sprintf(buf, "Last Life") : sprintf(buf, left == 1 ? "%d Respawn" : "%d Respawns", left);
+	}
+	return sprintf(buf, format, value);
+}
+
+// Its order: in Survival (free for all) by lives left, then kills (results +0x193c), then the game's
+// own rank; equal lives and kills share a rank. The list's calls of the results' rank accessors
+// (count +0x9ecc, rank by slot +0x9ed0, slot by rank +0x9f10) are redirected here.
+const uint32_t kResultsCount = 0x9ecc, kResultsRankOf = 0x9ed0, kResultsSlotAt = 0x9f10, kResultsKills = 0x193c;
+
+bool ListSorted()
+{
+	return g_survival && !g_team && g_lives > 0;
+}
+
+// The slots in list order and their ranks (from 1); the count.
+int ListOrder(uint8_t* results, int8_t* slots, int* ranks)
+{
+	int n = *(int32_t*)(results + kResultsCount);
+	n = n < 0 ? 0 : n > 16 ? 16 : n;
+	int key[16];
+	for (int i = 0; i < n; i++) {
+		slots[i] = (int8_t)results[kResultsSlotAt + i];
+		int slot = slots[i] & 15;
+		int lives = SlotOut(slot) ? 0 : g_lives - SlotDeaths(slot);
+		key[i] = lives * 10000 + std::min(std::max(*(int32_t*)(results + kResultsKills + slot * 4), 0), 9999);
+	}
+	for (int i = 1; i < n; i++) { // stable: the game's order breaks ties
+		for (int j = i; j > 0 && key[j] > key[j - 1]; j--) {
+			std::swap(key[j], key[j - 1]);
+			std::swap(slots[j], slots[j - 1]);
+		}
+	}
+	for (int i = 0; i < n; i++) {
+		ranks[i] = i > 0 && key[i] == key[i - 1] ? ranks[i - 1] : i + 1;
+	}
+	return n;
+}
+
+extern "C" int __attribute__((thiscall)) ListSlotAt(uint8_t* results, int rank)
+{
+	if (!ListSorted()) {
+		return rank >= 0 && rank < 16 ? (int8_t)results[kResultsSlotAt + rank] : -1;
+	}
+	int8_t slots[16];
+	int ranks[16], n = ListOrder(results, slots, ranks);
+	return rank >= 0 && rank < n ? slots[rank] : -1;
+}
+
+extern "C" int __attribute__((thiscall)) ListRankOf(uint8_t* results, int slot)
+{
+	slot = (int8_t)slot;
+	if (slot < 0 || slot > 15) {
+		return 0;
+	}
+	if (!ListSorted()) {
+		return *(int32_t*)(results + kResultsRankOf + slot * 4);
+	}
+	int8_t slots[16];
+	int ranks[16], n = ListOrder(results, slots, ranks);
+	for (int i = 0; i < n; i++) {
+		if (slots[i] == slot) {
+			return ranks[i];
+		}
+	}
+	return *(int32_t*)(results + kResultsRankOf + slot * 4);
+}
+
+// thiscall (results, arg) wrappers keeping ecx and edx, as the game's leaf accessors do.
+extern "C" void __attribute__((naked)) ListSlotAtThunk()
+{
+	asm volatile("push %%ecx\n\tpush %%edx\n\tpushl 12(%%esp)\n\tcall %P0\n\tpop %%edx\n\tpop %%ecx\n\tret $4" ::"i"(ListSlotAt));
+}
+
+extern "C" void __attribute__((naked)) ListRankOfThunk()
+{
+	asm volatile("push %%ecx\n\tpush %%edx\n\tpushl 12(%%esp)\n\tcall %P0\n\tpop %%edx\n\tpop %%ecx\n\tret $4" ::"i"(ListRankOf));
+}
+
+// Team Survival: the list's draw returns at once for team rules (and still runs with the cockpit off,
+// while spectating), so its text call writes a line per
+// team instead, beside the team kill counters (flash\cockpit\id762 mc_Kill, top left): respawns
+// left, then the players still up, then Last Man Standing. The list builds its text style from a
+// 16-dword template plus constants, and the call is thiscall(text, list, string, {x, y, 12, 12},
+// 0, colour ABGR, style, 0, scale); the globals it uses are read from its own instructions.
+using ListDrawFn = void(__attribute__((thiscall)) *)(uint8_t*);
+using TextFn = void(__attribute__((thiscall)) *)(void*, uint8_t*, const char*, int32_t*, int, uint32_t, uint32_t*, int, float);
+ListDrawFn g_listDrawOriginal = nullptr;
+TextFn g_text = nullptr;
+void** g_textCtx = nullptr;
+const uint32_t* g_textStyle = nullptr;
+const uint16_t* g_textFont = nullptr;
+const uint32_t kListStyleAt = 0x143, kListFontAt = 0x272, kListCtxAt = 0x2d4, kListTextCall = 0x2d9; // from the list's start
+const uint32_t kResultsTeamKills = 0x197c, kColourRed = 0xff3c3cff, kColourBlue = 0xffff8c3c;
+std::atomic<int> g_teamRowsX{58}, g_teamRowsY{180}, g_teamRowsGap{13}; // team-hud.txt: x y gap (where the FFA list is)
+
+bool InPlay(int slot);
+
+void TeamRows(uint8_t* list)
+{
+	uint8_t* results = g_results ? *g_results : nullptr;
+	if (!g_survival || !g_team || g_lives <= 0 || !g_text || !*g_textCtx || !results) {
+		return;
+	}
+	uint32_t style[16];
+	memcpy(style, g_textStyle, sizeof(style));
+	float* f = (float*)style;
+	style[0] = 1; // left aligned (4: right)
+	style[1] = (style[1] & 0xffff0000) | *g_textFont;
+	style[2] = 1;
+	f[5] = f[6] = 0.6f;
+	f[7] = 1.13f;
+	f[8] = f[9] = 3.0f;
+	f[10] = 10.0f;
+	f[11] = 0.0f;
+	style[12] = style[13] = style[15] = 0;
+	f[14] = 1.0f;
+	// the leading team on top, as mc_Kill (red until blue has more kills)
+	static bool blueTop = false;
+	int32_t red = *(int32_t*)(results + kResultsTeamKills), blue = *(int32_t*)(results + kResultsTeamKills + 4);
+	blueTop = red == 0 && blue == 0 ? false : blue > red ? true : red > blue ? false : blueTop;
+	for (int row = 0; row < 2; row++) {
+		int team = row ^ blueTop;
+		int up = 0, members = 0;
+		for (int slot = 0; slot < 16; slot++) {
+			if (InPlay(slot) && SlotTeam(slot) == team) {
+				members++;
+				up += !SlotOut(slot);
+			}
+		}
+		if (!members) {
+			continue;
+		}
+		int left = std::max(g_lives - 1 - TeamDeaths(team), 0);
+		char text[48];
+		if (left > 0) {
+			sprintf(text, left == 1 ? "%d Respawn" : "%d Respawns", left);
+		} else if (up > 1) {
+			sprintf(text, "%d Alive", up);
+		} else {
+			sprintf(text, up == 1 ? "Last Man Standing" : "ELIMINATED");
+		}
+		int32_t rect[4] = {g_teamRowsX, g_teamRowsY + row * g_teamRowsGap, 12, 12};
+		g_text(*g_textCtx, list, text, rect, 0, team ? kColourBlue : kColourRed, style, 0, 1.0f);
+	}
+}
+
+// Survival hides the team gauge bar: its update (which shows it for Team Elimination) is skipped, the
+// match start's reset hides it.
+ListDrawFn g_teamBarOriginal = nullptr;
+
+void __attribute__((thiscall)) TeamBar(uint8_t* cockpit)
+{
+	if (!g_survival || !g_team || g_lives <= 0) {
+		g_teamBarOriginal(cockpit);
+	}
+}
+
+// Spectating hides the cockpit's movies that show the player's own state (their _root._visible): the
+// HUD manager (the list's owner) holds them as movie wrappers at +0x38..+0x64 (Flash at +0x24), told
+// apart by a clip of theirs: id750 LIFE, id751 weapons and T-ENG, id752 crosshair, id753 radar, id755
+// Battle Gauge, prompts and action text, id756/757 scopes. The list, messages (id759) and the team
+// counters stay. Applied on the list's draw (the game thread, every frame, also while spectating).
+struct FlashValue {
+	uint8_t flag;
+	uint32_t type; // 2 bool, 3 number
+	float number;
+};
+using FlashGetFn = bool(__attribute__((thiscall)) *)(uint8_t*, const char*, FlashValue*);
+using FlashFreeFn = void(__attribute__((thiscall)) *)(FlashValue*);
+FlashGetFn g_flashGet = nullptr, g_flashSet = nullptr;
+FlashFreeFn g_flashFree = nullptr;
+const uint32_t kHudMoviesFirst = 0x38, kHudMoviesLast = 0x64, kMovieFlash = 0x24;
+const char* const kSpectateHide[] = {"_root.mc_cockpitLife._visible", "_root.mc_WPL._visible", "_root.mc_Lockon._visible", "_root.mc_NWSE._visible", "_root.mc_BattleGauge._visible", "_root.mc_TargetScope._visible"};
+
+int CockpitShow(uint8_t* hud, bool show)
+{
+	int count = 0;
+	for (uint32_t at = kHudMoviesFirst; at <= kHudMoviesLast && g_flashGet; at += 4) {
+		uint8_t* movie = *(uint8_t**)(hud + at);
+		if (!movie || !*(void**)(movie + kMovieFlash)) {
+			continue;
+		}
+		bool ours = false;
+		for (const char* name : kSpectateHide) {
+			FlashValue value = {};
+			ours = g_flashGet(movie, name, &value) && value.type == 2; // the clip's _visible: there
+			g_flashFree(&value);
+			if (ours) {
+				break;
+			}
+		}
+		if (ours) {
+			FlashValue value = {0, 3, show ? 1.0f : 0.0f};
+			g_flashSet(movie, "_root._visible", &value);
+			g_flashFree(&value);
+			count++;
+		}
+	}
+	return count;
+}
+
+void __attribute__((thiscall)) ListDraw(uint8_t* list)
+{
+	g_listDrawOriginal(list);
+	TeamRows(list);
+	static bool hidden = false;
+	static DWORD applied = 0;
+	bool hide = g_survival && g_hudHidden;
+	if (hide != hidden || (hide && GetTickCount() - applied > 1000)) { // again now and then: movies load late
+		int count = CockpitShow(list, !hide);
+		if (hide != hidden) {
+			XLS_LOG_INFO("mods: rules: survival: %d cockpit movies %s.", count, hide ? "hidden while spectating" : "shown");
+		}
+		hidden = hide;
+		applied = GetTickCount();
+	}
+}
+
+// The HUD manager's update (every frame, game thread) shows nothing once the player of its entry
+// (+0x2c, the local slot's) has no body: so while the local player is out and watching someone, the
+// update runs on the watched player's entry (their HUD; no death view). With its body removed the out
+// player gets no controller update of its own: its spectating goes on here.
+ListDrawFn g_hudUpdateOriginal = nullptr;
+const uint32_t kHudEntry = 0x2c;
+extern std::atomic<DWORD> g_localSeen;
+
+void __attribute__((thiscall)) HudUpdate(uint8_t* hud)
+{
+	int self = g_localIndex;
+	uint8_t** entry = (uint8_t**)(hud + kHudEntry);
+	uint8_t* own = *entry;
+	bool out = g_survival && self >= 0 && self < 16 && own && own == g_controllers[self] && SlotOut(self);
+	if (out && GetTickCount() - g_localSeen > 100) {
+		static DWORD logged = 0;
+		if (GetTickCount() - logged > 10000) {
+			logged = GetTickCount();
+			XLS_LOG_INFO("mods: rules: survival: player %d spectates from the HUD update (watching %d).", self, g_watched);
+		}
+		Spectate(own, self, false);
+		HideHud(true);
+	}
+	int watched = g_watched;
+	bool swap = out && watched >= 0 && watched < 16 && watched != self && g_controllers[watched] && Body(watched);
+	if (swap) {
+		*entry = g_controllers[watched];
+	}
+	g_hudUpdateOriginal(hud);
+	if (swap) {
+		*entry = own;
+	}
+}
+
+// Points a `call rel32` at the game's code to ours (checked: it called `expect`).
+bool RedirectCall(uint8_t* at, uint8_t* expect, void* to)
+{
+	if (at[0] != 0xe8 || at + 5 + *(int32_t*)(at + 1) != expect) {
+		return false;
+	}
+	int32_t rel = (int32_t)((uint8_t*)to - (at + 5));
+	DWORD old;
+	if (!VirtualProtect(at + 1, 4, PAGE_EXECUTE_READWRITE, &old)) {
+		return false;
+	}
+	memcpy(at + 1, &rel, 4);
+	VirtualProtect(at + 1, 4, old, &old);
+	return true;
+}
+
+// cdecl (buf, format, value) from the list, plus esi and the address of the saved edi.
+extern "C" void __attribute__((naked)) ListValueThunk()
+{
+	asm volatile(
+	    "push %%edi\n\t"
+	    "mov %%esp, %%eax\n\t"
+	    "push %%eax\n\t"
+	    "push %%esi\n\t"
+	    "pushl 24(%%esp)\n\t"
+	    "pushl 24(%%esp)\n\t"
+	    "pushl 24(%%esp)\n\t"
+	    "call %P0\n\t"
+	    "add $20, %%esp\n\t"
+	    "pop %%edi\n\t"
+	    "ret" ::"i"(ListValue));
+}
+
+std::atomic<DWORD> g_localSeen{0}; // the local player's last controller update
 
 void __attribute__((thiscall)) ControlUpdate(uint8_t* ctl)
 {
@@ -584,6 +909,10 @@ void __attribute__((thiscall)) ControlUpdate(uint8_t* ctl)
 	g_ctlUpdateOriginal(ctl);
 	if (ctl && ctl[kCtlSlot] < 16) {
 		g_slotState[ctl[kCtlSlot]] = ctl[kCtlState];
+	}
+	// once its body is removed the out player gets no update of its own (see HudUpdate)
+	if (local) {
+		g_localSeen = GetTickCount();
 	}
 	if (!hold) {
 		if (local) {
@@ -626,7 +955,8 @@ const uint32_t kSetupRule = 0x28, kSetupPlayers = 0x70, kSetupSlotLeft = 0x6a; /
 uint8_t** g_players = nullptr;
 const uint32_t kPlayersSlots = 0x28, kPlayerInPlay = 8; // bit 0
 const uint32_t kNetHostSlot = 0xa1f8, kNetLocalSlot = 0xa1fc;
-const int kRuleTraining = 1, kRuleElimination = 2, kRuleTeamElimination = 5; // 1: the training bot match, ranked by slot like 2
+// 1: the training bot match, ranked by slot like 2; Team Elimination is 4, 5 the team kills rule (mc_Kill)
+const int kRuleTraining = 1, kRuleElimination = 2, kRuleTeamElimination = 4, kRuleTeamKills = 5;
 const uint32_t kRankList = 0x74, kRankEntry = 0xc, kRankCount = 0x134; // {rank, slot or team, score}
 
 bool InPlay(int slot)
@@ -651,7 +981,14 @@ int LivesLeft(int id, bool team)
 	if (!owner || id < 0 || id >= 16) {
 		return 0;
 	}
-	int32_t deaths = ((int32_t*)(owner + kOwnerInfoGame + (team ? kInfoDieTeam : kInfoDiePerson)))[id];
+	if (team) { // its respawns left, then its players still up
+		int up = 0;
+		for (int slot = 0; slot < 16; slot++) {
+			up += InPlay(slot) && SlotTeam(slot) == id && !SlotOut(slot);
+		}
+		return std::max(g_lives - 1 - TeamDeaths(id), 0) + up;
+	}
+	int32_t deaths = ((int32_t*)(owner + kOwnerInfoGame + kInfoDiePerson))[id];
 	return g_lives - deaths > 0 ? g_lives - deaths : 0;
 }
 
@@ -699,10 +1036,10 @@ void __attribute__((thiscall)) Ranking(uint8_t* flow, int arg)
 		logged = GetTickCount();
 		XLS_LOG_INFO("mods: rules: survival: ranking (rule %d, %d entries).", rule, *(int32_t*)(flow + kRankCount));
 	}
-	if (!g_survival || g_lives <= 0 || (rule != kRuleTraining && rule != kRuleElimination && rule != kRuleTeamElimination)) {
+	if (!g_survival || g_lives <= 0 || (rule != kRuleTraining && rule != kRuleElimination && rule != kRuleTeamElimination && rule != kRuleTeamKills)) {
 		return;
 	}
-	bool team = rule == kRuleTeamElimination;
+	bool team = rule == kRuleTeamElimination || rule == kRuleTeamKills;
 	int32_t (*list)[3] = (int32_t(*)[3])(flow + kRankList);
 	int count = *(int32_t*)(flow + kRankCount);
 	count = count < 0 ? 0 : count > 16 ? 16 : count;
@@ -950,7 +1287,22 @@ DWORD WINAPI SurvivalThread(LPVOID)
 {
 	std::string last;
 	bool wasOut = false;
-	for (;; Sleep(200)) {
+	char hudFile[MAX_PATH] = {};
+	GetModuleFileNameA(nullptr, hudFile, MAX_PATH);
+	if (char* slash = strrchr(hudFile, '\\')) {
+		strcpy(slash + 1, "team-hud.txt");
+	}
+	for (int tick = 0;; Sleep(200), tick++) {
+		if (tick % 5 == 0) { // Team Survival rows' place, for lining them up while playing
+			if (FILE* file = fopen(hudFile, "r")) {
+				int x, y, gap;
+				if (fscanf(file, "%d %d %d", &x, &y, &gap) == 3 && (x != g_teamRowsX || y != g_teamRowsY || gap != g_teamRowsGap)) {
+					g_teamRowsX = x, g_teamRowsY = y, g_teamRowsGap = gap;
+					XLS_LOG_INFO("mods: rules: team rows at %d, %d, gap %d (team-hud.txt).", x, y, gap);
+				}
+				fclose(file);
+			}
+		}
 		if (g_hudHidden && GetTickCount() - g_hudTouched > 1000) { // nobody spectating any more
 			HideHud(false);
 		}
@@ -967,10 +1319,38 @@ DWORD WINAPI SurvivalThread(LPVOID)
 		if (setup && index >= 0 && index < 16) {
 			ReadGame(setup + kSetupSlots + index * kSetupSlot, &team);
 		}
+		// Team Survival: each new death in turn takes one of its team's respawns, or puts the player out
+		static int32_t seen[16];
+		bool restart = !have;
+		for (int i = 0; i < 16 && have; i++) {
+			restart = restart || diePerson[i] < seen[i];
+		}
+		if (restart) {
+			memset(seen, 0, sizeof(seen));
+			g_teamOut = 0;
+		}
+		if (have && g_survival && g_team && g_lives > 0 && setup) {
+			int32_t teams[16], used[16] = {};
+			for (int i = 0; i < 16; i++) {
+				if (!ReadGame(setup + kSetupSlots + i * kSetupSlot, &teams[i]) || teams[i] < 0 || teams[i] >= 16) {
+					teams[i] = -1;
+				}
+			}
+			for (int i = 0; i < 16; i++) {
+				used[teams[i] & 15] += teams[i] >= 0 ? seen[i] : 0;
+			}
+			for (int i = 0; i < 16; i++) {
+				for (; teams[i] >= 0 && seen[i] < diePerson[i]; seen[i]++) {
+					if (++used[teams[i]] >= g_lives && !((g_teamOut >> i) & 1)) {
+						g_teamOut |= 1u << i;
+						XLS_LOG_INFO("mods: rules: survival: player %d out (team %d, %d team deaths).", i, teams[i], used[teams[i]]);
+					}
+				}
+			}
+		}
 		bool out = false;
 		if (have && g_survival && g_lives > 0 && index >= 0 && index < 16) {
-			// Team Survival shares the lives: every death on the team takes one
-			out = g_team ? team >= 0 && team < 16 && dieTeam[team] >= g_lives : diePerson[index] >= g_lives;
+			out = g_team ? (g_teamOut >> index) & 1 : diePerson[index] >= g_lives;
 		}
 		g_out = out;
 		if (out != wasOut) {
@@ -1247,7 +1627,48 @@ void RulesInstall(unsigned char* base)
 	g_followArg = (const float*)(base + (kRulesVas[build].followArg - 0x400000));
 	g_flashCall = (FlashCallFn)(base + (kRulesVas[build].flashCall - 0x400000));
 	g_input = (uint8_t**)(base + (kRulesVas[build].input - 0x400000));
-	g_status = (uint8_t**)(base + (kRulesVas[build].status - 0x400000));
+	g_results = (uint8_t**)(base + (kRulesVas[build].results - 0x400000));
+	g_gaugeFormat = (const char*)(base + (kRulesVas[build].gaugeFormat - 0x400000));
+	uint8_t* listCall = base + (kRulesVas[build].listValue - 0x400000);
+	uint8_t* sprintfFn = base + (kRulesVas[build].sprintfFn - 0x400000);
+	bool listed = memcmp(g_gaugeFormat, "%d", 3) == 0 && RedirectCall(listCall, sprintfFn, (void*)&ListValueThunk);
+	uint8_t* rankOfCall = base + (kRulesVas[build].listRankOf - 0x400000);
+	uint8_t* rankOf = rankOfCall + 5 + *(int32_t*)(rankOfCall + 1); // the accessors, as the list calls them
+	uint8_t* slotAt = base + (kRulesVas[build].listSlotAt[0] - 0x400000);
+	slotAt += 5 + *(int32_t*)(slotAt + 1);
+	for (uint32_t va : kRulesVas[build].listSlotAt) {
+		listed = RedirectCall(base + (va - 0x400000), slotAt, (void*)&ListSlotAtThunk) && listed;
+	}
+	listed = RedirectCall(rankOfCall, rankOf, (void*)&ListRankOfThunk) && listed;
+	if (!listed) {
+		XLS_LOG_WARN("mods: rules: battle HUD player list not (fully) patched, Survival shows the Battle Gauge order there.");
+	}
+	uint8_t* listDraw = base + (kRulesVas[build].listDraw - 0x400000);
+	const uint8_t kListDrawPrologue[] = {0x81, 0xec, 0xa4, 0x01, 0x00, 0x00}; // sub esp,0x1a4
+	if (listDraw[kListStyleAt - 1] == 0xbe && listDraw[kListFontAt - 2] == 0x66 && listDraw[kListCtxAt - 2] == 0x8b && listDraw[kListTextCall] == 0xe8) {
+		g_textStyle = *(const uint32_t**)(listDraw + kListStyleAt);
+		g_textFont = *(const uint16_t**)(listDraw + kListFontAt);
+		g_textCtx = *(void***)(listDraw + kListCtxAt);
+		g_text = (TextFn)(listDraw + kListTextCall + 5 + *(int32_t*)(listDraw + kListTextCall + 1));
+		g_listDrawOriginal = (ListDrawFn)Detour(listDraw, kListDrawPrologue, sizeof(kListDrawPrologue), (void*)&ListDraw);
+	}
+	g_flashGet = (FlashGetFn)(base + (kRulesVas[build].flashGet - 0x400000));
+	g_flashSet = (FlashGetFn)(base + (kRulesVas[build].flashSet - 0x400000));
+	g_flashFree = (FlashFreeFn)(base + (kRulesVas[build].flashFree - 0x400000));
+	const uint8_t kHudUpdatePrologue[] = {0x83, 0xec, 0x20, 0x53, 0x56}; // sub esp,0x20; push ebx; push esi
+	g_hudUpdateOriginal = (ListDrawFn)Detour(base + (kRulesVas[build].hudUpdate - 0x400000), kHudUpdatePrologue, sizeof(kHudUpdatePrologue), (void*)&HudUpdate);
+	if (!g_hudUpdateOriginal) {
+		XLS_LOG_WARN("mods: rules: HUD update not found, Survival spectators get no HUD once their body is gone.");
+	}
+	const uint8_t kTeamBarPrologue[] = {0x83, 0xec, 0x24, 0x53, 0x56}; // sub esp,0x24; push ebx; push esi
+	g_teamBarOriginal = (ListDrawFn)Detour(base + (kRulesVas[build].teamBar - 0x400000), kTeamBarPrologue, sizeof(kTeamBarPrologue), (void*)&TeamBar);
+	if (!g_teamBarOriginal) {
+		XLS_LOG_WARN("mods: rules: team gauge bar update not found, Team Survival shows it.");
+	}
+	if (!g_listDrawOriginal) {
+		g_text = nullptr;
+		XLS_LOG_WARN("mods: rules: battle HUD list draw not found, Team Survival shows no team rows.");
+	}
 	const uint8_t kBotCursorPrologue[] = {0x53, 0xbb, 0x01, 0x00, 0x00, 0x00};                         // push ebx; mov ebx,1
 	const uint8_t kBotStepPrologue[] = {0x56, 0x8b, 0xf1, 0x83, 0xbe, 0x90, 0x01, 0x00, 0x00, 0x01}; // push esi; mov esi,ecx; cmp [esi+0x190],1
 	g_botCursorOriginal = (MenuFn)Detour(base + (kRulesVas[build].botCursor - 0x400000), kBotCursorPrologue, sizeof(kBotCursorPrologue), (void*)&BotCursor);
