@@ -350,12 +350,12 @@ void StepSound(void* screen)
 
 int __attribute__((thiscall)) RuleStep(void* screen, int key, uint8_t* value, int max, int min, int rule, char wrap)
 {
-	int ours = RulesStep(rule, key, value);
+	int ours = RulesStep(rule, key, value, [&] { return g_stepOriginal(screen, key, value, max, min, rule, wrap); });
 	if (ours >= 0) {
-		if (ours) {
+		if (ours == 1) {
 			StepSound(screen);
 		}
-		return ours;
+		return ours ? 1 : 0;
 	}
 	if (rule != kRuleMap || (key != 10 && key != 11)) {
 		return g_stepOriginal(screen, key, value, max, min, rule, wrap);

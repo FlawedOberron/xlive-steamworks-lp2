@@ -5,9 +5,10 @@ A Lost Planet 2 build of [xlive-steamworks](https://github.com/sokie/xlive-steam
 multiplayer works again. This build adds a mod loader on top: quality-of-life options, extra
 maps and custom character parts.
 
-> **Status: work in progress, not released.** Map packages and hold-to-zoom work in game.
-> Custom parts export from Blender but are not loaded by the game yet, and nothing is synced
-> between players yet. The roadmap is at the end.
+> **Status: work in progress, test builds on the [Releases page](https://github.com/FlawedOberron/xlive-steamworks-lp2/releases)
+> (Pre-release).** Map packages, match rules and hold-to-zoom work in game. Custom parts export from
+> Blender but are not loaded by the game yet, and maps / parts aren't sent between players yet. The
+> roadmap is at the end.
 
 ---
 
@@ -16,8 +17,8 @@ maps and custom character parts.
 1. Find the game folder (Steam → Lost Planet 2 → Manage → Browse local files).
 2. Back up `xlive.dll` (e.g. rename it to `xlive.dll.capcom`).
 3. Unzip the release into that folder. `xlive.dll` sits next to `LP2DX11.exe`.
-4. Play the **DirectX 11** version (`LP2DX11.exe`). The mods target it, and it uses memory far
-   better (see Memory).
+4. Play either version: every feature is in both DirectX 9 (`LP2DX9.exe`) and DirectX 11
+   (`LP2DX11.exe`). DX11 uses memory better (see Memory).
 
 A Steam "Verify integrity of game files" or a game update puts Capcom's `xlive.dll` back.
 Re-copy ours afterwards.
@@ -135,6 +136,19 @@ Create match → **Settings 2** has three extra rows and **Settings 3** one, sav
 | Unlimited Ammo | Off / On: the reserve never drops (shown as ∞); the magazine still empties and reloads |
 | Unlimited Grenades | Off / On: throwing doesn't use them up |
 | Ammo Supply (Settings 3) | Default (the game's amounts) / Dry 1 / Scarce 2 / Less 3 / Normal 5 / Abundant 8 / Excessive 12: guns start with that many magazines (loaded one included, at most the weapon's cap); ammo pickups scale by the same ratio. Grenades unchanged |
+
+**Survival** (Elimination / Team Elimination): in create match the Kills / Points row gets **Survival** between
+them, and the kill-target row becomes **Respawns** (0-5, 10, 20, 30, 40, 50):
+
+- Elimination: each player has that many respawns. Team Elimination: the team shares them (10 respawns
+  are gone after one player respawns 6 times and four players once each).
+- A player with none left stays down and spectates: a living team-mate (team) or anyone (free for
+  all); **fire** watches the next player, **zoom** the previous one, and the camera moves on by itself
+  when the watched player goes out.
+- The match ends when one player (one team) with respawns is left. At time-up, most respawns left
+  wins, then score.
+- Training → **AI Enemy Battle** has the same two rows (Survival, Respawns) for bot matches; the bots
+  are held to the limit too.
 
 The host's rules apply to everyone in its lobby (every player needs this DLL, since each PC runs its
 own weapons). Until create match has been opened once, `"mods": {"rules": {"unlimited_ammo": true,

@@ -1,6 +1,7 @@
 #include "mods/lp2.h"
 #include "mods/package.h"
 #include "mods/parts.h"
+#include "mods/flash/botrows.h"
 
 #include "api/xsession.h"
 #include "core/config.h"
@@ -16,6 +17,7 @@
 #include <string.h>
 
 #include <atomic>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <string>
@@ -75,10 +77,27 @@ struct RulesVas {
 	uint32_t transfer;  // return address of the add-ammo call that moves a picked-up weapon's ammo (DX11 FUN_00c7cee0)
 	uint32_t leftCounter; // the HUD's left (grenade) counter draw, as counter (DX11 FUN_00ecac50)
 	uint32_t icon;        // the HUD's icon for an item: thiscall(hud, weapon, a, b, c) -> icon (DX11 FUN_00ed1e00)
+	uint32_t matchMgr;    // global -> the match manager (set by its constructor, DX11 FUN_00855f20)
+	uint32_t matchSetup;  // global -> match setup: per-slot records at +0x148 (0x7c each, team first)
+	uint32_t localSlot;   // thiscall(net) -> the local player's match slot (DX11 FUN_008029c0)
+	uint32_t net;         // global -> the object it takes
+	uint32_t ctlUpdate;   // player controller update, thiscall(controller) (DX11 FUN_008ff650; see ControlUpdate)
+	uint32_t controllers; // the controllers by match slot (16 pointers)
+	uint32_t follow;      // camera follow: thiscall(camera, body, 0xff, float, float) (DX11 FUN_008e5e30)
+	uint32_t followArg;   // the float the respawn passes it
+	uint32_t endCheck;    // the host's match end check, fastcall(flow) -> bool (DX11 FUN_01008ef0)
+	uint32_t results;     // global -> the match results (its prologue reads it)
+	uint32_t ranking;     // the end ranking: thiscall(flow, bool) (DX11 FUN_01009b90; see Ranking)
+	uint32_t players;     // global -> the players: +0x28 one per slot, +8 bit 0 in play
+	uint32_t botCursor;   // training menu: AI Enemy Battle up / down, fastcall(menu) (DX11 FUN_00f44680)
+	uint32_t botStep;     // training menu: AI Enemy Battle left / right, fastcall(menu) (DX11 FUN_00f44760)
+	uint32_t flashCall;   // a menu's Flash call: thiscall(menu, 0, name, args, count) (DX11 FUN_00f4a390)
+	uint32_t input;       // global -> the menu input: +0x330 pressed (up 0x40, down 0x80, left 0x100, right 0x200), +0x78 sounds
+	uint32_t sound;       // thiscall(sounds, id, owner, 0) (DX11 FUN_00832f00; 7 = cursor)
 };
 const RulesVas kRulesVas[] = {
-	{0xc7aa20, 0xc7a820, 0xeca930, 0x20fc, 0x8fb130, 0xe8c270, 0xf4a330, 0x17e9840, 0xc86160, 0x2180, 0xc7cf15, 0xecac50, 0xed1e00}, // DX11
-	{0xc6ae10, 0xc6ac10, 0xebab30, 0x20ec, 0x8eb7d0, 0xe7c1e0, 0xf3a600, 0x17d97e0, 0xc76550, 0x2170, 0xc6d305, 0xebae50, 0xec1ff0}, // DX9
+	{0xc7aa20, 0xc7a820, 0xeca930, 0x20fc, 0x8fb130, 0xe8c270, 0xf4a330, 0x17e9840, 0xc86160, 0x2180, 0xc7cf15, 0xecac50, 0xed1e00, 0x18e086c, 0x1852850, 0x8029c0, 0x1852144, 0x8ff650, 0x1852080, 0x8e5e30, 0x16f7c6c, 0x1008ef0, 0x1852238, 0x1009b90, 0x18520c0, 0xf44680, 0xf44760, 0xf4a390, 0x18e0860, 0x832f00}, // DX11
+	{0xc6ae10, 0xc6ac10, 0xebab30, 0x20ec, 0x8eb7d0, 0xe7c1e0, 0xf3a600, 0x17d97e0, 0xc76550, 0x2170, 0xc6d305, 0xebae50, 0xec1ff0, 0x18ce780, 0x18427b0, 0x7f3b00, 0x18420a4, 0x8efcf0, 0x1841fe0, 0x8d64d0, 0x16e7098, 0xff8b10, 0x1842198, 0xff97b0, 0x1842020, 0xf34940, 0xf34a20, 0xf3a660, 0x18ce774, 0x824110}, // DX9
 };
 // push esi; push edi; mov edi,[esp+0xc]; test di,di; (then jge rel32, left in place)
 const uint8_t kAddAmmoPrologue[] = {0x56, 0x57, 0x8b, 0x7c, 0x24, 0x0c, 0x66, 0x85, 0xff};
@@ -111,6 +130,37 @@ const int kMsgOffOn = 362;   // MsgOnline MSG_COMMON_OFF (Off, On)
 const int kMsgSecondary = 600;
 const int kMsgSupply = 610;
 
+// Survival: a sub-type of Elimination / Team Elimination shown between Kills and Points. The game
+// keeps Kills (sub 1, so the category and its rows are Kills') and rules byte 0x32 says survival. The
+// sub-type row's label reads our display value (DataNo 79) from our texts (kMsgSubElim / kMsgSubTeam
+// + display), which repeat the game's with Survival third.
+const int kRuleMain = 0x16, kRuleSub = 0x17, kRuleSurvival = 0x32;
+const int kSubKills = 1, kSubPoints = 2;
+const int kDataNoSubShown = 79;
+const int kItemSubElim = 1, kItemSubTeam = 2; // OnlineRule.ITEM_SCATG_SURV / _TSURV
+const int kMsgSubElim = 630, kMsgSubTeam = 640;
+const int kSubElimGameMsg[] = {79, 80, 0, 81, 82};     // Battle Gauge, Kills, (Survival), Points, Random
+const int kSubTeamGameMsg[] = {83, 84, 0, 85, 86, 87}; // ..., Points, VS Annihilator, Random
+const char* const kSurvivalName = "Survival";
+// Respawns (Survival) take the Kills row: its label reads our display value (DataNo 80) from our texts
+// kMsgKillRow + display: 0-5 the game's kill targets (MsgOnline 96-101), then kLives. The lives index
+// is rules byte 0x33; in Survival the game's kill target (byte 9) is kept at infinity (5) so kills
+// never end the match.
+const int kRuleKillTarget = 9, kKillTargetInfinite = 5, kRuleLives = 0x33;
+const int kItemKillRow = 5; // OnlineRule.ITEM_SUB_KILL
+const int kDataNoKillShown = 80;
+const int kMsgKillRow = 650;
+const int kKillTargets = 6;
+// shown as respawns (lives - 1)
+const int kLives[] = {1, 2, 3, 4, 5, 6, 11, 21, 31, 41, 51};
+const char* const kLivesNames[] = {"0", "1", "2", "3", "4", "5", "10", "20", "30", "40", "50"};
+const int kLivesValues = (int)(sizeof(kLives) / sizeof(kLives[0]));
+
+bool SurvivalOn(const uint8_t* rules)
+{
+	return rules[kRuleMain] <= 1 && rules[kRuleSub] == kSubKills && rules[kRuleSurvival] == 1;
+}
+
 // The pages' Flash arrays (Settings 2 = sub1, Settings 3 = sub2) and their stock row counts here
 // (Settings 3 also has a cross-play row last in the Flash, hidden on PC and not counted here).
 const int kPageSettings2 = 1;
@@ -140,6 +190,9 @@ struct Rules {
 	bool grenades = false;
 	int secondary = 0; // weapon kind, 0 = none
 	int supply = 0;     // magazines to start with, 0 = the game's amounts (pickups scale with it)
+	bool survival = false;
+	int lives = 0; // Survival lives per player (Elimination) or team (Team Elimination)
+	bool team = false;
 };
 const int kSlotSecond = 7;
 
@@ -149,11 +202,21 @@ std::atomic<bool> g_ammo{false};
 std::atomic<bool> g_grenades{false};
 std::atomic<int> g_secondary{0};
 std::atomic<int> g_supply{0};
+std::atomic<bool> g_survival{false};
+std::atomic<bool> g_offline{true}; // not in a lobby (training): the bots run on this PC
+// Training's AI Enemy Battle rows (see BotCursor): armed while that screen was the last one used
+std::atomic<bool> g_botArmed{false}, g_botSurvival{false};
+std::atomic<int> g_botLives{3}, g_botRule{0}; // index into kLives; the screen's rule (0 Elimination, 1 Team Elimination)
+std::atomic<bool> g_menuSurvival{false};
+std::atomic<int> g_lives{0};
+std::atomic<int> g_menuLives{0};
+std::atomic<bool> g_team{false};
+std::atomic<bool> g_menuTeam{false};
 uint32_t g_magazine = 0;
 
 std::string Format(const Rules& r)
 {
-	return FormatA("ammo=%d;grenades=%d;secondary=%d;magazines=%d", r.ammo, r.grenades, r.secondary, r.supply);
+	return FormatA("ammo=%d;grenades=%d;secondary=%d;magazines=%d;survival=%d;lives=%d;team=%d", r.ammo, r.grenades, r.secondary, r.supply, r.survival, r.lives, r.team);
 }
 
 Rules Parse(const std::string& s)
@@ -163,6 +226,10 @@ Rules Parse(const std::string& s)
 	r.grenades = s.find("grenades=1") != std::string::npos;
 	size_t at = s.find("secondary=");
 	r.secondary = at == std::string::npos ? 0 : atoi(s.c_str() + at + 10) & 0xff;
+	r.survival = s.find("survival=1") != std::string::npos;
+	r.team = s.find("team=1") != std::string::npos;
+	size_t livesAt = s.find("lives=");
+	r.lives = livesAt == std::string::npos ? 0 : atoi(s.c_str() + livesAt + 6);
 	at = s.find("magazines=");
 	r.supply = at == std::string::npos ? 0 : atoi(s.c_str() + at + 10);
 	if (r.supply < 0 || r.supply > 100) {
@@ -182,6 +249,9 @@ Rules Own()
 		r.grenades = g_menu[kRowGrenades] != 0;
 		r.secondary = kSecondaryKinds[g_menu[kRowSecondary] % kSecondaryValues];
 		r.supply = kSupplyMagazines[g_menu[kRowSupply] % kSupplyValues];
+		r.survival = g_menuSurvival;
+		r.lives = r.survival ? g_menuLives.load() : 0;
+		r.team = r.survival && g_menuTeam;
 		return r;
 	}
 	r.ammo = Cfg().rulesUnlimitedAmmo;
@@ -207,6 +277,7 @@ DWORD WINAPI SyncThread(LPVOID)
 			WriteWholeFile(Cfg().modCacheDir + L"rules.txt", save);
 		}
 		CSteamID lobby = SessionPresenceLobby();
+		g_offline = !lobby.IsValid();
 		if (lobby.IsValid() && SteamReady() && SteamMatchmaking()) {
 			uint64_t host = LobbyOwner(SteamMatchmaking(), lobby).ConvertToUint64();
 			std::lock_guard<std::mutex> lock(g_mutex);
@@ -215,14 +286,31 @@ DWORD WINAPI SyncThread(LPVOID)
 				r = it->second;
 			}
 		}
+		if (g_offline && g_botArmed && g_botSurvival && g_botRule <= 1) { // a training bot match set to Survival
+			r.survival = true;
+			r.lives = kLives[g_botLives % kLivesValues];
+			r.team = g_botRule == 1;
+		}
+		// Test override for fixed-rule modes (training bot matches): ModCache\survival-test.txt = "respawns=N;team=0|1"
+		Bytes test;
+		if (ReadFileBytes(Cfg().modCacheDir + L"survival-test.txt", test)) {
+			std::string s(test.begin(), test.end());
+			size_t at = s.find("respawns=");
+			r.survival = true;
+			r.lives = (at == std::string::npos ? 0 : atoi(s.c_str() + at + 9)) + 1;
+			r.team = s.find("team=1") != std::string::npos;
+		}
 		g_ammo = r.ammo;
 		g_grenades = r.grenades;
 		g_secondary = r.secondary;
 		g_supply = r.supply;
+		g_survival = r.survival;
+		g_lives = r.lives;
+		g_team = r.team;
 		std::string now = Format(r);
 		if (now != logged) {
 			logged = now;
-			XLS_LOG_INFO("mods: rules: unlimited ammo %s, unlimited grenades %s, secondary kind 0x%02x, ammo supply %d magazines (0 = default).", r.ammo ? "on" : "off", r.grenades ? "on" : "off", r.secondary, r.supply);
+			XLS_LOG_INFO("mods: rules: unlimited ammo %s, unlimited grenades %s, secondary kind 0x%02x, ammo supply %d magazines (0 = default), survival %s (%d lives).", r.ammo ? "on" : "off", r.grenades ? "on" : "off", r.secondary, r.supply, r.survival ? "on" : "off", r.lives);
 		}
 	}
 }
@@ -289,6 +377,431 @@ const uint8_t kSpawnGameOp[] = {0x8b, 0x0d};
 using SpawnFn = uint32_t(__attribute__((thiscall)) *)(uint8_t*, uint32_t, void*, void*);
 SpawnFn g_spawnOriginal = nullptr;
 uint8_t** g_game = nullptr;
+using LocalSlotFn = int(__attribute__((thiscall)) *)(void*);
+LocalSlotFn g_localSlot = nullptr;
+void** g_net = nullptr;
+std::atomic<int> g_localIndex{-1}; // the local player's match slot
+std::atomic<bool> g_out{false};     // Survival: the local player has no lives left
+
+// Survival: the match manager (global, DX11 0x18e086c) holds the match info owner at +0x144b4, whose
+// cInfoGame (+0x3e0) has mNetWork.dieCountPerson (+0x35c, s32 x 16 by match slot) and dieCountTeam
+// (+0x39c), synced to every PC; and the session info at +0x144f4 with isRespawn (+0x88, the stock
+// Respawn rule). A player out of lives gets isRespawn cleared on its own PC (each PC runs its player).
+uint8_t*** g_matchMgr = nullptr;
+uint8_t** g_matchSetup = nullptr;
+const uint32_t kSetupSlots = 0x148, kSetupSlot = 0x7c;
+const uint32_t kMgrInfoOwner = 0x144b4, kOwnerInfoGame = 0x3e0;
+const uint32_t kInfoDiePerson = 0x35c, kInfoDieTeam = 0x39c;
+
+// The controller's death states (byte +0x19): 1 death view (timers +0xfc/+0x100 down to 2), 2 -> 3
+// respawn countdown (float +0x104, the respawn dialog, which takes the camera), 4 waiting for the
+// respawn point pick (talks to the host: holding it there drops the connection), 5 respawn (spawns a
+// new character through Spawn). A local player out of lives is held in the death view (1). Match slot
+// at +0xb0 (the slot's entry in the controllers is a different object).
+using ControlUpdateFn = void(__attribute__((thiscall)) *)(uint8_t*);
+ControlUpdateFn g_ctlUpdateOriginal = nullptr;
+const uint8_t kCtlUpdatePrologue[] = {0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf0, 0x81, 0xec, 0xa4, 0x00, 0x00, 0x00};
+const int kCtlState = 0x19, kCtlSlot = 0xb0, kCtlDeathTimers = 0xfc, kStateDeath = 1, kStateRespawn = 5;
+
+// Spectating: controller +0x480 is the player (active when its +4 & 7 is 1 or 2), whose +0x40 is
+// the body the camera follows; +0x484 the camera (only the local player's), following the body at
+// +0x200 once told through follow (as the respawn does).
+using FollowFn = void(__attribute__((thiscall)) *)(uint8_t*, uint8_t*, int, float, float);
+FollowFn g_follow = nullptr;
+const float* g_followArg = nullptr;
+uint8_t** g_controllers = nullptr;
+const uint32_t kCtlPlayer = 0x480, kCtlCamera = 0x484, kPlayerBody = 0x40, kCameraBody = 0x200;
+int g_watched = -1;
+uint8_t g_slotState[16]; // each slot's controller state, as its update left it
+
+uint8_t* Body(int slot)
+{
+	uint8_t* ctl = g_controllers[slot];
+	uint8_t* player = ctl ? *(uint8_t**)(ctl + kCtlPlayer) : nullptr;
+	uint32_t kind = player ? *(uint32_t*)(player + 4) & 7 : 0;
+	return kind == 1 || kind == 2 ? *(uint8_t**)(player + kPlayerBody) : nullptr;
+}
+
+// A slot worth watching: in play, alive (state 0) and, in Survival, with lives left (its team's in Team Survival).
+int32_t SlotTeam(int slot)
+{
+	uint8_t* setup = *g_matchSetup;
+	return setup && slot >= 0 && slot < 16 ? *(int32_t*)(setup + kSetupSlots + slot * kSetupSlot) : -1;
+}
+
+// Survival: the slot has no respawns left (its team none, in Team Survival).
+bool SlotOut(int slot)
+{
+	uint8_t *mgr = *g_matchMgr ? (uint8_t*)*g_matchMgr : nullptr, *owner = mgr ? *(uint8_t**)(mgr + kMgrInfoOwner) : nullptr;
+	if (!g_survival || g_lives <= 0 || !owner || slot < 0 || slot >= 16) {
+		return false;
+	}
+	if (!g_team) {
+		return ((int32_t*)(owner + kOwnerInfoGame + kInfoDiePerson))[slot] >= g_lives;
+	}
+	int32_t team = SlotTeam(slot);
+	return team >= 0 && team < 16 && ((int32_t*)(owner + kOwnerInfoGame + kInfoDieTeam))[team] >= g_lives;
+}
+
+// A slot worth watching: in play, alive (state 0), not out and, in Team Survival, on our team.
+bool Watchable(int slot, int self)
+{
+	return slot != self && Body(slot) && g_slotState[slot] == 0 && !SlotOut(slot) && (!g_team || SlotTeam(slot) == SlotTeam(self));
+}
+
+// The next watchable slot after (dir 1) or before (dir -1) the watched one, -1 for none.
+int NextWatchable(int self, int dir)
+{
+	int from = g_watched < 0 ? self : g_watched;
+	for (int i = 1; i <= 16; i++) {
+		int slot = (from + dir * i + 32) % 16;
+		if (Watchable(slot, self)) {
+			return slot;
+		}
+	}
+	return -1;
+}
+
+// The slot's entry is its pad too: actions held at +0x3b8 (fire 0x100 watches the next player, zoom 0x100000 the previous).
+const uint32_t kPadHeld = 0x3b8;
+const uint64_t kActFire = 0x100, kActZoom = 0x100000;
+uint64_t g_padWas = 0;
+
+void Spectate(uint8_t* entry, int self, bool force)
+{
+	uint8_t* cam = entry ? *(uint8_t**)(entry + kCtlCamera) : nullptr;
+	if (!cam || !g_follow) {
+		return;
+	}
+	uint64_t pad = *(uint64_t*)(entry + kPadHeld), pressed = pad & ~g_padWas;
+	g_padWas = pad;
+	int dir = pressed & kActFire ? 1 : pressed & kActZoom ? -1 : 0;
+	if (dir || g_watched < 0 || !Watchable(g_watched, self)) {
+		int next = NextWatchable(self, dir ? dir : 1);
+		if (next < 0 && g_watched >= 0 && Body(g_watched)) {
+			next = g_watched; // the only one left, or the last one standing: stay on them
+		}
+		if (next != g_watched) {
+			XLS_LOG_INFO("mods: rules: survival: spectating player %d.", next);
+		}
+		g_watched = next;
+	}
+	uint8_t* body = g_watched >= 0 ? Body(g_watched) : nullptr;
+	if (body && (force || *(uint8_t**)(cam + kCameraBody) != body)) { // forced after a held respawn: its pick view takes the camera
+		g_follow(cam, body, 0xff, *g_followArg, 0.0f);
+	}
+}
+
+void __attribute__((thiscall)) ControlUpdate(uint8_t* ctl)
+{
+	if (g_localSlot && *g_net) { // on the game thread, where the game asks it too
+		int slot = g_localSlot(*g_net);
+		for (int i = 0; i < 16 && slot < 0; i++) { // offline (training) it answers -1: the one with a camera
+			slot = g_controllers[i] && *(uint8_t**)(g_controllers[i] + kCtlCamera) ? i : -1;
+		}
+		g_localIndex = slot;
+	}
+	int self = g_localIndex;
+	// each PC holds its own player; offline (training) the bots run here too
+	bool local = ctl && self >= 0 && self < 16 && ctl[kCtlSlot] == self, hold = ctl && (local || g_offline) && SlotOut(ctl[kCtlSlot]);
+	uint8_t was = ctl ? ctl[kCtlState] : 0;
+	if (hold && was == kStateDeath) {
+		float* timers = (float*)(ctl + kCtlDeathTimers);
+		timers[0] = timers[0] < 1.0f ? 1.0f : timers[0];
+		timers[1] = timers[1] < 1.0f ? 1.0f : timers[1];
+	}
+	g_ctlUpdateOriginal(ctl);
+	if (ctl && ctl[kCtlSlot] < 16) {
+		g_slotState[ctl[kCtlSlot]] = ctl[kCtlState];
+	}
+	if (!hold) {
+		if (local) {
+			g_watched = -1;
+		}
+		return;
+	}
+	// leaving the death view (1) for the countdown, or the death state (0) straight for the respawn (5)
+	bool held = (ctl[kCtlState] > kStateDeath && ctl[kCtlState] <= kStateRespawn) && (was != 0 || ctl[kCtlState] == kStateRespawn);
+	if (held) {
+		ctl[kCtlState] = kStateDeath;
+		((float*)(ctl + kCtlDeathTimers))[0] = 1.0f;
+		((float*)(ctl + kCtlDeathTimers))[1] = 1.0f;
+		static DWORD logged = 0;
+		if (local && GetTickCount() - logged > 5000) {
+			logged = GetTickCount();
+			XLS_LOG_INFO("mods: rules: survival: player %d respawn held (state %u -> %u, no respawns left).", self, was, kStateDeath);
+		}
+	}
+	if (local) {
+		Spectate(g_controllers[self], self, held);
+	}
+}
+
+// Survival's end. The match flow (DX11 FUN_0100e1a0) asks the host's end check every frame (kill
+// target, time up); once it answers true the flow ranks the players (or teams), which the result
+// screen's victory / defeat follows, and sets isGameFinished for every PC. The check also ends the
+// match once one player (one team) with respawns is left; the ranking puts respawns left first.
+using EndCheckFn = bool(__attribute__((fastcall)) *)(void*);
+EndCheckFn g_endCheckOriginal = nullptr;
+using RankingFn = void(__attribute__((thiscall)) *)(uint8_t*, int);
+RankingFn g_rankingOriginal = nullptr;
+const uint32_t kSetupRule = 0x28, kSetupSlotLeft = 0x6a; // +0x1b2 of a slot record: not in the ranking
+uint8_t** g_players = nullptr;
+const uint32_t kPlayersSlots = 0x28, kPlayerInPlay = 8; // bit 0
+const uint32_t kNetHostSlot = 0xa1f8, kNetLocalSlot = 0xa1fc;
+const int kRuleTraining = 1, kRuleElimination = 2, kRuleTeamElimination = 5; // 1: the training bot match, ranked by slot like 2
+const uint32_t kRankList = 0x74, kRankEntry = 0xc, kRankCount = 0x134; // {rank, slot or team, score}
+
+bool InPlay(int slot)
+{
+	uint8_t* setup = *g_matchSetup;
+	uint8_t* players = *g_players;
+	uint8_t* player = players ? ((uint8_t**)(players + kPlayersSlots))[slot] : nullptr;
+	return setup && player && (player[kPlayerInPlay] & 1) && !setup[kSetupSlots + slot * kSetupSlot + kSetupSlotLeft];
+}
+
+bool Host()
+{
+	uint8_t* net = (uint8_t*)*g_net;
+	int32_t host = net ? *(int32_t*)(net + kNetHostSlot) : 0;
+	return g_offline || (net && (host == -1 || host == *(int32_t*)(net + kNetLocalSlot)));
+}
+
+// Respawns left (deaths still allowed) for a slot, or a team in Team Survival.
+int LivesLeft(int id, bool team)
+{
+	uint8_t *mgr = *g_matchMgr ? (uint8_t*)*g_matchMgr : nullptr, *owner = mgr ? *(uint8_t**)(mgr + kMgrInfoOwner) : nullptr;
+	if (!owner || id < 0 || id >= 16) {
+		return 0;
+	}
+	int32_t deaths = ((int32_t*)(owner + kOwnerInfoGame + (team ? kInfoDieTeam : kInfoDiePerson)))[id];
+	return g_lives - deaths > 0 ? g_lives - deaths : 0;
+}
+
+bool __attribute__((fastcall)) EndCheck(void* flow)
+{
+	if (g_endCheckOriginal(flow)) {
+		return true;
+	}
+	uint8_t* setup = *g_matchSetup;
+	if (!g_survival || g_lives <= 0 || !setup || !Host()) {
+		return false;
+	}
+	int sides = 0, standing = 0;
+	bool seen[16] = {}, up[16] = {};
+	for (int slot = 0; slot < 16; slot++) {
+		if (!InPlay(slot)) {
+			continue;
+		}
+		int side = g_team ? SlotTeam(slot) : slot;
+		if (side < 0 || side >= 16) {
+			continue;
+		}
+		sides += !seen[side];
+		seen[side] = true;
+		if (!up[side] && !SlotOut(slot)) {
+			up[side] = true;
+			standing++;
+		}
+	}
+	if (sides < 2 || standing > 1) {
+		return false;
+	}
+	XLS_LOG_INFO("mods: rules: survival: %d of %d %s standing, match over.", standing, sides, g_team ? "teams" : "players");
+	return true;
+}
+
+void __attribute__((thiscall)) Ranking(uint8_t* flow, int arg)
+{
+	g_rankingOriginal(flow, arg);
+	uint8_t* setup = *g_matchSetup;
+	int32_t rule = setup ? *(int32_t*)(setup + kSetupRule) : 0;
+	static DWORD logged = 0;
+	bool log = GetTickCount() - logged > 10000;
+	if (log && g_survival) {
+		logged = GetTickCount();
+		XLS_LOG_INFO("mods: rules: survival: ranking (rule %d, %d entries).", rule, *(int32_t*)(flow + kRankCount));
+	}
+	if (!g_survival || g_lives <= 0 || (rule != kRuleTraining && rule != kRuleElimination && rule != kRuleTeamElimination)) {
+		return;
+	}
+	bool team = rule == kRuleTeamElimination;
+	int32_t (*list)[3] = (int32_t(*)[3])(flow + kRankList);
+	int count = *(int32_t*)(flow + kRankCount);
+	count = count < 0 ? 0 : count > 16 ? 16 : count;
+	// respawns left first, the score breaks ties (encoded in the score the ranks are told apart by)
+	for (int i = 0; i < count; i++) {
+		list[i][2] = LivesLeft(list[i][1], team) * 100000 + (list[i][2] < 100000 ? list[i][2] : 99999);
+	}
+	for (int i = 1; i < count; i++) {
+		for (int j = i; j > 0 && list[j][2] > list[j - 1][2]; j--) {
+			std::swap(list[j], list[j - 1]);
+		}
+	}
+	if (log && count) {
+		XLS_LOG_INFO("mods: rules: survival: ranked first %s %d (%d respawns left, score %d).", team ? "team" : "player", list[0][1], list[0][2] / 100000, list[0][2] % 100000);
+	}
+}
+
+// Training's AI Enemy Battle screen (flash\training\id300: Map and Game Type rows, mc_BOT) gets two
+// rows cloned by our script (flash/botrows.as): Survival (Elimination -> Survival, Team Elimination ->
+// Team Survival) and Respawns. The menu (state +0x190 1, phase +0x194 2 for this screen) keeps the row
+// at +0x1b0 and the rule at +0x198; the hooks take the cursor over 4 rows and step our two.
+using MenuFn = void(__attribute__((fastcall)) *)(uint8_t*);
+MenuFn g_botCursorOriginal = nullptr, g_botStepOriginal = nullptr;
+struct FlashArg {
+	uint8_t flag;
+	uint32_t type; // 3 number (float), 4 string
+	const char* text;
+};
+using FlashCallFn = bool(__attribute__((thiscall)) *)(uint8_t*, int, const char*, FlashArg*, int);
+FlashCallFn g_flashCall = nullptr;
+using SoundFn = void(__attribute__((thiscall)) *)(void*, int, void*, int);
+SoundFn g_sound = nullptr;
+uint8_t** g_input = nullptr;
+const uint32_t kMenuState = 0x190, kMenuPhase = 0x194, kMenuRule = 0x198, kMenuMode = 0x1a0, kMenuRow = 0x1b0, kMenuFlags = 0x1d4;
+const uint32_t kMenuMouseOn = 0x168, kMenuMouse = 0x154, kMenuClick = 0x15c, kInputPressed = 0x330, kInputSounds = 0x78;
+const int kPhaseBot = 2, kModeBusy = 0x3e5, kBotRows = 4, kMouseBotRow = 0x22e, kMouseArrowL = 10, kMouseArrowR = 11;
+const uint32_t kKeyUp = 0x40, kKeyDown = 0x80, kKeyLeft = 0x100, kKeyRight = 0x200, kFlagRow = 0x80;
+
+bool BotScreen(uint8_t* menu)
+{
+	return *(int32_t*)(menu + kMenuState) == 1 && *(int32_t*)(menu + kMenuPhase) == kPhaseBot && *(int32_t*)(menu + kMenuMode) != kModeBusy;
+}
+
+void BotRowsDraw(uint8_t* menu)
+{
+	int rule = *(int32_t*)(menu + kMenuRule);
+	g_botRule = rule;
+	FlashArg args[4] = {{0, 4, "SURVIVAL"}, {0, 4, rule > 1 ? "-" : g_botSurvival ? "On" : "Off"}, {0, 4, "RESPAWNS"}, {0, 4, kLivesNames[g_botLives % kLivesValues]}};
+	if (g_flashCall) {
+		g_flashCall(menu, 0, "lp2BotRows", args, 4);
+	}
+}
+
+void BotSound(uint8_t* menu)
+{
+	void* sounds = *g_input ? *(void**)(*g_input + kInputSounds) : nullptr;
+	if (sounds && g_sound) {
+		g_sound(sounds, 7, menu, 0);
+	}
+}
+
+void __attribute__((fastcall)) BotCursor(uint8_t* menu)
+{
+	int32_t state = *(int32_t*)(menu + kMenuState);
+	if (state == 0 || state == 1) { // back on the top menu, or a training screen: armed only on ours
+		g_botArmed = state == 1 && *(int32_t*)(menu + kMenuPhase) == kPhaseBot;
+	}
+	static uint8_t* drawn = nullptr;
+	static int drawnRule = -1;
+	if (!BotScreen(menu) || !*g_input) {
+		drawn = nullptr;
+		return;
+	}
+	if (drawn != menu || drawnRule != *(int32_t*)(menu + kMenuRule)) { // shown, or the rule changed
+		drawn = menu;
+		drawnRule = *(int32_t*)(menu + kMenuRule);
+		BotRowsDraw(menu);
+	}
+	uint32_t pressed = *(uint32_t*)(*g_input + kInputPressed);
+	int32_t& row = *(int32_t*)(menu + kMenuRow);
+	int was = row;
+	if (pressed & kKeyUp) {
+		row = row == 0 ? kBotRows - 1 : row - 1;
+	} else if (pressed & kKeyDown) {
+		row = row + 1 >= kBotRows ? 0 : row + 1;
+	}
+	int mouse = *(int32_t*)(menu + kMenuMouse) - kMouseBotRow;
+	if (menu[kMenuMouseOn] && mouse >= 0 && mouse < kBotRows) {
+		row = mouse;
+	}
+	if (row != was || (pressed & (kKeyUp | kKeyDown))) {
+		*(uint32_t*)(menu + kMenuFlags) |= kFlagRow;
+	}
+}
+
+void __attribute__((fastcall)) BotStep(uint8_t* menu)
+{
+	if (!BotScreen(menu) || !*g_input || *(int32_t*)(menu + kMenuRow) < 2) {
+		g_botStepOriginal(menu);
+		return;
+	}
+	uint32_t pressed = *(uint32_t*)(*g_input + kInputPressed);
+	bool click = menu[kMenuClick] & 1;
+	int mouse = *(int32_t*)(menu + kMenuMouse);
+	int dir = (pressed & kKeyRight) || (click && mouse == kMouseArrowR) ? 1 : (pressed & kKeyLeft) || (click && mouse == kMouseArrowL) ? -1 : 0;
+	if (!dir) {
+		return;
+	}
+	if (*(int32_t*)(menu + kMenuRow) == 2) {
+		if (*(int32_t*)(menu + kMenuRule) > 1) {
+			return; // Survival only for the elimination rules
+		}
+		g_botSurvival = !g_botSurvival;
+	} else {
+		int at = g_botLives + dir;
+		if (at < 0 || at >= kLivesValues) {
+			return;
+		}
+		g_botLives = at;
+	}
+	BotSound(menu);
+	BotRowsDraw(menu);
+	XLS_LOG_INFO("mods: rules: training: survival %s, %s respawns.", g_botSurvival ? "on" : "off", kLivesNames[g_botLives % kLivesValues]);
+}
+
+template <typename T>
+bool ReadGame(const void* at, T* out)
+{
+	SIZE_T got = 0;
+	return at && ReadProcessMemory(GetCurrentProcess(), at, out, sizeof(T), &got) && got == sizeof(T);
+}
+
+DWORD WINAPI SurvivalThread(LPVOID)
+{
+	std::string last;
+	bool wasOut = false;
+	for (;; Sleep(200)) {
+		uint8_t *mgr = nullptr, *owner = nullptr, *setup = nullptr;
+		ReadGame(g_matchMgr, &mgr);
+		ReadGame(g_matchSetup, &setup);
+		if (mgr) {
+			ReadGame(mgr + kMgrInfoOwner, &owner);
+		}
+		int32_t diePerson[16] = {}, dieTeam[16] = {};
+		bool have = owner && ReadGame(owner + kOwnerInfoGame + kInfoDiePerson, &diePerson) && ReadGame(owner + kOwnerInfoGame + kInfoDieTeam, &dieTeam);
+		int index = g_localIndex;
+		int32_t team = -1;
+		if (setup && index >= 0 && index < 16) {
+			ReadGame(setup + kSetupSlots + index * kSetupSlot, &team);
+		}
+		bool out = false;
+		if (have && g_survival && g_lives > 0 && index >= 0 && index < 16) {
+			// Team Survival shares the lives: every death on the team takes one
+			out = g_team ? team >= 0 && team < 16 && dieTeam[team] >= g_lives : diePerson[index] >= g_lives;
+		}
+		g_out = out;
+		if (out != wasOut) {
+			wasOut = out;
+			XLS_LOG_INFO("mods: rules: survival: player %d (team %d) %s.", index, team, out ? "has no respawns left" : "can respawn");
+		}
+		if (have && g_survival) {
+			std::string state = FormatA("slot %d team %d; deaths", index, team);
+			for (int i = 0; i < 16; i++) {
+				state += FormatA(" %d", diePerson[i]);
+			}
+			state += "; team deaths";
+			for (int i = 0; i < 4; i++) {
+				state += FormatA(" %d", dieTeam[i]);
+			}
+			if (state != last) {
+				last = state;
+				XLS_LOG_INFO("mods: rules: survival: %s.", state.c_str());
+			}
+		}
+	}
+}
 
 uint32_t __attribute__((thiscall)) Spawn(uint8_t* spawner, uint32_t remote, void* a, void* b)
 {
@@ -331,6 +844,21 @@ void __attribute__((thiscall)) PushRules(void* screen, uint8_t* rules)
 		g_menu[i] = v;
 		g_setNumber(screen, kRowDefs[i].dataNo, v);
 	}
+	if (rules[kRuleSurvival] > 1 || (rules[kRuleSurvival] && !SurvivalOn(rules))) {
+		rules[kRuleSurvival] = 0;
+	}
+	g_menuSurvival = SurvivalOn(rules);
+	g_menuTeam = rules[kRuleMain] == 1;
+	if (rules[kRuleLives] >= kLivesValues) {
+		rules[kRuleLives] = 0;
+	}
+	if (SurvivalOn(rules)) {
+		rules[kRuleKillTarget] = kKillTargetInfinite;
+	}
+	g_menuLives = kLives[rules[kRuleLives]];
+	g_setNumber(screen, kDataNoKillShown, SurvivalOn(rules) ? kKillTargets + rules[kRuleLives] : rules[kRuleKillTarget]);
+	int sub = rules[kRuleSub];
+	g_setNumber(screen, kDataNoSubShown, SurvivalOn(rules) ? 2 : sub + (sub >= kSubPoints ? 1 : 0));
 	g_menuSeen = true;
 }
 
@@ -517,12 +1045,83 @@ void RulesInstall(unsigned char* base)
 	if (t) {
 		CloseHandle(t);
 	}
+	g_matchMgr = (uint8_t***)(base + (kRulesVas[build].matchMgr - 0x400000));
+	g_matchSetup = (uint8_t**)(base + (kRulesVas[build].matchSetup - 0x400000));
+	g_net = (void**)(base + (kRulesVas[build].net - 0x400000));
+	g_localSlot = (LocalSlotFn)(base + (kRulesVas[build].localSlot - 0x400000));
+	g_controllers = (uint8_t**)(base + (kRulesVas[build].controllers - 0x400000));
+	g_players = (uint8_t**)(base + (kRulesVas[build].players - 0x400000));
+	g_follow = (FollowFn)(base + (kRulesVas[build].follow - 0x400000));
+	g_followArg = (const float*)(base + (kRulesVas[build].followArg - 0x400000));
+	g_flashCall = (FlashCallFn)(base + (kRulesVas[build].flashCall - 0x400000));
+	g_sound = (SoundFn)(base + (kRulesVas[build].sound - 0x400000));
+	g_input = (uint8_t**)(base + (kRulesVas[build].input - 0x400000));
+	const uint8_t kBotCursorPrologue[] = {0x53, 0xbb, 0x01, 0x00, 0x00, 0x00};                         // push ebx; mov ebx,1
+	const uint8_t kBotStepPrologue[] = {0x56, 0x8b, 0xf1, 0x83, 0xbe, 0x90, 0x01, 0x00, 0x00, 0x01}; // push esi; mov esi,ecx; cmp [esi+0x190],1
+	g_botCursorOriginal = (MenuFn)Detour(base + (kRulesVas[build].botCursor - 0x400000), kBotCursorPrologue, sizeof(kBotCursorPrologue), (void*)&BotCursor);
+	g_botStepOriginal = (MenuFn)Detour(base + (kRulesVas[build].botStep - 0x400000), kBotStepPrologue, sizeof(kBotStepPrologue), (void*)&BotStep);
+	if (!g_botCursorOriginal || !g_botStepOriginal) {
+		XLS_LOG_WARN("mods: rules: training menu not hooked, no Survival rows for bot matches.");
+	}
+	// sub esp,0x5c; mov eax,[results]
+	uint8_t endPrologue[8] = {0x83, 0xec, 0x5c, 0xa1};
+	memcpy(endPrologue + 4, &kRulesVas[build].results, 4);
+	g_endCheckOriginal = (EndCheckFn)Detour(base + (kRulesVas[build].endCheck - 0x400000), endPrologue, sizeof(endPrologue), (void*)&EndCheck);
+	const uint8_t kRankingPrologue[] = {0x83, 0xec, 0x58, 0x53, 0x55, 0x56, 0x57}; // sub esp,0x58; push ebx/ebp/esi/edi
+	g_rankingOriginal = (RankingFn)Detour(base + (kRulesVas[build].ranking - 0x400000), kRankingPrologue, sizeof(kRankingPrologue), (void*)&Ranking);
+	if (!g_endCheckOriginal || !g_rankingOriginal) {
+		XLS_LOG_WARN("mods: rules: match end not hooked, survival matches end only by time.");
+	}
+	g_ctlUpdateOriginal = (ControlUpdateFn)Detour(base + (kRulesVas[build].ctlUpdate - 0x400000), kCtlUpdatePrologue, sizeof(kCtlUpdatePrologue), (void*)&ControlUpdate);
+	if (!g_ctlUpdateOriginal) {
+		XLS_LOG_WARN("mods: rules: controller update not hooked, survival can't hold respawns.");
+	}
+	HANDLE survival = CreateThread(nullptr, 0, SurvivalThread, nullptr, 0, nullptr);
+	if (survival) {
+		CloseHandle(survival);
+	}
 	XLS_LOG_INFO("mods: rules: hooked (%s).", build == 0 ? "DX11" : "DX9");
 }
 
 
-int RulesStep(int rule, int key, uint8_t* value)
+int RulesStep(int rule, int key, uint8_t* value, const std::function<int()>& original)
 {
+	if (rule == kRuleSub && (key == 10 || key == 11) && value[kRuleMain - kRuleSub] <= 1) {
+		uint8_t& survival = value[kRuleSurvival - kRuleSub];
+		bool on = *value == kSubKills && survival == 1;
+		int changed = 0;
+		if (key == 10 && *value == kSubKills && !on) { // Kills -> Survival
+			survival = 1;
+			changed = 1;
+		}
+		else if (key == 11 && on) { // Survival -> Kills
+			survival = 0;
+			changed = 1;
+		}
+		else {
+			uint8_t was = *value;
+			survival = 0;
+			changed = original() ? 2 : 0; // 2: the game's step (it made the sound)
+			if (changed && key == 11 && was == kSubPoints && *value == kSubKills) { // Points -> Survival
+				survival = 1;
+			}
+		}
+		g_menuSurvival = SurvivalOn(value - kRuleSub);
+		g_menuTeam = value[kRuleMain - kRuleSub] == 1;
+		if (g_menuSurvival) {
+			value[kRuleKillTarget - kRuleSub] = kKillTargetInfinite;
+		}
+		return changed;
+	}
+	if (rule == kRuleKillTarget && (key == 10 || key == 11) && SurvivalOn(value - kRuleKillTarget)) { // lives, no wrap
+		uint8_t& lives = value[kRuleLives - kRuleKillTarget];
+		int at = lives % kLivesValues + (key == 10 ? 1 : -1);
+		bool changed = at >= 0 && at < kLivesValues;
+		lives = (uint8_t)(changed ? at : lives % kLivesValues);
+		*value = kKillTargetInfinite;
+		g_menuLives = kLives[lives];
+		return changed ? 1 : 0;
+	}
 	for (int i = 0; i < kRows; i++) {
 		if (rule != kRowDefs[i].offset || (key != 10 && key != 11)) {
 			continue;
@@ -548,6 +1147,15 @@ uint32_t RulesMessageAlias(uint32_t id)
 	if (id >= (uint32_t)kMsgSecondary && id < (uint32_t)(kMsgSecondary + kSecondaryValues) && kSecondaryGameMsg[id - kMsgSecondary]) {
 		return kSecondaryGameMsg[id - kMsgSecondary];
 	}
+	if (id >= (uint32_t)kMsgKillRow && id < (uint32_t)(kMsgKillRow + kKillTargets)) {
+		return 96 + (id - kMsgKillRow); // MSG_KILLCOUNT values
+	}
+	if (id >= (uint32_t)kMsgSubElim && id < (uint32_t)kMsgSubElim + 5 && kSubElimGameMsg[id - kMsgSubElim]) {
+		return kSubElimGameMsg[id - kMsgSubElim];
+	}
+	if (id >= (uint32_t)kMsgSubTeam && id < (uint32_t)kMsgSubTeam + 6 && kSubTeamGameMsg[id - kMsgSubTeam]) {
+		return kSubTeamGameMsg[id - kMsgSubTeam];
+	}
 	return id;
 }
 
@@ -558,6 +1166,15 @@ const char* RulesMessage(uint32_t id)
 	}
 	if (id >= (uint32_t)kMsgSupply && id < (uint32_t)(kMsgSupply + kSupplyValues)) {
 		return kSupplyNames[id - kMsgSupply];
+	}
+	if (id == (uint32_t)(kMsgItemName + kItemKillRow) && g_menuSurvival) {
+		return "Respawns"; // the Kills row's label while Survival is picked
+	}
+	if (id == (uint32_t)kMsgSubElim + 2 || id == (uint32_t)kMsgSubTeam + 2) {
+		return kSurvivalName;
+	}
+	if (id >= (uint32_t)(kMsgKillRow + kKillTargets) && id < (uint32_t)(kMsgKillRow + kKillTargets + kLivesValues)) {
+		return kLivesNames[id - kMsgKillRow - kKillTargets];
 	}
 	for (const Row& r : kRowDefs) {
 		if (id == (uint32_t)(kMsgItemName + r.item)) {
@@ -656,14 +1273,26 @@ Bytes RowsScript()
 		a.Action(kInitArray);
 		a.Action(kSetMember);
 	}
+	// the sub-type rows read our display value and texts (Survival)
+	for (auto [item, msgBase] : {std::pair<int, int>{kItemSubElim, kMsgSubElim}, {kItemSubTeam, kMsgSubTeam}, {kItemKillRow, kMsgKillRow}}) {
+		a.Push("OnlineRule");
+		a.Action(kGetVariable);
+		a.Push("offsetArray");
+		a.Action(kGetMember);
+		a.Push({item, item == kItemKillRow ? kDataNoKillShown : kDataNoSubShown, msgBase, 2});
+		a.Action(kInitArray);
+		a.Action(kSetMember);
+	}
 	a.code.push_back(0); // ActionEnd
 	return a.code;
 }
 
 }
 
-// Inserts a DoAction with RowsScript before the root timeline's first ShowFrame.
-bool RulesPatchMenuFlash(std::vector<uint8_t>* gfx)
+namespace {
+
+// Inserts a DoAction with the script before the root timeline's first ShowFrame (after the root's own).
+bool InsertRootScript(std::vector<uint8_t>* gfx, const Bytes& script, const char* what)
 {
 	Bytes& f = *gfx;
 	if (f.size() < 16 || memcmp(f.data(), "GFX", 3) != 0) {
@@ -687,7 +1316,6 @@ bool RulesPatchMenuFlash(std::vector<uint8_t>* gfx)
 			return false;
 		}
 		if (code == 1) { // ShowFrame
-			Bytes script = RowsScript();
 			Bytes tag;
 			uint16_t h = (uint16_t)(12 << 6 | 0x3f); // DoAction, long form
 			tag.push_back((uint8_t)h);
@@ -698,12 +1326,24 @@ bool RulesPatchMenuFlash(std::vector<uint8_t>* gfx)
 			tag.insert(tag.end(), script.begin(), script.end());
 			f.insert(f.begin() + at, tag.begin(), tag.end());
 			*(uint32_t*)&f[4] = (uint32_t)f.size();
-			XLS_LOG_INFO("mods: rules: create-match rows added to the menu Flash (%zu bytes of script).", script.size());
+			XLS_LOG_INFO("mods: rules: %s added to the menu Flash (%zu bytes of script).", what, script.size());
 			return true;
 		}
 		at = body + length;
 	}
 	return false;
+}
+
+}
+
+bool RulesPatchMenuFlash(std::vector<uint8_t>* gfx)
+{
+	return InsertRootScript(gfx, RowsScript(), "create-match rows");
+}
+
+bool RulesPatchTrainingFlash(std::vector<uint8_t>* gfx)
+{
+	return InsertRootScript(gfx, Bytes(std::begin(kBotRowsScript), std::end(kBotRowsScript)), "AI Enemy Battle rows");
 }
 
 }

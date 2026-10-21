@@ -634,6 +634,24 @@ bool GenerateCreateMenu(const std::wstring& source, const std::wstring& out)
 	return changed && WriteWholeFile(out, ArcWrite(entries));
 }
 
+// Training's top menu (aTrainingTop.arc) with our AI Enemy Battle rows added to its Flash (id300).
+bool GenerateTrainingMenu(const std::wstring& source, const std::wstring& out)
+{
+	Bytes file;
+	std::vector<ArcEntry> entries;
+	if (!ReadWholeFile(source, &file) || !ArcRead(file, &entries)) {
+		return false;
+	}
+	bool changed = false;
+	for (ArcEntry& e : entries) {
+		size_t at = e.name.find_last_of('\\');
+		if (_stricmp(e.name.c_str() + (at == std::string::npos ? 0 : at + 1), "id300") == 0 && e.data.size() > 8 && memcmp(e.data.data(), "GFX", 3) == 0) {
+			changed |= RulesPatchTrainingFlash(&e.data);
+		}
+	}
+	return changed && WriteWholeFile(out, ArcWrite(entries));
+}
+
 // The create-match pictures of the bound maps that ship a thumbnail, for aBattlePlayerCreate.arc.
 // NOT YET: the picture is the id221 Flash's mc_monitor frame map + 2, and the frames for 13 / 14 are
 // empty (the 14 pictures ID221_SC00..SC13 are maps 0-12 and 15: SC13 is Frozen Wasteland's), so a
@@ -757,7 +775,8 @@ const std::wstring* PackagesGenerated(const std::wstring& rel, const std::wstrin
 	static const std::wstring creates[] = {L"nativepc\\arcxmltmppc\\abattleplayercreate.arc", L"nativepc\\arclp2xml\\id_title.arc",
 	                                       L"nativepc\\arclp2xml\\id_title_multi.arc"};
 	bool names = rel.compare(0, prefix.size(), prefix) == 0 && rel.size() >= 7 && rel.compare(rel.size() - 7, 7, L"_pc.arc") == 0;
-	if (!names && std::find(std::begin(creates), std::end(creates), rel) == std::end(creates)) {
+	bool training = rel == L"nativepc\\arcxmltmppc\\atrainingtop.arc";
+	if (!names && !training && std::find(std::begin(creates), std::end(creates), rel) == std::end(creates)) {
 		return nullptr;
 	}
 	int generation = g_generation;
@@ -768,8 +787,8 @@ const std::wstring* PackagesGenerated(const std::wstring& rel, const std::wstrin
 		return it->second.empty() ? nullptr : &it->second; // entries are never erased: pointers stay valid
 	}
 	std::wstring out = Cfg().modCacheDir + FormatW(L"generated\\g%d_", generation) + rel.substr(rel.find_last_of(L'\\') + 1);
-	if (names ? GenerateNames(source, out) : GenerateCreateMenu(source, out)) {
-		XLS_LOG_INFO("mods: maps: %s added to %ls.", names ? "names" : "rule rows", rel.c_str());
+	if (names ? GenerateNames(source, out) : training ? GenerateTrainingMenu(source, out) : GenerateCreateMenu(source, out)) {
+		XLS_LOG_INFO("mods: maps: %s added to %ls.", names ? "names" : training ? "AI Enemy Battle rows" : "rule rows", rel.c_str());
 		return &(g_generated[key] = out);
 	}
 	g_generated[key] = L"";

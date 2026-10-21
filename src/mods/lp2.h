@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include <string>
+#include <functional>
 #include <vector>
 
 namespace xls::mods {
@@ -25,10 +26,11 @@ void MapsPatchPickers(unsigned char* base);
 void RulesInstall(unsigned char* base);
 // The create-match rows of our rules (offsets 0x2e.. of the rules bytes): steps one (true when it
 // was ours), answers our MsgOnline texts, adds the rows to the menu's Flash (id221 GFx).
-int RulesStep(int rule, int key, uint8_t* value); // -1 not ours, else changed
+int RulesStep(int rule, int key, uint8_t* value, const std::function<int()>& original); // -1 not ours, 0 unchanged, 1 changed, 2 changed by original (sound made)
 const char* RulesMessage(uint32_t id);
 uint32_t RulesMessageAlias(uint32_t id); // our ids that reuse a game message -> that message
 bool RulesPatchMenuFlash(std::vector<uint8_t>* gfx);
+bool RulesPatchTrainingFlash(std::vector<uint8_t>* gfx); // our AI Enemy Battle rows (flash\training\id300)
 // A map package was bound to online slot 13 / 14 (packages.cpp): its base map's preload list and its size class.
 void MapsRebind(int slot, int base, int size);
 
