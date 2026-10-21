@@ -80,6 +80,9 @@ HRESULT WINAPI XLiveInitializeEx(XLIVE_INITIALIZE_INFO* pXii, DWORD dwTitleXLive
 
 	xls::NotifyInit();
 	xls::UsersInit();
+	if (xls::SteamReady()) {
+		xls::mods::SavesImport(xls::GamertagForXuid(xls::XuidFromSteamId(xls::SteamLocalId())));
+	}
 	xls::NetInit();
 	xls::SessionsInit();
 	xls::ContentStart();

@@ -25,6 +25,13 @@ Releases box on the repo page). Older test builds are on the
 > **Experimental.** Expect bugs. Everyone in a match needs the same build for the match rules to apply
 > to them.
 
+## Before installing
+
+**Back up your save(s).** Coming from GFWL, your progress is in a folder named after your GFWL
+gamertag (where to find it: [Your save](#your-save)). The dll only ever copies saves, it never moves or
+deletes them, but copy the whole `LOST PLANET 2` save folder somewhere safe first anyway. If you
+had more than one GFWL profile, that backs them all up.
+
 ## Install
 
 1. Steam → Lost Planet 2 → Manage → **Browse local files**.
@@ -39,6 +46,26 @@ Releases box on the repo page). Older test builds are on the
 files" (or a game update) also puts Capcom's `xlive.dll` back; copy ours again afterwards.
 
 **Problems:** send `xlive_steamworks.log` from the game folder.
+
+## Your save
+
+LP2 keeps one save per profile name, in a folder named after it:
+
+- Windows: `Documents\CAPCOM\LOST PLANET 2\<name>\Lostplanet2.Lostplanet2Save-capcom`
+- Linux / Steam Deck (Proton): `steamapps/compatdata/45750/pfx/drive_c/users/steamuser/Documents/CAPCOM/LOST PLANET 2/<name>/`
+  in the Steam library that holds the game
+
+Under GFWL `<name>` was your GFWL gamertag. With this dll it is your Steam name (cut to 15 characters,
+non-English letters become `_`), so the game would otherwise start you on a fresh save.
+
+**What the import does:** on start, if the folder for your Steam name has no save yet, the dll copies
+the most recently saved file from any other profile folder into it, and logs
+`saves: imported the save of <old> into <new>`. It only ever copies: the old folder and its save
+are left as they were, and nothing happens once your Steam-name folder has a save. If you had
+several GFWL profiles, it picks the one played last; to use a different one, close the game and copy
+that profile's `Lostplanet2.Lostplanet2Save-capcom` over the one in your Steam-name folder.
+
+**To restore** a backup, close the game and copy it back over.
 
 ## What it adds
 

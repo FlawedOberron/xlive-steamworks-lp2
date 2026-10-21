@@ -45,6 +45,9 @@ void PluginsGiveUp();
 void NotifyTitleStarted();
 bool TitleStarted();
 
+// First run under a new gamertag: copies the newest other gamertag's save in (GFWL → Steam switch).
+void SavesImport(const std::string& gamertag);
+
 // Re-applies the import hooks if something (SteamStub) restored the import table.
 void OverlayVerify();
 

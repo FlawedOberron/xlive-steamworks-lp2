@@ -104,7 +104,7 @@ endif()
 # A title that links the static library includes <xlive/xfuncs.h> and <xlive/xlive_steamworks.h>.
 target_include_directories(xlive PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
-target_link_libraries(xlive PUBLIC steam_api PRIVATE ws2_32 iphlpapi winmm comctl32 shlwapi)
+target_link_libraries(xlive PUBLIC steam_api PRIVATE ws2_32 iphlpapi winmm comctl32 shlwapi shell32)
 
 set_target_properties(xlive PROPERTIES
     CXX_STANDARD 17

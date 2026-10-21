@@ -92,12 +92,18 @@ struct RulesVas {
 	uint32_t botCursor;   // training menu: AI Enemy Battle up / down, fastcall(menu) (DX11 FUN_00f44680)
 	uint32_t botStep;     // training menu: AI Enemy Battle left / right, fastcall(menu) (DX11 FUN_00f44760)
 	uint32_t flashCall;   // a menu's Flash call: thiscall(menu, 0, name, args, count) (DX11 FUN_00f4a390)
-	uint32_t input;       // global -> the menu input: +0x330 pressed (up 0x40, down 0x80, left 0x100, right 0x200), +0x78 sounds
-	uint32_t sound;       // thiscall(sounds, id, owner, 0) (DX11 FUN_00832f00; 7 = cursor)
+	uint32_t input;       // global -> the menu input: +0x330 pressed (up 0x40, down 0x80, left 0x100, right 0x200)
+	uint32_t modeStart;   // offline mode start, thiscall(launch, mode) (DX11 FUN_00873b80): AI Enemy Battle adds slots 1..15 as AI
+	uint32_t botLoop;     // its `cmp bl,0x10` closing that loop
+	uint32_t botPlayers;  // its `mov byte [players+0x254],0x10`
+	uint32_t botCount;    // its `mov dword [players+0x50188],0xf`
+	uint32_t menuHelp;    // a training menu's bottom bar text: thiscall(menu, MsgCinesco id) (DX11 FUN_00f45eb0)
+	uint32_t resultsSkip; // the results screen's `je` skipping its slot-present check offline (74 13)
+	uint32_t status;      // global -> the game status: +0x14594 flag bits (0x80000000 >> id), 0x4000000 = cockpit off
 };
 const RulesVas kRulesVas[] = {
-	{0xc7aa20, 0xc7a820, 0xeca930, 0x20fc, 0x8fb130, 0xe8c270, 0xf4a330, 0x17e9840, 0xc86160, 0x2180, 0xc7cf15, 0xecac50, 0xed1e00, 0x18e086c, 0x1852850, 0x8029c0, 0x1852144, 0x8ff650, 0x1852080, 0x8e5e30, 0x16f7c6c, 0x1008ef0, 0x1852238, 0x1009b90, 0x18520c0, 0xf44680, 0xf44760, 0xf4a390, 0x18e0860, 0x832f00}, // DX11
-	{0xc6ae10, 0xc6ac10, 0xebab30, 0x20ec, 0x8eb7d0, 0xe7c1e0, 0xf3a600, 0x17d97e0, 0xc76550, 0x2170, 0xc6d305, 0xebae50, 0xec1ff0, 0x18ce780, 0x18427b0, 0x7f3b00, 0x18420a4, 0x8efcf0, 0x1841fe0, 0x8d64d0, 0x16e7098, 0xff8b10, 0x1842198, 0xff97b0, 0x1842020, 0xf34940, 0xf34a20, 0xf3a660, 0x18ce774, 0x824110}, // DX9
+	{0xc7aa20, 0xc7a820, 0xeca930, 0x20fc, 0x8fb130, 0xe8c270, 0xf4a330, 0x17e9840, 0xc86160, 0x2180, 0xc7cf15, 0xecac50, 0xed1e00, 0x18e086c, 0x1852850, 0x8029c0, 0x1852144, 0x8ff650, 0x1852080, 0x8e5e30, 0x16f7c6c, 0x1008ef0, 0x1852238, 0x1009b90, 0x18520c0, 0xf44680, 0xf44760, 0xf4a390, 0x18e0860, 0x873b80, 0x873df6, 0x873d1f, 0x873d5d, 0xf45eb0, 0xeaa1ba, 0x18d08ac}, // DX11
+	{0xc6ae10, 0xc6ac10, 0xebab30, 0x20ec, 0x8eb7d0, 0xe7c1e0, 0xf3a600, 0x17d97e0, 0xc76550, 0x2170, 0xc6d305, 0xebae50, 0xec1ff0, 0x18ce780, 0x18427b0, 0x7f3b00, 0x18420a4, 0x8efcf0, 0x1841fe0, 0x8d64d0, 0x16e7098, 0xff8b10, 0x1842198, 0xff97b0, 0x1842020, 0xf34940, 0xf34a20, 0xf3a660, 0x18ce774, 0x8644d0, 0x864746, 0x86466f, 0x8646ad, 0xf36170, 0xe9a44a, 0x18c080c}, // DX9
 };
 // push esi; push edi; mov edi,[esp+0xc]; test di,di; (then jge rel32, left in place)
 const uint8_t kAddAmmoPrologue[] = {0x56, 0x57, 0x8b, 0x7c, 0x24, 0x0c, 0x66, 0x85, 0xff};
@@ -207,6 +213,7 @@ std::atomic<bool> g_offline{true}; // not in a lobby (training): the bots run on
 // Training's AI Enemy Battle rows (see BotCursor): armed while that screen was the last one used
 std::atomic<bool> g_botArmed{false}, g_botSurvival{false};
 std::atomic<int> g_botLives{3}, g_botRule{0}; // index into kLives; the screen's rule (0 Elimination, 1 Team Elimination)
+std::atomic<int> g_botCount{15};
 std::atomic<bool> g_menuSurvival{false};
 std::atomic<int> g_lives{0};
 std::atomic<int> g_menuLives{0};
@@ -492,6 +499,70 @@ void Spectate(uint8_t* entry, int self, bool force)
 	}
 }
 
+// An out player's body stays where it fell (the respawn is what removes it, as below), and the bots
+// keep shooting at it: a few seconds into the hold it is removed the respawn's way (DX11 0x8ffedf).
+// Not while a camera still follows it (the spectator moves on first). The controller is also the
+// slot entry's player (+0x480), whose body the same +0x40 is.
+const uint32_t kCtlBody = 0x40, kBodyRemoveSlot = 0x30 / 4;
+const DWORD kBodyRemoveDelay = 4000;
+DWORD g_outSince[16];
+
+void RemoveBody(uint8_t* ctl)
+{
+	int slot = ctl[kCtlSlot];
+	uint8_t* body = *(uint8_t**)(ctl + kCtlBody);
+	if (slot >= 16 || !body || ctl[kCtlState] != kStateDeath) {
+		return;
+	}
+	DWORD now = GetTickCount();
+	if (!g_outSince[slot]) {
+		g_outSince[slot] = now;
+	}
+	if (now - g_outSince[slot] < kBodyRemoveDelay || !g_controllers[slot] || *(uint8_t**)(g_controllers[slot] + kCtlPlayer) != ctl) {
+		return;
+	}
+	for (int i = 0; i < 16; i++) {
+		uint8_t* cam = g_controllers[i] ? *(uint8_t**)(g_controllers[i] + kCtlCamera) : nullptr;
+		if (cam && *(uint8_t**)(cam + kCameraBody) == body) {
+			return;
+		}
+	}
+	using RemoveFn = void(__attribute__((thiscall)) *)(uint8_t*);
+	((RemoveFn)(*(void***)body)[kBodyRemoveSlot])(body);
+	*(uint8_t**)(ctl + kCtlBody) = nullptr;
+	XLS_LOG_INFO("mods: rules: survival: player %d is out, body removed.", slot);
+}
+
+// The cockpit (HUD) is off while the local player spectates: the game's own status flag (events set it;
+// the HUD update DX11 0xee1063 skips the cockpit while it is on). Only ever cleared if we set it; the
+// survival thread clears it too once nobody spectates (match over, quit).
+uint8_t** g_status = nullptr;
+const uint32_t kStatusFlags = 0x14594, kStatusCockpitOff = 0x4000000;
+std::atomic<bool> g_hudHidden{false};
+std::atomic<DWORD> g_hudTouched{0};
+
+void HideHud(bool hide)
+{
+	LONG* flags = g_status && *g_status ? (LONG*)(*g_status + kStatusFlags) : nullptr;
+	if (!flags || hide == g_hudHidden) {
+		if (hide) {
+			g_hudTouched = GetTickCount();
+		}
+		return;
+	}
+	if (hide && (*flags & kStatusCockpitOff)) {
+		return; // already off (an event): not ours to clear
+	}
+	if (hide) {
+		InterlockedOr(flags, kStatusCockpitOff);
+		g_hudTouched = GetTickCount();
+	} else {
+		InterlockedAnd(flags, ~(LONG)kStatusCockpitOff);
+	}
+	g_hudHidden = hide;
+	XLS_LOG_INFO("mods: rules: survival: HUD %s.", hide ? "hidden while spectating" : "back");
+}
+
 void __attribute__((thiscall)) ControlUpdate(uint8_t* ctl)
 {
 	if (g_localSlot && *g_net) { // on the game thread, where the game asks it too
@@ -517,6 +588,10 @@ void __attribute__((thiscall)) ControlUpdate(uint8_t* ctl)
 	if (!hold) {
 		if (local) {
 			g_watched = -1;
+			HideHud(false);
+		}
+		if (ctl && ctl[kCtlSlot] < 16) {
+			g_outSince[ctl[kCtlSlot]] = 0;
 		}
 		return;
 	}
@@ -534,7 +609,9 @@ void __attribute__((thiscall)) ControlUpdate(uint8_t* ctl)
 	}
 	if (local) {
 		Spectate(g_controllers[self], self, held);
+		HideHud(true);
 	}
+	RemoveBody(ctl);
 }
 
 // Survival's end. The match flow (DX11 FUN_0100e1a0) asks the host's end check every frame (kill
@@ -545,7 +622,7 @@ using EndCheckFn = bool(__attribute__((fastcall)) *)(void*);
 EndCheckFn g_endCheckOriginal = nullptr;
 using RankingFn = void(__attribute__((thiscall)) *)(uint8_t*, int);
 RankingFn g_rankingOriginal = nullptr;
-const uint32_t kSetupRule = 0x28, kSetupSlotLeft = 0x6a; // +0x1b2 of a slot record: not in the ranking
+const uint32_t kSetupRule = 0x28, kSetupPlayers = 0x70, kSetupSlotLeft = 0x6a; // +0x1b2 of a slot record: not in the ranking
 uint8_t** g_players = nullptr;
 const uint32_t kPlayersSlots = 0x28, kPlayerInPlay = 8; // bit 0
 const uint32_t kNetHostSlot = 0xa1f8, kNetLocalSlot = 0xa1fc;
@@ -656,12 +733,10 @@ struct FlashArg {
 };
 using FlashCallFn = bool(__attribute__((thiscall)) *)(uint8_t*, int, const char*, FlashArg*, int);
 FlashCallFn g_flashCall = nullptr;
-using SoundFn = void(__attribute__((thiscall)) *)(void*, int, void*, int);
-SoundFn g_sound = nullptr;
 uint8_t** g_input = nullptr;
 const uint32_t kMenuState = 0x190, kMenuPhase = 0x194, kMenuRule = 0x198, kMenuMode = 0x1a0, kMenuRow = 0x1b0, kMenuFlags = 0x1d4;
-const uint32_t kMenuMouseOn = 0x168, kMenuMouse = 0x154, kMenuClick = 0x15c, kInputPressed = 0x330, kInputSounds = 0x78;
-const int kPhaseBot = 2, kModeBusy = 0x3e5, kBotRows = 4, kMouseBotRow = 0x22e, kMouseArrowL = 10, kMouseArrowR = 11;
+const uint32_t kMenuMouseOn = 0x168, kMenuMouse = 0x154, kMenuClick = 0x15c, kInputPressed = 0x330;
+const int kPhaseBot = 2, kModeBusy = 0x3e5, kMouseBotRow = 0x22e, kMouseArrowL = 10, kMouseArrowR = 11;
 const uint32_t kKeyUp = 0x40, kKeyDown = 0x80, kKeyLeft = 0x100, kKeyRight = 0x200, kFlagRow = 0x80;
 
 bool BotScreen(uint8_t* menu)
@@ -669,25 +744,42 @@ bool BotScreen(uint8_t* menu)
 	return *(int32_t*)(menu + kMenuState) == 1 && *(int32_t*)(menu + kMenuPhase) == kPhaseBot && *(int32_t*)(menu + kMenuMode) != kModeBusy;
 }
 
+// The rows by their item number (the game's Map 0 and Game Type 1, our Survival 2, Respawns 3,
+// Bots 4) in screen order, the shown ones only: Survival for the elimination rules, Respawns with
+// Survival on.
+const int kRowBots = 4;
+int BotRowsShown(uint8_t* menu, int* rows)
+{
+	int n = 0;
+	rows[n++] = kRowBots;
+	rows[n++] = 0;
+	rows[n++] = 1;
+	if (*(int32_t*)(menu + kMenuRule) <= 1) {
+		rows[n++] = 2;
+		if (g_botSurvival) {
+			rows[n++] = 3;
+		}
+	}
+	return n;
+}
+
 void BotRowsDraw(uint8_t* menu)
 {
-	int rule = *(int32_t*)(menu + kMenuRule);
-	g_botRule = rule;
-	FlashArg args[4] = {{0, 4, "SURVIVAL"}, {0, 4, rule > 1 ? "-" : g_botSurvival ? "On" : "Off"}, {0, 4, "RESPAWNS"}, {0, 4, kLivesNames[g_botLives % kLivesValues]}};
-	if (g_flashCall) {
-		g_flashCall(menu, 0, "lp2BotRows", args, 4);
+	g_botRule = *(int32_t*)(menu + kMenuRule);
+	int rows[5], shown = BotRowsShown(menu, rows);
+	std::string bots = std::to_string(g_botCount.load());
+	FlashArg args[8] = {{0, 4, "SURVIVAL"}, {0, 4, g_botSurvival ? "On" : "Off"}, {0, 4, "RESPAWNS"}, {0, 4, kLivesNames[g_botLives % kLivesValues]},
+	                    {0, 4, shown > 3 ? "1" : "0"}, {0, 4, shown > 4 ? "1" : "0"}, {0, 4, "BOTS"}, {0, 4, bots.c_str()}};
+	if (!g_flashCall || !g_flashCall(menu, 0, "lp2BotRows", args, 8)) {
+		static bool warned = false;
+		if (!warned) {
+			warned = true;
+			XLS_LOG_WARN("mods: rules: training: the menu Flash has no lp2BotRows (rows not added).");
+		}
 	}
 }
 
-void BotSound(uint8_t* menu)
-{
-	void* sounds = *g_input ? *(void**)(*g_input + kInputSounds) : nullptr;
-	if (sounds && g_sound) {
-		g_sound(sounds, 7, menu, 0);
-	}
-}
-
-void __attribute__((fastcall)) BotCursor(uint8_t* menu)
+void __attribute__((fastcall)) BotCursorBody(uint8_t* menu)
 {
 	int32_t state = *(int32_t*)(menu + kMenuState);
 	if (state == 0 || state == 1) { // back on the top menu, or a training screen: armed only on ours
@@ -695,9 +787,17 @@ void __attribute__((fastcall)) BotCursor(uint8_t* menu)
 	}
 	static uint8_t* drawn = nullptr;
 	static int drawnRule = -1;
-	if (!BotScreen(menu) || !*g_input) {
+	if (state != 1 || *(int32_t*)(menu + kMenuPhase) != kPhaseBot) { // left the screen (not just busy)
 		drawn = nullptr;
 		return;
+	}
+	if (!BotScreen(menu) || !*g_input) {
+		return;
+	}
+	int32_t& row = *(int32_t*)(menu + kMenuRow);
+	if (drawn != menu) { // shown: the cursor starts on the top row
+		row = kRowBots;
+		*(uint32_t*)(menu + kMenuFlags) |= kFlagRow;
 	}
 	if (drawn != menu || drawnRule != *(int32_t*)(menu + kMenuRule)) { // shown, or the rule changed
 		drawn = menu;
@@ -705,20 +805,35 @@ void __attribute__((fastcall)) BotCursor(uint8_t* menu)
 		BotRowsDraw(menu);
 	}
 	uint32_t pressed = *(uint32_t*)(*g_input + kInputPressed);
-	int32_t& row = *(int32_t*)(menu + kMenuRow);
+	int rows[5], shown = BotRowsShown(menu, rows), at = shown - 1; // a hidden row: the last shown
+	for (int i = 0; i < shown; i++) {
+		if (rows[i] == row) {
+			at = i;
+		}
+	}
 	int was = row;
 	if (pressed & kKeyUp) {
-		row = row == 0 ? kBotRows - 1 : row - 1;
+		at = at == 0 ? shown - 1 : at - 1;
 	} else if (pressed & kKeyDown) {
-		row = row + 1 >= kBotRows ? 0 : row + 1;
+		at = at + 1 >= shown ? 0 : at + 1;
 	}
+	row = rows[at];
 	int mouse = *(int32_t*)(menu + kMenuMouse) - kMouseBotRow;
-	if (menu[kMenuMouseOn] && mouse >= 0 && mouse < kBotRows) {
-		row = mouse;
+	for (int i = 0; menu[kMenuMouseOn] && i < shown; i++) {
+		if (rows[i] == mouse) {
+			row = mouse;
+		}
 	}
 	if (row != was || (pressed & (kKeyUp | kKeyDown))) {
 		*(uint32_t*)(menu + kMenuFlags) |= kFlagRow;
 	}
+}
+
+// The game's caller passes the menu in ecx on to the next handler (f34a20 / f44760) without
+// reloading it, so the replacement must keep ecx (and edx) as the original does.
+extern "C" void __attribute__((naked)) BotCursor()
+{
+	asm volatile("push %%ecx\n\tpush %%edx\n\tcall %P0\n\tpop %%edx\n\tpop %%ecx\n\tret" ::"i"(BotCursorBody));
 }
 
 void __attribute__((fastcall)) BotStep(uint8_t* menu)
@@ -734,7 +849,13 @@ void __attribute__((fastcall)) BotStep(uint8_t* menu)
 	if (!dir) {
 		return;
 	}
-	if (*(int32_t*)(menu + kMenuRow) == 2) {
+	if (*(int32_t*)(menu + kMenuRow) == kRowBots) {
+		int at = g_botCount + dir;
+		if (at < 1 || at > 15) {
+			return;
+		}
+		g_botCount = at;
+	} else if (*(int32_t*)(menu + kMenuRow) == 2) {
 		if (*(int32_t*)(menu + kMenuRule) > 1) {
 			return; // Survival only for the elimination rules
 		}
@@ -746,9 +867,76 @@ void __attribute__((fastcall)) BotStep(uint8_t* menu)
 		}
 		g_botLives = at;
 	}
-	BotSound(menu);
 	BotRowsDraw(menu);
-	XLS_LOG_INFO("mods: rules: training: survival %s, %s respawns.", g_botSurvival ? "on" : "off", kLivesNames[g_botLives % kLivesValues]);
+	XLS_LOG_INFO("mods: rules: training: %d bots, survival %s, %s respawns.", g_botCount.load(), g_botSurvival ? "on" : "off", kLivesNames[g_botLives % kLivesValues]);
+}
+
+// The bottom bar text: AI Enemy Battle asks for MsgCinesco 0x106 + row, so our rows get ours
+// (the Bots row's would be DUMMY).
+using MenuHelpFn = void(__attribute__((thiscall)) *)(uint8_t*, int);
+MenuHelpFn g_menuHelpOriginal = nullptr;
+const int kHelpBotRow = 0x106;
+
+extern "C" void __attribute__((thiscall)) MenuHelpBody(uint8_t* menu, int id)
+{
+	static const char* const kHelp[] = {"Limit respawns: the last player or team standing wins.", "How many times each player can respawn.",
+	                                    "How many AI enemies join the battle (1 to 15)."};
+	int row = id - kHelpBotRow;
+	if (!BotScreen(menu) || row < 2 || row > kRowBots) {
+		g_menuHelpOriginal(menu, id);
+		return;
+	}
+	if (menu[0x1d0]) { // as the original: only while the bar is up
+		FlashArg arg = {0, 4, kHelp[row - 2]};
+		g_flashCall(menu, 0, "_root.mc_CINESCO.cinescoMsg", &arg, 1);
+	}
+}
+
+// Its callers keep the menu in ecx across the call, so the replacement keeps ecx and edx.
+extern "C" void __attribute__((naked)) MenuHelp()
+{
+	asm volatile("push %%ecx\n\tpush %%edx\n\tpushl 12(%%esp)\n\tcall %P0\n\tpop %%edx\n\tpop %%ecx\n\tret $4" ::"i"(MenuHelpBody));
+}
+
+// Offline mode start: AI Enemy Battle (modes 51..75, 5 maps x 5 rules) fills slots 1..15 with AI
+// in a loop, and sets the player and AI counts to 16 and 15. Their immediates take the Bots row's
+// count for a match from that screen, and the game's own otherwise.
+using ModeStartFn = uint32_t(__attribute__((thiscall)) *)(void*, int);
+ModeStartFn g_modeStartOriginal = nullptr;
+uint8_t *g_botLoop = nullptr, *g_botPlayers = nullptr, *g_botCountImm = nullptr, *g_resultsSkip = nullptr;
+const int kModeBotFirst = 51, kModeBotLast = 75;
+
+void WriteImm(uint8_t* at, uint8_t value)
+{
+	DWORD old;
+	if (VirtualProtect(at, 1, PAGE_EXECUTE_READWRITE, &old)) {
+		*at = value;
+		VirtualProtect(at, 1, old, &old);
+	}
+}
+
+uint32_t __attribute__((thiscall)) ModeStart(void* launch, int mode)
+{
+	bool bots = g_botArmed && mode >= kModeBotFirst && mode <= kModeBotLast;
+	uint8_t count = bots ? (uint8_t)g_botCount.load() : 15, slots = count + 1;
+	if (*g_botLoop != slots) {
+		WriteImm(g_botLoop, slots);
+		WriteImm(g_botPlayers, slots);
+		WriteImm(g_botCountImm, count);
+	}
+	// Offline the results list all 16 slots; with fewer bots they check, as online, which are present.
+	const uint8_t skip[2] = {0x74, 0x13};
+	if (g_resultsSkip && (g_resultsSkip[0] == 0x90) != bots) {
+		WriteImm(g_resultsSkip, bots ? 0x90 : skip[0]);
+		WriteImm(g_resultsSkip + 1, bots ? 0x90 : skip[1]);
+	}
+	uint32_t result = g_modeStartOriginal(launch, mode);
+	uint8_t* setup = *g_matchSetup;
+	if (bots && setup) { // the match's player count (16 as set up): the results' "Players n/max"
+		*(int32_t*)(setup + kSetupPlayers) = slots;
+	}
+	XLS_LOG_INFO("mods: rules: training: mode %d started (%u bots%s).", mode, count, bots ? ", from the Bots row" : "");
+	return result;
 }
 
 template <typename T>
@@ -763,6 +951,9 @@ DWORD WINAPI SurvivalThread(LPVOID)
 	std::string last;
 	bool wasOut = false;
 	for (;; Sleep(200)) {
+		if (g_hudHidden && GetTickCount() - g_hudTouched > 1000) { // nobody spectating any more
+			HideHud(false);
+		}
 		uint8_t *mgr = nullptr, *owner = nullptr, *setup = nullptr;
 		ReadGame(g_matchMgr, &mgr);
 		ReadGame(g_matchSetup, &setup);
@@ -828,6 +1019,7 @@ using PushRulesFn = void(__attribute__((thiscall)) *)(void*, uint8_t*);
 using SetNumberFn = void(__attribute__((thiscall)) *)(void*, uint32_t, uint32_t);
 PushRulesFn g_pushRulesOriginal = nullptr;
 SetNumberFn g_setNumber = nullptr;
+
 const uint8_t kPushRulesPrologue[] = {0x83, 0xec, 0x20, 0x53, 0x55, 0x56}; // sub esp,0x20; push ebx; push ebp; push esi
 
 void __attribute__((thiscall)) PushRules(void* screen, uint8_t* rules)
@@ -1054,14 +1246,28 @@ void RulesInstall(unsigned char* base)
 	g_follow = (FollowFn)(base + (kRulesVas[build].follow - 0x400000));
 	g_followArg = (const float*)(base + (kRulesVas[build].followArg - 0x400000));
 	g_flashCall = (FlashCallFn)(base + (kRulesVas[build].flashCall - 0x400000));
-	g_sound = (SoundFn)(base + (kRulesVas[build].sound - 0x400000));
 	g_input = (uint8_t**)(base + (kRulesVas[build].input - 0x400000));
+	g_status = (uint8_t**)(base + (kRulesVas[build].status - 0x400000));
 	const uint8_t kBotCursorPrologue[] = {0x53, 0xbb, 0x01, 0x00, 0x00, 0x00};                         // push ebx; mov ebx,1
 	const uint8_t kBotStepPrologue[] = {0x56, 0x8b, 0xf1, 0x83, 0xbe, 0x90, 0x01, 0x00, 0x00, 0x01}; // push esi; mov esi,ecx; cmp [esi+0x190],1
 	g_botCursorOriginal = (MenuFn)Detour(base + (kRulesVas[build].botCursor - 0x400000), kBotCursorPrologue, sizeof(kBotCursorPrologue), (void*)&BotCursor);
 	g_botStepOriginal = (MenuFn)Detour(base + (kRulesVas[build].botStep - 0x400000), kBotStepPrologue, sizeof(kBotStepPrologue), (void*)&BotStep);
 	if (!g_botCursorOriginal || !g_botStepOriginal) {
 		XLS_LOG_WARN("mods: rules: training menu not hooked, no Survival rows for bot matches.");
+	}
+	g_botLoop = base + (kRulesVas[build].botLoop - 0x400000) + 2;       // 80 fb 10
+	g_botPlayers = base + (kRulesVas[build].botPlayers - 0x400000) + 6; // c6 83 54 02 00 00 10
+	g_botCountImm = base + (kRulesVas[build].botCount - 0x400000) + 6;  // c7 83 88 01 05 00 0f 00 00 00
+	const uint8_t kModeStartPrologue[] = {0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8, 0x83, 0xec, 0x74}; // push ebp; mov ebp,esp; and esp,-8; sub esp,0x74
+	uint8_t* skip = base + (kRulesVas[build].resultsSkip - 0x400000);
+	g_resultsSkip = skip[0] == 0x74 && skip[1] == 0x13 ? skip : nullptr;
+	if (g_botLoop[-2] == 0x80 && g_botLoop[0] == 0x10 && g_botPlayers[0] == 0x10 && g_botCountImm[0] == 0x0f) {
+		g_modeStartOriginal = (ModeStartFn)Detour(base + (kRulesVas[build].modeStart - 0x400000), kModeStartPrologue, sizeof(kModeStartPrologue), (void*)&ModeStart);
+	}
+	const uint8_t kMenuHelpPrologue[] = {0x83, 0xec, 0x10, 0x56, 0x57, 0x8b, 0xf1}; // sub esp,0x10; push esi; push edi; mov esi,ecx
+	g_menuHelpOriginal = (MenuHelpFn)Detour(base + (kRulesVas[build].menuHelp - 0x400000), kMenuHelpPrologue, sizeof(kMenuHelpPrologue), (void*)&MenuHelp);
+	if (!g_modeStartOriginal) {
+		XLS_LOG_WARN("mods: rules: AI Enemy Battle start not hooked, the Bots row has no effect.");
 	}
 	// sub esp,0x5c; mov eax,[results]
 	uint8_t endPrologue[8] = {0x83, 0xec, 0x5c, 0xa1};
