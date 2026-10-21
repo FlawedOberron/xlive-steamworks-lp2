@@ -17,8 +17,10 @@ which the build fetches.
 
 ## Download
 
-Test builds are on the [Releases page](https://github.com/FlawedOberron/xlive-steamworks-lp2/releases)
-(marked *Pre-release*, so they don't show as "Latest"). Take the newest `lp2-recolonised-test.zip`.
+Take `lp2-recolonised-test.zip` from the
+[latest release](https://github.com/FlawedOberron/xlive-steamworks-lp2/releases/latest) (also in the
+Releases box on the repo page). Older test builds are on the
+[Releases page](https://github.com/FlawedOberron/xlive-steamworks-lp2/releases).
 
 > **Experimental.** Expect bugs. Everyone in a match needs the same build for the match rules to apply
 > to them.

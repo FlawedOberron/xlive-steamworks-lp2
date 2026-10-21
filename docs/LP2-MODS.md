@@ -5,8 +5,8 @@ A Lost Planet 2 build of [xlive-steamworks](https://github.com/sokie/xlive-steam
 multiplayer works again. This build adds a mod loader on top: quality-of-life options, extra
 maps and custom character parts.
 
-> **Status: work in progress, test builds on the [Releases page](https://github.com/FlawedOberron/xlive-steamworks-lp2/releases)
-> (Pre-release).** Map packages, match rules and hold-to-zoom work in game. Custom parts export from
+> **Status: work in progress, test builds on the [Releases page](https://github.com/FlawedOberron/xlive-steamworks-lp2/releases/latest)
+> (latest).** Map packages, match rules and hold-to-zoom work in game. Custom parts export from
 > Blender but are not loaded by the game yet, and maps / parts aren't sent between players yet. The
 > roadmap is at the end.
 
