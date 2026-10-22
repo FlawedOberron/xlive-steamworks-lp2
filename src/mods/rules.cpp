@@ -2,6 +2,7 @@
 #include "mods/package.h"
 #include "mods/parts.h"
 #include "mods/flash/botrows.h"
+#include "mods/flash/survrows.h"
 
 #include "api/xsession.h"
 #include "core/config.h"
@@ -45,13 +46,14 @@
 // Ids are 0x04KK0000, KK the weapon kind (0x0c sidearm).
 //
 // Create-match rows: the rules bytes (0x38, saved with the match settings) use offsets up to 0x2d;
-// ours are 0x2e secondary (0 none, then kSecondaryKinds), 0x2f unlimited ammo, 0x30 unlimited grenades. The
+// ours are 0x2e secondary (0 none, then kSecondaryKinds), 0x2f infinite ammo / grenades (bits), 0x31 ammo
+// supply (0x30 free). The
 // row table (DX11 0x17e9840) holds per category (16 x 0x23 bytes: main, sub, then per page a row
 // count and 10 rules offsets) which offset each row edits; the Settings 1 page (page 1, 7 rows in 14
-// categories) gets ours as rows 7-9. The Flash (id221) has its own rows: OnlineRule.sub1ItemArray
+// categories) gets ours as rows 7-8. The Flash (id221) has its own rows: OnlineRule.sub1ItemArray
 // [category] lists item ids, offsetArray[item] = [MsgOnline value base, DataNo]; the label is
-// MsgOnline 38 + item. Ours are items 500-502 (labels 538-540, served by RulesMessage), values
-// pushed as DataNo 75-77 next to the game's rules.
+// MsgOnline 38 + item. Ours are items 500, 501, 503 (labels 538 + n, served by RulesMessage), values
+// pushed as DataNo 75, 76, 78 next to the game's rules.
 
 namespace xls::mods {
 
@@ -146,6 +148,11 @@ const int kMsgItemName = 38; // MsgOnline label of item i: 38 + i
 const int kMsgOffOn = 362;   // MsgOnline MSG_COMMON_OFF (Off, On)
 const int kMsgSecondary = 600;
 const int kMsgSupply = 610;
+const int kMsgInfinite = 620;
+// Infinite Ammo: one row for both rules, bit 0 ammo, bit 1 grenades. Rules byte 0x30 held Unlimited
+// Grenades before (moved into bit 1 when a saved match is loaded) and is free now.
+const char* const kInfiniteNames[] = {"Off", "Weapons", "Grenades", "All"};
+const int kInfiniteValues = 4, kInfiniteAmmo = 1, kInfiniteGrenades = 2, kRuleOldGrenades = 0x30;
 
 // Survival: a sub-type of Elimination / Team Elimination shown between Kills and Points. The game
 // keeps Kills (sub 1, so the category and its rows are Kills') and rules byte 0x32 says survival. The
@@ -193,12 +200,11 @@ struct Row {
 };
 const Row kRowDefs[] = {
 	{kPageSettings2, 0x2e, kSecondaryValues, 500, 75, kMsgSecondary, "Default Secondary"},
-	{kPageSettings2, 0x2f, 2, 501, 76, kMsgOffOn, "Unlimited Ammo"},
-	{kPageSettings2, 0x30, 2, 502, 77, kMsgOffOn, "Unlimited Grenades"},
+	{kPageSettings2, 0x2f, kInfiniteValues, 501, 76, kMsgInfinite, "Infinite Ammo"},
 	{kPageSettings3, 0x31, kSupplyValues, 503, 78, kMsgSupply, "Ammo Supply"},
 };
 const int kRows = (int)(sizeof(kRowDefs) / sizeof(kRowDefs[0]));
-enum { kRowSecondary, kRowAmmo, kRowGrenades, kRowSupply };
+enum { kRowSecondary, kRowInfinite, kRowSupply };
 // Categories 0-13 have the full pages (14 / 15, numbered battle and random, have one row there).
 const int kRowCategories = 14;
 
@@ -263,8 +269,8 @@ Rules Own()
 {
 	Rules r;
 	if (g_menuSeen) {
-		r.ammo = g_menu[kRowAmmo] != 0;
-		r.grenades = g_menu[kRowGrenades] != 0;
+		r.ammo = (g_menu[kRowInfinite] & kInfiniteAmmo) != 0;
+		r.grenades = (g_menu[kRowInfinite] & kInfiniteGrenades) != 0;
 		r.secondary = kSecondaryKinds[g_menu[kRowSecondary] % kSecondaryValues];
 		r.supply = kSupplyMagazines[g_menu[kRowSupply] % kSupplyValues];
 		r.survival = g_menuSurvival;
@@ -1395,6 +1401,43 @@ uint32_t __attribute__((thiscall)) Spawn(uint8_t* spawner, uint32_t remote, void
 	return g_spawnOriginal(spawner, remote, a, b);
 }
 
+// Survival hides the stock Respawn row (rules 0x2a, Settings 3 row 1 after Start Count) of the Kills
+// categories it shares and keeps the rule On: the row table here, the Flash's rows through
+// _root.lp2SurvivalRows (flash/survrows.as).
+const int kRuleRespawn = 0x2a, kRespawnOn = 1, kRespawnRow = 1;
+uint8_t* g_rowTable = nullptr;
+
+void SurvivalRows(void* screen, bool on)
+{
+	if (g_rowTable) {
+		DWORD old = 0;
+		if (VirtualProtect(g_rowTable, 16 * 0x23, PAGE_READWRITE, &old)) {
+			for (int c = 0; c < kRowCategories && g_rowTable[c * 0x23] != 0xff; c++) {
+				uint8_t* cat = g_rowTable + c * 0x23;
+				uint8_t* page = cat + 2 + kPageSettings3 * 0xb;
+				if (cat[0] > 1 || cat[1] != kSubKills || page[0] < kRespawnRow) {
+					continue;
+				}
+				bool shown = page[1 + kRespawnRow] == kRuleRespawn;
+				if (on && shown) {
+					memmove(page + 1 + kRespawnRow, page + 2 + kRespawnRow, page[0] - kRespawnRow - 1);
+					page[page[0]--] = 0;
+				}
+				else if (!on && !shown && page[0] < 10) {
+					memmove(page + 2 + kRespawnRow, page + 1 + kRespawnRow, page[0] - kRespawnRow);
+					page[1 + kRespawnRow] = kRuleRespawn;
+					page[0]++;
+				}
+			}
+			VirtualProtect(g_rowTable, 16 * 0x23, old, &old);
+		}
+	}
+	FlashArg arg = {0, 4, on ? "1" : "0"};
+	if (g_flashCall) {
+		g_flashCall((uint8_t*)screen, 0, "lp2SurvivalRows", &arg, 1);
+	}
+}
+
 using PushRulesFn = void(__attribute__((thiscall)) *)(void*, uint8_t*);
 using SetNumberFn = void(__attribute__((thiscall)) *)(void*, uint32_t, uint32_t);
 PushRulesFn g_pushRulesOriginal = nullptr;
@@ -1408,6 +1451,10 @@ void __attribute__((thiscall)) PushRules(void* screen, uint8_t* rules)
 	if (!rules) {
 		return;
 	}
+	if (rules[kRuleOldGrenades] == 1) { // saved with the separate Unlimited Grenades row
+		rules[kRowDefs[kRowInfinite].offset] = (rules[kRowDefs[kRowInfinite].offset] & kInfiniteAmmo) | kInfiniteGrenades;
+	}
+	rules[kRuleOldGrenades] = 0;
 	for (int i = 0; i < kRows; i++) {
 		uint8_t v = rules[kRowDefs[i].offset];
 		if (v >= kRowDefs[i].values) {
@@ -1426,7 +1473,9 @@ void __attribute__((thiscall)) PushRules(void* screen, uint8_t* rules)
 	}
 	if (SurvivalOn(rules)) {
 		rules[kRuleKillTarget] = kKillTargetInfinite;
+		rules[kRuleRespawn] = kRespawnOn;
 	}
+	SurvivalRows(screen, SurvivalOn(rules));
 	g_menuLives = kLives[rules[kRuleLives]];
 	g_setNumber(screen, kDataNoKillShown, SurvivalOn(rules) ? kKillTargets + rules[kRuleLives] : rules[kRuleKillTarget]);
 	int sub = rules[kRuleSub];
@@ -1436,6 +1485,7 @@ void __attribute__((thiscall)) PushRules(void* screen, uint8_t* rules)
 
 bool PatchRowTable(uint8_t* table)
 {
+	g_rowTable = table;
 	DWORD old = 0;
 	if (!VirtualProtect(table, 16 * 0x23, PAGE_READWRITE, &old)) {
 		return false;
@@ -1608,8 +1658,7 @@ void RulesInstall(unsigned char* base)
 		for (int i = 0; i < kSupplyValues; i++) {
 			g_menu[kRowSupply] = kSupplyMagazines[i] == r.supply ? i : (int)g_menu[kRowSupply];
 		}
-		g_menu[kRowAmmo] = r.ammo;
-		g_menu[kRowGrenades] = r.grenades;
+		g_menu[kRowInfinite] = (r.ammo ? kInfiniteAmmo : 0) | (r.grenades ? kInfiniteGrenades : 0);
 		g_menuSeen = true;
 	}
 	MemberDataSet("rules", Format(Own()));
@@ -1737,6 +1786,7 @@ int RulesStep(int rule, int key, uint8_t* value, const std::function<int()>& ori
 		g_menuTeam = value[kRuleMain - kRuleSub] == 1;
 		if (g_menuSurvival) {
 			value[kRuleKillTarget - kRuleSub] = kKillTargetInfinite;
+			value[kRuleRespawn - kRuleSub] = kRespawnOn;
 		}
 		return changed;
 	}
@@ -1790,6 +1840,9 @@ const char* RulesMessage(uint32_t id)
 {
 	if (id >= (uint32_t)kMsgSecondary && id < (uint32_t)(kMsgSecondary + kSecondaryValues)) {
 		return kSecondaryNames[id - kMsgSecondary];
+	}
+	if (id >= (uint32_t)kMsgInfinite && id < (uint32_t)(kMsgInfinite + kInfiniteValues)) {
+		return kInfiniteNames[id - kMsgInfinite];
 	}
 	if (id >= (uint32_t)kMsgSupply && id < (uint32_t)(kMsgSupply + kSupplyValues)) {
 		return kSupplyNames[id - kMsgSupply];
@@ -1965,7 +2018,8 @@ bool InsertRootScript(std::vector<uint8_t>* gfx, const Bytes& script, const char
 
 bool RulesPatchMenuFlash(std::vector<uint8_t>* gfx)
 {
-	return InsertRootScript(gfx, RowsScript(), "create-match rows");
+	return InsertRootScript(gfx, RowsScript(), "create-match rows") &&
+	       InsertRootScript(gfx, Bytes(std::begin(kSurvRowsScript), std::end(kSurvRowsScript)), "Survival rows");
 }
 
 bool RulesPatchTrainingFlash(std::vector<uint8_t>* gfx)
