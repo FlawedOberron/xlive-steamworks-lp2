@@ -28,8 +28,8 @@ Releases box on the repo page). Older test builds are on the
 ## Before installing
 
 **Back up your save(s).** Coming from GFWL, your progress is in a folder named after your GFWL
-gamertag (where to find it: [Your save](#your-save)). The dll only ever copies saves, it never moves or
-deletes them, but copy the whole `LOST PLANET 2` save folder somewhere safe first anyway. If you
+gamertag (where to find it: [Your save](#your-save)). The dll never moves or deletes saves (when it
+converts one it keeps the original next to it), but copy the whole `LOST PLANET 2` save folder somewhere safe first anyway. If you
 had more than one GFWL profile, that backs them all up.
 
 ## Install
@@ -64,6 +64,12 @@ the most recently saved file from any other profile folder into it, and logs
 are left as they were, and nothing happens once your Steam-name folder has a save. If you had
 several GFWL profiles, it picks the one played last; to use a different one, close the game and copy
 that profile's `Lostplanet2.Lostplanet2Save-capcom` over the one in your Steam-name folder.
+
+**Saves from other versions of the game** (an older or newer build, or a GFWL save that was moved to
+another PC) are converted on start, so the game no longer reports them as damaged. The original file
+is kept next to it as `Lostplanet2.Lostplanet2Save-capcom.original`, and the log says
+`saves: ... converted to this version's format`. To use someone else's save, close the game and put
+it in your Steam-name folder as `Lostplanet2.Lostplanet2Save-capcom` (chat apps may cut the name).
 
 **To restore** a backup, close the game and copy it back over.
 

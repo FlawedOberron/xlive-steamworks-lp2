@@ -23,7 +23,7 @@ DWORD WINAPI Worker(LPVOID)
 	bool mapsPending = MapsWanted();
 	PluginsLoad();
 	bool pluginsPending = true;
-	bool pathPending = !PartPackages().empty();
+	bool pathPending = true; // also without sets of our own: other players' sets are loaded through it
 	bool started = false;
 	for (int tick = 0; tick < 30000 && (mapsPending || pluginsPending || pathPending || !started); tick++) {
 		started = TitleStarted();

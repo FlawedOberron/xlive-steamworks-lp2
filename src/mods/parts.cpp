@@ -515,9 +515,15 @@ std::vector<std::wstring> List(const std::wstring& dir, bool folders)
 	return out;
 }
 
+std::wstring BuildMysterySet();
+
 void Load()
 {
 	ConfigEnsureLoaded();
+	std::wstring mystery = BuildMysterySet();
+	if (!mystery.empty()) {
+		LoadFolder(mystery, L"built-in ? man");
+	}
 	for (const std::wstring& d : List(Cfg().partsDir, true)) {
 		LoadFolder(Cfg().partsDir + d + L"\\", d);
 	}
@@ -536,6 +542,81 @@ void Load()
 // wear colour A. A package per part keeps sname.bin under the 1024 bytes the game reads.
 
 const char* const kPrefixes[kPartSlotCount] = {"hd", "bd", "bk", "lg"};
+
+// The "? man": the stand-in the game shows for a part it can't load (set 0x0f, CustomParts\<pfx>0f00.arc,
+// model\hm\hmf2\...; its colour lives in the main archive, so as an ordinary part id 0 it would crash).
+// Built into a set from the player's own game files at start, so every player has the identical set
+// (same hash: nothing to transfer) and can wear it. Templates are the hm28 parts its sounds come from,
+// without their lamps and with an empty chain (the stand-in has no cloth).
+std::wstring BuildMysterySet()
+{
+	const int kGen = 1;
+	std::wstring dir = Cfg().modCacheDir + L"parts\\builtin\\LPC_mystery\\";
+	std::wstring src = ExeDirectory() + L"nativePC\\arcXmlTmpPC\\CustomParts\\";
+	Bytes stamp;
+	if (ReadWholeFile(dir + L"gen.txt", &stamp) && std::string(stamp.begin(), stamp.end()) == std::to_string(kGen)) {
+		return dir;
+	}
+	Bytes chain;
+	{
+		Bytes raw;
+		std::vector<ArcEntry> ents;
+		if (ReadWholeFile(src + L"hd2800.arc", &raw) && ArcRead(raw, &ents)) {
+			for (const ArcEntry& e : ents) {
+				if (e.classHash == ClassHash("rChain")) {
+					chain = e.data;
+				}
+			}
+		}
+	}
+	std::string parts;
+	for (int s = 0; s < kPartSlotCount; s++) {
+		Bytes raw;
+		std::vector<ArcEntry> ents;
+		std::wstring arc = src + Utf8ToWide(kPrefixes[s]) + L"0f00.arc";
+		if (!ReadWholeFile(arc, &raw) || !ArcRead(raw, &ents)) {
+			XLS_LOG_WARN("mods: parts: ? man: %ls missing, not built.", arc.c_str());
+			return std::wstring();
+		}
+		std::string cat = kSlotNames[s];
+		std::string textures;
+		bool model = false;
+		for (const ArcEntry& e : ents) {
+			std::string file;
+			if (e.classHash == ClassHash("rModel")) {
+				file = cat + ".rModel";
+				model = true;
+			}
+			else if (e.classHash == ClassHash("rTexture")) {
+				for (const char* role : {"BM-00_A", "NM-00", "MM-00"}) {
+					size_t n = strlen(role);
+					if (e.name.size() > n && _stricmp(e.name.c_str() + e.name.size() - n, role) == 0) {
+						std::string key = role[0] == 'B' ? "BM_A" : std::string(role, 2);
+						file = cat + "_" + key + ".rTexture";
+						textures += std::string(textures.empty() ? "" : ", ") + "\"" + key + "\": \"" + file + "\"";
+					}
+				}
+			}
+			if (!file.empty()) {
+				WriteWholeFile(dir + Utf8ToWide(file.c_str()), e.data);
+			}
+		}
+		if (!model) {
+			return std::wstring();
+		}
+		parts += std::string(parts.empty() ? "" : ",\n") + "  \"" + cat + "\": {\"file\": \"" + cat + ".rModel\", \"template\": \"" + kPrefixes[s] +
+		         "2800.rModel\", \"effects\": \"none\"" + (chain.empty() ? "" : ", \"chain\": \"empty.rChain\"") + ", \"textures\": {" + textures + "}}";
+	}
+	if (!chain.empty()) {
+		WriteWholeFile(dir + L"empty.rChain", chain);
+	}
+	std::string json = "{\n \"id\": \"mystery\",\n \"name\": \"? Man\",\n \"parts\": {\n" + parts + "\n }\n}\n";
+	WriteWholeFile(dir + L"lpc.json", Bytes(json.begin(), json.end()));
+	std::string g = std::to_string(kGen);
+	WriteWholeFile(dir + L"gen.txt", Bytes(g.begin(), g.end()));
+	XLS_LOG_INFO("mods: parts: built the ? man set from the game's stand-in parts.");
+	return dir;
+}
 const int kSnameCategory[kPartSlotCount] = {1, 2, 3, 4};  // head, body, back, legs
 const int kSnameFloats[kPartSlotCount] = {3, 3, 12, 0};
 const int kCarrierItem = 69; // the carrier's default slot (saves from before the per-loadout aliases)
@@ -1325,21 +1406,22 @@ void BuildPackages()
 	for (int item : items) {
 		std::wstring root = Cfg().modCacheDir + L"parts\\pkg\\carrier_" + std::to_wstring(item) + L"\\";
 		std::wstring dir = root + L"Content\\nativePC\\arcXmlTmpPC\\CustomParts\\";
+		// every category, with or without sets of our own: other players' sets are worn through
+		// these slots too (an empty category registers a stand-in, kept locked in our menu)
 		std::vector<int> cats;
 		for (int s = 0; s < kPartSlotCount; s++) {
-			if (!g_carrierSets[s].empty()) {
-				cats.push_back(s);
-			}
-		}
-		if (cats.empty()) {
-			break; // no sets at all
+			cats.push_back(s);
 		}
 		SHCreateDirectoryExW(nullptr, dir.c_str(), nullptr);
 		std::string key = std::string("lpc-carrier:") + std::to_string(item);
 		uint64_t h = Fnv1a64(key.data(), key.size());
 		uint32_t h2 = Fnv1a32(key.data(), key.size());
 		for (int s : cats) {
-			PartPackage reg = g_carrierSets[s][0];
+			PartPackage reg;
+			if (!g_carrierSets[s].empty()) {
+				reg = g_carrierSets[s][0];
+			}
+			reg.slot = s;
 			reg.carrier = true;
 			reg.item = item;
 			reg.root = root;
@@ -1422,6 +1504,9 @@ DWORD WINAPI UnlockThread(LPVOID param)
 			}
 		}
 		for (const PartPackage& pkg : g_packages) {
+			if (pkg.setId.empty()) {
+				continue; // a category without sets of our own: its slot only carries other players' sets
+			}
 			int id = 180 + pkg.item;
 			volatile LONG* word = (volatile LONG*)(game + kUnlockMask[pkg.slot] + (id >> 5) * 4);
 			LONG bit = (LONG)(0x80000000u >> (id & 31));

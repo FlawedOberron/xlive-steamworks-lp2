@@ -45,8 +45,12 @@ void PluginsGiveUp();
 void NotifyTitleStarted();
 bool TitleStarted();
 
-// First run under a new gamertag: copies the newest other gamertag's save in (GFWL → Steam switch).
+// First run under a new gamertag: copies the newest other gamertag's save in (GFWL → Steam switch);
+// then converts our save if another game version wrote it (the original kept as <save>.original).
 void SavesImport(const std::string& gamertag);
+// A save file from any game version (a GFWL-era file has GFWL's protected header in front): fills `out`
+// with the save in the current format and returns true; false = already current, or not an LP2 save.
+bool SavesConvert(const uint8_t* data, size_t size, std::vector<uint8_t>& out);
 
 // Re-applies the import hooks if something (SteamStub) restored the import table.
 void OverlayVerify();
