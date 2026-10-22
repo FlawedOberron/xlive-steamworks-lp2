@@ -113,10 +113,11 @@ struct RulesVas {
 	uint32_t flashFree;     // a Flash value's release, thiscall(value)
 	uint32_t hudUpdate;     // the HUD manager's update, thiscall(hud): no HUD while +0x2c's player has no body
 	uint32_t teamBar;       // the cockpit's team gauge bar update (flash\cockpit\id755 mc_TEAM, top centre), thiscall(cockpit)
+	uint32_t respawnSecond; // Spawn's respawn case for slot 7 (mov edi,[esi+0xf0]), 0x10 before the info-id case (DX11 0x8fb53c)
 };
 const RulesVas kRulesVas[] = {
-	{0xc7aa20, 0xc7a820, 0xeca930, 0x20fc, 0x8fb130, 0xe8c270, 0xf4a330, 0x17e9840, 0xc86160, 0x2180, 0xc7cf15, 0xecac50, 0xed1e00, 0x18e086c, 0x1852850, 0x8029c0, 0x1852144, 0x8ff650, 0x1852080, 0x8e5e30, 0x16f7c6c, 0x1008ef0, 0x1852238, 0x1009b90, 0x18520c0, 0xf44680, 0xf44760, 0xf4a390, 0x18e0860, 0x873b80, 0x873df6, 0x873d1f, 0x873d5d, 0xf45eb0, 0xeaa1ba, 0x18d08ac, 0xed506d, 0x1224239, 0x16d9ab4, {0xed4c78, 0xed4cc1, 0xed4cdc}, 0xed4e92, 0xed4c00, 0xf4a570, 0xf4a550, 0x77a680, 0xee09d0, 0xed61e0}, // DX11
-	{0xc6ae10, 0xc6ac10, 0xebab30, 0x20ec, 0x8eb7d0, 0xe7c1e0, 0xf3a600, 0x17d97e0, 0xc76550, 0x2170, 0xc6d305, 0xebae50, 0xec1ff0, 0x18ce780, 0x18427b0, 0x7f3b00, 0x18420a4, 0x8efcf0, 0x1841fe0, 0x8d64d0, 0x16e7098, 0xff8b10, 0x1842198, 0xff97b0, 0x1842020, 0xf34940, 0xf34a20, 0xf3a660, 0x18ce774, 0x8644d0, 0x864746, 0x86466f, 0x8646ad, 0xf36170, 0xe9a44a, 0x18c080c, 0xec525d, 0x1213e59, 0x16c9a24, {0xec4e68, 0xec4eb1, 0xec4ecc}, 0xec5082, 0xec4df0, 0xf3a840, 0xf3a820, 0x76b4e0, 0xed0bc0, 0xec63d0}, // DX9
+	{0xc7aa20, 0xc7a820, 0xeca930, 0x20fc, 0x8fb130, 0xe8c270, 0xf4a330, 0x17e9840, 0xc86160, 0x2180, 0xc7cf15, 0xecac50, 0xed1e00, 0x18e086c, 0x1852850, 0x8029c0, 0x1852144, 0x8ff650, 0x1852080, 0x8e5e30, 0x16f7c6c, 0x1008ef0, 0x1852238, 0x1009b90, 0x18520c0, 0xf44680, 0xf44760, 0xf4a390, 0x18e0860, 0x873b80, 0x873df6, 0x873d1f, 0x873d5d, 0xf45eb0, 0xeaa1ba, 0x18d08ac, 0xed506d, 0x1224239, 0x16d9ab4, {0xed4c78, 0xed4cc1, 0xed4cdc}, 0xed4e92, 0xed4c00, 0xf4a570, 0xf4a550, 0x77a680, 0xee09d0, 0xed61e0, 0x8fb53c}, // DX11
+	{0xc6ae10, 0xc6ac10, 0xebab30, 0x20ec, 0x8eb7d0, 0xe7c1e0, 0xf3a600, 0x17d97e0, 0xc76550, 0x2170, 0xc6d305, 0xebae50, 0xec1ff0, 0x18ce780, 0x18427b0, 0x7f3b00, 0x18420a4, 0x8efcf0, 0x1841fe0, 0x8d64d0, 0x16e7098, 0xff8b10, 0x1842198, 0xff97b0, 0x1842020, 0xf34940, 0xf34a20, 0xf3a660, 0x18ce774, 0x8644d0, 0x864746, 0x86466f, 0x8646ad, 0xf36170, 0xe9a44a, 0x18c080c, 0xec525d, 0x1213e59, 0x16c9a24, {0xec4e68, 0xec4eb1, 0xec4ecc}, 0xec5082, 0xec4df0, 0xf3a840, 0xf3a820, 0x76b4e0, 0xed0bc0, 0xec63d0, 0x8ebbdc}, // DX9
 };
 // push esi; push edi; mov edi,[esp+0xc]; test di,di; (then jge rel32, left in place)
 const uint8_t kAddAmmoPrologue[] = {0x56, 0x57, 0x8b, 0x7c, 0x24, 0x0c, 0x66, 0x85, 0xff};
@@ -593,13 +594,26 @@ void HideHud(bool hide)
 // the pointer the game holds in esi, the row's colour (ABGR) is the edi it draws with next.
 const char* g_gaugeFormat = nullptr;
 uint8_t** g_results = nullptr;
-const uint32_t kResultsGauge = 0x103c, kColourEliminated = 0xff3c3cff;
+const uint32_t kResultsGauge = 0x103c, kResultsKills = 0x193c, kColourEliminated = 0xff3c3cff;
 
 extern "C" int __attribute__((cdecl)) ListValue(char* buf, const char* format, int value, uint8_t* gauge, uint32_t* colour)
 {
 	uint8_t* results = g_results ? *g_results : nullptr;
-	uint8_t* first = results ? results + kResultsGauge : nullptr;
-	if (g_survival && !g_team && g_lives > 0 && format == g_gaugeFormat && first && gauge >= first && gauge < first + 16 * 4) {
+	// the list shows the Battle Gauge (training, Battle Gauge matches) or the kills (Kills, which online
+	// Survival is): either array gives the slot
+	uint8_t* first = nullptr;
+	for (uint32_t at : {kResultsGauge, kResultsKills}) {
+		if (results && gauge >= results + at && gauge < results + at + 16 * 4) {
+			first = results + at;
+		}
+	}
+	static bool logged = false;
+	if (g_survival && !g_team && format == g_gaugeFormat && !logged) {
+		logged = true;
+		XLS_LOG_INFO("mods: rules: survival: player list value at results+0x%x (%s).", results && gauge ? (unsigned)(gauge - results) : 0u,
+		             first ? "shown as respawns" : "not a known array, left alone");
+	}
+	if (g_survival && !g_team && g_lives > 0 && format == g_gaugeFormat && first) {
 		int slot = (int)(gauge - first) / 4;
 		if (SlotOut(slot)) {
 			*colour = kColourEliminated;
@@ -614,7 +628,7 @@ extern "C" int __attribute__((cdecl)) ListValue(char* buf, const char* format, i
 // Its order: in Survival (free for all) by lives left, then kills (results +0x193c), then the game's
 // own rank; equal lives and kills share a rank. The list's calls of the results' rank accessors
 // (count +0x9ecc, rank by slot +0x9ed0, slot by rank +0x9f10) are redirected here.
-const uint32_t kResultsCount = 0x9ecc, kResultsRankOf = 0x9ed0, kResultsSlotAt = 0x9f10, kResultsKills = 0x193c;
+const uint32_t kResultsCount = 0x9ecc, kResultsRankOf = 0x9ed0, kResultsSlotAt = 0x9f10;
 
 bool ListSorted()
 {
@@ -893,6 +907,37 @@ extern "C" void __attribute__((naked)) ListValueThunk()
 }
 
 std::atomic<DWORD> g_localSeen{0}; // the local player's last controller update
+
+// Secondary: the first spawn (Spawn, flag 0) creates the weapons from the ids in the player info, so
+// the id goes into slot 7 there. A respawn (flag 1) takes slots 0, 1 and 4-7 from weapon objects its
+// controller requested once, at match start (the loadout steps, DX11 FUN_008fa660), and slot 7's is
+// none outside two stock modes; with a secondary set, Spawn points the respawn's slot 7 at the info
+// id case slots 2 and 3 use (a 2-byte jump, only for that call).
+uint32_t g_secondaryGiven[16]; // the id we put in each player's slot 7 (it stays in the player info)
+
+void PutSecondary(uint8_t index, const char* when)
+{
+	if (index >= 16 || !g_game || !*g_game) {
+		return;
+	}
+	auto* info = *(uint8_t**)(*g_game + 0x28 + index * 4);
+	auto* second = info ? (uint32_t*)(info + 0x10 + kSlotSecond * 4) : nullptr;
+	int kind = g_secondary;
+	uint32_t want = kind ? 0x04000000u | (uint32_t)kind << 16 : 0;
+	if (!second) {
+		return;
+	}
+	if (!want) {
+		if (g_secondaryGiven[index] && *second == g_secondaryGiven[index]) {
+			*second = 0; // ours from an earlier match with other rules
+		}
+	}
+	else if (*second != want) {
+		XLS_LOG_INFO("mods: rules: player %u %s with secondary 0x%08x (slot held 0x%08x).", index, when, want, *second);
+		*second = want;
+	}
+	g_secondaryGiven[index] = want;
+}
 
 void __attribute__((thiscall)) ControlUpdate(uint8_t* ctl)
 {
@@ -1380,25 +1425,35 @@ DWORD WINAPI SurvivalThread(LPVOID)
 	}
 }
 
-uint32_t __attribute__((thiscall)) Spawn(uint8_t* spawner, uint32_t remote, void* a, void* b)
+uint8_t* g_respawnSecond = nullptr; // nullptr: not the expected bytes, left alone
+const uint8_t kRespawnSecondCode[] = {0x8b, 0xbe, 0xf0, 0x00, 0x00, 0x00}, kRespawnSecondJump[] = {0xeb, 0x0e};
+
+void RespawnSecondJump(bool on)
 {
-	static uint32_t given[16]; // the id we put in each player's slot 7 (it stays in the player info)
-	int kind = g_secondary;
-	uint8_t index = spawner ? spawner[0xb0] : 0xff;
-	if (!(remote & 0xff) && index < 16 && *g_game) {
-		auto* info = *(uint8_t**)(*g_game + 0x28 + index * 4);
-		auto* second = info ? (uint32_t*)(info + 0x10 + kSlotSecond * 4) : nullptr;
-		uint32_t want = kind ? 0x04000000u | (uint32_t)kind << 16 : 0;
-		if (second && given[index] && *second == given[index] && *second != want) {
-			*second = 0; // ours from an earlier match with other rules
-			given[index] = 0;
-		}
-		if (second && want && *second == 0) {
-			*second = given[index] = want;
-			XLS_LOG_INFO("mods: rules: player %u spawns with secondary 0x%08x.", index, want);
-		}
+	DWORD old;
+	if (g_respawnSecond && VirtualProtect(g_respawnSecond, 2, PAGE_EXECUTE_READWRITE, &old)) {
+		memcpy(g_respawnSecond, on ? kRespawnSecondJump : kRespawnSecondCode, 2);
+		VirtualProtect(g_respawnSecond, 2, old, &old);
+		FlushInstructionCache(GetCurrentProcess(), g_respawnSecond, 2);
 	}
-	return g_spawnOriginal(spawner, remote, a, b);
+}
+
+uint32_t __attribute__((thiscall)) Spawn(uint8_t* spawner, uint32_t respawn, void* a, void* b)
+{
+	if (!spawner) {
+		return g_spawnOriginal(spawner, respawn, a, b);
+	}
+	PutSecondary(spawner[kCtlSlot], respawn & 0xff ? "respawns" : "spawns");
+	bool second = (respawn & 0xff) && g_secondary && g_respawnSecond;
+	if (second) {
+		RespawnSecondJump(true);
+	}
+	uint32_t r = g_spawnOriginal(spawner, respawn, a, b);
+	if (second) {
+		RespawnSecondJump(false);
+		XLS_LOG_INFO("mods: rules: player %u respawned with secondary kind 0x%02x.", spawner[kCtlSlot], g_secondary.load());
+	}
+	return r;
 }
 
 // Survival hides the stock Respawn row (rules 0x2a, Settings 3 row 1 after Start Count) of the Kills
@@ -1637,6 +1692,11 @@ void RulesInstall(unsigned char* base)
 	}
 	if (!g_setupOriginal) {
 		XLS_LOG_WARN("mods: rules: weapon setup not hooked, ammo supply only scales pickups.");
+	}
+	g_respawnSecond = base + (kRulesVas[build].respawnSecond - 0x400000);
+	if (memcmp(g_respawnSecond, kRespawnSecondCode, sizeof(kRespawnSecondCode)) != 0) {
+		g_respawnSecond = nullptr;
+		XLS_LOG_WARN("mods: rules: respawn slot 7 code not as expected, no secondary after a respawn.");
 	}
 	uint8_t* spawn = base + (kRulesVas[build].spawn - 0x400000);
 	g_game = *(uint8_t***)(spawn + kSpawnGameAt);
