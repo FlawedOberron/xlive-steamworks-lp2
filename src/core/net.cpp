@@ -825,9 +825,14 @@ void NetInit()
 			XLS_LOG_INFO("net: send rate %u KB/s per peer.", Cfg().sendRateKBytes);
 		}
 		else if (SteamNetworkingUtils()) {
-			// Steam's congestion control still decides the rate; this only lifts the cap so map /
-			// part downloads (core/transfer.cpp) aren't held to Steam's default.
-			SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_SendRateMax, 4 * 1024 * 1024);
+			// Steam's congestion control still decides the rate between these: it starts a connection at
+			// the minimum (Steam's default 256 KB/s) and ramps up slowly, so a map / part download
+			// (core/transfer.cpp, a few MB) used to finish before it got going. Start at 1 MB/s, allow 16,
+			// and give the send buffer room for transfer.cpp's window. "network": {"send_rate_kbytes"}
+			// sets a fixed rate instead (slow uploads).
+			SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_SendRateMin, 1024 * 1024);
+			SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_SendRateMax, 16 * 1024 * 1024);
+			SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_SendBufferSize, 4 * 1024 * 1024);
 		}
 	}
 	else {

@@ -7,6 +7,10 @@
 		"debugger": false         // also OutputDebugString
 	},
 
+	"update": {
+		"auto": true              // release builds: install a newer GitHub release's xlive.dll (runs from the next start)
+	},
+
 	"steam": {
 		"app_id": 0,                        // 0 = steam_appid.txt / Steam launcher
 		"restart_app_if_necessary": false,  // SteamAPI_RestartAppIfNecessary before init

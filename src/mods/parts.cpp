@@ -2120,6 +2120,17 @@ struct LobbyPreview {
 };
 std::mutex g_lobbyMutex;
 std::map<uint8_t*, LobbyPreview> g_lobbyPreviews;
+
+// What each loader character's carrier part last loaded as (PartRequest): its code and the member's set it
+// resolved to (nullptr = our own choice). A preview reloads only the parts that would now load something
+// else: asked again for the very file it has, the game's load never finishes (the part stays "loading",
+// the preview hidden for good; 2026-10-23, fake member test).
+struct LoadedPart {
+	uint32_t code;
+	const PartPackage* set;
+};
+std::mutex g_loadedMutex;
+std::map<uint32_t, LoadedPart> g_loaded; // character << 8 | cat
 int g_lobbyXuidOffset = -1;
 
 using PreviewSetPartFn = void(__attribute__((thiscall)) *)(uint8_t*, uint32_t, uint32_t);
@@ -2436,6 +2447,7 @@ extern "C" __attribute__((used)) void __stdcall PreviewApplied(uint8_t* preview,
 extern "C" __attribute__((used)) void __stdcall PreviewTick(uint8_t* preview)
 {
 	uint32_t gen = g_lobbyGen;
+	int member;
 	{
 		std::lock_guard<std::mutex> lock(g_lobbyMutex);
 		auto it = g_lobbyPreviews.find(preview);
@@ -2445,16 +2457,41 @@ extern "C" __attribute__((used)) void __stdcall PreviewTick(uint8_t* preview)
 		for (uint32_t cat = 0; cat < kPartSlotCount; cat++) {
 			int32_t state = PvState(preview, cat);
 			if (IsCarrier(PvCode(preview, cat)) && (state == 1 || state == 4)) {
-				return; // loading: next frame
+				// loading: next frame (logged once per state change, to see a part that never finishes)
+				static std::map<uint8_t*, std::string> waited;
+				char now[64];
+				snprintf(now, sizeof(now), "%d %d %d %d", PvState(preview, 0), PvState(preview, 1), PvState(preview, 2), PvState(preview, 3));
+				if (waited[preview] != now) {
+					waited[preview] = now;
+					XLS_LOG_INFO("mods: parts: lobby preview 0x%p waits for gen %u: part states %s.", preview, gen, now);
+				}
+				return;
 			}
 		}
 		it->second.gen = gen;
+		member = it->second.member;
 	}
+	uint64_t id = LobbyMember(member);
+	uint32_t character = PvCharacter(preview);
+	std::string reloaded;
 	for (uint32_t cat = 0; cat < kPartSlotCount; cat++) {
 		uint32_t code = PvCode(preview, cat);
-		if (IsCarrier(code)) {
-			g_previewSetPart(preview, cat, code);
+		if (!IsCarrier(code)) {
+			continue;
 		}
+		const PartPackage* want = MemberSet(id, cat, (code >> 16) & 0xff);
+		{
+			std::lock_guard<std::mutex> lock(g_loadedMutex);
+			auto was = g_loaded.find(character << 8 | cat);
+			if (was != g_loaded.end() && was->second.code == code && was->second.set == want) {
+				continue; // already wearing it
+			}
+		}
+		g_previewSetPart(preview, cat, code);
+		reloaded += std::string(reloaded.empty() ? "" : ", ") + kSlotNames[cat];
+	}
+	if (!reloaded.empty()) {
+		XLS_LOG_INFO("mods: parts: lobby preview 0x%p (member %d) reloads %s for gen %u.", preview, member, reloaded.c_str(), gen);
 	}
 }
 
@@ -3055,6 +3092,8 @@ void __attribute__((thiscall)) PartRequest(void* loader, uint32_t character, uin
 		if (own) {
 			XLS_LOG_INFO("mods: parts: lobby member %d %s -> %s.", member, kSlotNames[cat], own->setId.c_str());
 		}
+		std::lock_guard<std::mutex> lock(g_loadedMutex);
+		g_loaded[character << 8 | (cat & 0xff)] = LoadedPart{code, own};
 	}
 	if (t_stagePlayerCount > 0) {
 		t_stageRequest++;

@@ -81,12 +81,13 @@ struct Config {
 
 	// Networking.
 	bool relayOnly = false;             // Never share IP addresses, make every peer connection goes through a Steam relay.
-	uint32_t sendRateKBytes = 0;        // Per-peer cap on outgoing bytes, 0 keeps Steam's default (256 KB/s).
+	uint32_t sendRateKBytes = 0;        // Per-peer cap on outgoing bytes, 0 = Steam decides between 1 and 16 MB/s (net.cpp).
 
 	// Presence.
 	std::string richPresenceKey = "status";
 	bool richPresenceSteamDisplay = true;
 	uint32_t startWaitSeconds = 180;    // "sessions": {"start_wait_seconds"}: how long a match start waits for players still downloading maps/parts.
+	bool updateAuto = true;             // "update": {"auto": false}: no self-update from GitHub releases (update.cpp).
 	bool discordEnabled = true;         // "discord": {"enabled": false} turns Discord rich presence off.
 	std::string discordAppId = "1562087240098906242"; // "Lost Planet 2 (Recolonised)" ("discord": {"app_id": ...})
 

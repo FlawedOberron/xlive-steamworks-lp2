@@ -4,6 +4,7 @@
 #include "api/xsession.h"
 
 #include "core/discord.h"
+#include "core/update.h"
 #include "core/config.h"
 #include "core/content.h"
 #include "mods/lp2.h"
@@ -87,6 +88,7 @@ HRESULT WINAPI XLiveInitializeEx(XLIVE_INITIALIZE_INFO* pXii, DWORD dwTitleXLive
 	xls::SessionsInit();
 	xls::ContentStart();
 	xls::DiscordStart();
+	xls::UpdateStart();
 
 	if (xls::SteamReady()) {
 		xls::NotifyPost(XN_SYS_SIGNINCHANGED, 1);

@@ -16,6 +16,10 @@ endif()
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
+# The GitHub release tag a release build is published as (test-YYYY-MM-DD[letter]): the self-update compares
+# it with the latest release. Empty (development builds): no self-update.
+set(XLS_RELEASE_TAG "" CACHE STRING "GitHub release tag of this build (empty: development build)")
+
 # The dll ships next to a title's exe, so it must not depend on a Visual C++ redistributable.
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
@@ -104,7 +108,7 @@ endif()
 # A title that links the static library includes <xlive/xfuncs.h> and <xlive/xlive_steamworks.h>.
 target_include_directories(xlive PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
-target_link_libraries(xlive PUBLIC steam_api PRIVATE ws2_32 iphlpapi winmm comctl32 shlwapi shell32)
+target_link_libraries(xlive PUBLIC steam_api PRIVATE ws2_32 iphlpapi winmm comctl32 shlwapi shell32 winhttp)
 
 set_target_properties(xlive PROPERTIES
     CXX_STANDARD 17
@@ -132,6 +136,7 @@ target_compile_definitions(${xls_target_for_defs} PRIVATE
     "XLS_VERSION_MINOR=${PROJECT_VERSION_MINOR}"
     "XLS_VERSION_PATCH=${PROJECT_VERSION_PATCH}"
     "XLS_STEAM_HARDWARE_API=${XLS_STEAM_HARDWARE_API}"
+    "XLS_RELEASE_TAG=\"${XLS_RELEASE_TAG}\""
 )
 
 target_compile_options(xlive PRIVATE

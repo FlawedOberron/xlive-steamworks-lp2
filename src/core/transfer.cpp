@@ -28,7 +28,7 @@ namespace {
 // The owner keeps at most kWindow chunks unacknowledged (well inside Steam's send buffer).
 const int kTransferChannel = 0x10001;
 const uint32_t kChunk = 64 * 1024;
-const uint32_t kWindow = 6;
+const uint32_t kWindow = 24; // 1.5 MB in flight: inside the 4 MB send buffer net.cpp sets
 const uint64_t kUnavailable = ~0ull;
 const int kMaxServing = 4;
 

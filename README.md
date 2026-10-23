@@ -32,6 +32,14 @@ gamertag (where to find it: [Your save](#your-save)). The dll never moves or del
 converts one it keeps the original next to it), but copy the whole `LOST PLANET 2` save folder somewhere safe first anyway. If you
 had more than one GFWL profile, that backs them all up.
 
+## Memory limit
+
+Lost Planet 2 is a 32-bit game. On Windows it can use at most **2 GB**; Steam's DRM rejects an exe
+patched to be large address aware, so this can't be raised. On Linux, Proton gives it **4 GB** by
+default. Map packages and part sets only load when they are used (the bound map, the parts players
+wear), but very large custom maps or many detailed part sets in one match can still run out on
+Windows. If the game crashes loading a custom map on Windows and not on Linux, this is the likely cause.
+
 ## Install
 
 1. Steam → Lost Planet 2 → Manage → **Browse local files**.
@@ -45,7 +53,9 @@ had more than one GFWL profile, that backs them all up.
 **Undo:** delete the three files and rename `xlive.dll.capcom` back. Steam's "Verify integrity of game
 files" (or a game update) also puts Capcom's `xlive.dll` back; copy ours again afterwards.
 
-**Problems:** send `xlive_steamworks.log` from the game folder.
+**Problems:** [open an issue](https://github.com/FlawedOberron/xlive-steamworks-lp2/issues) and attach `xlive_steamworks.log` from the game folder.
+
+**If the game crashes:** [open an issue](https://github.com/FlawedOberron/xlive-steamworks-lp2/issues) with `xlive_steamworks.log` from the game folder, or `xlive_steamworks.prev.log` if you've relaunched since (the previous session's log is kept, one back). The crash details (address and call stack) are at the end. Say what you were doing (menu or map, mode, hosting or joining, whether a map or part set was downloading) and which test build you're on.
 
 ## Your save
 

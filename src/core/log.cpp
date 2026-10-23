@@ -38,6 +38,10 @@ void LogInit(const std::wstring& path, LogLevel level, bool toDebugger)
 		g_file = nullptr;
 	}
 	if (level != LogLevel::Off && !path.empty()) {
+		// the last session's log survives one restart (a crash report is usually sent after relaunching)
+		std::wstring prev = path.size() > 4 && path.compare(path.size() - 4, 4, L".log") == 0
+		                        ? path.substr(0, path.size() - 4) + L".prev.log" : path + L".prev";
+		MoveFileExW(path.c_str(), prev.c_str(), MOVEFILE_REPLACE_EXISTING);
 		g_file = _wfopen(path.c_str(), L"w");
 	}
 }

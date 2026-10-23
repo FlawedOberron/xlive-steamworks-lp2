@@ -9,6 +9,7 @@
 #include "core/log.h"
 #include "core/memberdata.h"
 #include "core/steam.h"
+#include "core/users.h"
 #include "core/utils.h"
 
 #include <windows.h>
@@ -114,10 +115,11 @@ struct RulesVas {
 	uint32_t hudUpdate;     // the HUD manager's update, thiscall(hud): no HUD while +0x2c's player has no body
 	uint32_t teamBar;       // the cockpit's team gauge bar update (flash\cockpit\id755 mc_TEAM, top centre), thiscall(cockpit)
 	uint32_t respawnSecond; // Spawn's respawn case for slot 7 (mov edi,[esi+0xf0]), 0x10 before the info-id case (DX11 0x8fb53c)
+	uint32_t listValue2;    // the list's other sprintf call: Kills with a kill target, "%03d/%03d" (kills, target), esi at the kills
 };
 const RulesVas kRulesVas[] = {
-	{0xc7aa20, 0xc7a820, 0xeca930, 0x20fc, 0x8fb130, 0xe8c270, 0xf4a330, 0x17e9840, 0xc86160, 0x2180, 0xc7cf15, 0xecac50, 0xed1e00, 0x18e086c, 0x1852850, 0x8029c0, 0x1852144, 0x8ff650, 0x1852080, 0x8e5e30, 0x16f7c6c, 0x1008ef0, 0x1852238, 0x1009b90, 0x18520c0, 0xf44680, 0xf44760, 0xf4a390, 0x18e0860, 0x873b80, 0x873df6, 0x873d1f, 0x873d5d, 0xf45eb0, 0xeaa1ba, 0x18d08ac, 0xed506d, 0x1224239, 0x16d9ab4, {0xed4c78, 0xed4cc1, 0xed4cdc}, 0xed4e92, 0xed4c00, 0xf4a570, 0xf4a550, 0x77a680, 0xee09d0, 0xed61e0, 0x8fb53c}, // DX11
-	{0xc6ae10, 0xc6ac10, 0xebab30, 0x20ec, 0x8eb7d0, 0xe7c1e0, 0xf3a600, 0x17d97e0, 0xc76550, 0x2170, 0xc6d305, 0xebae50, 0xec1ff0, 0x18ce780, 0x18427b0, 0x7f3b00, 0x18420a4, 0x8efcf0, 0x1841fe0, 0x8d64d0, 0x16e7098, 0xff8b10, 0x1842198, 0xff97b0, 0x1842020, 0xf34940, 0xf34a20, 0xf3a660, 0x18ce774, 0x8644d0, 0x864746, 0x86466f, 0x8646ad, 0xf36170, 0xe9a44a, 0x18c080c, 0xec525d, 0x1213e59, 0x16c9a24, {0xec4e68, 0xec4eb1, 0xec4ecc}, 0xec5082, 0xec4df0, 0xf3a840, 0xf3a820, 0x76b4e0, 0xed0bc0, 0xec63d0, 0x8ebbdc}, // DX9
+	{0xc7aa20, 0xc7a820, 0xeca930, 0x20fc, 0x8fb130, 0xe8c270, 0xf4a330, 0x17e9840, 0xc86160, 0x2180, 0xc7cf15, 0xecac50, 0xed1e00, 0x18e086c, 0x1852850, 0x8029c0, 0x1852144, 0x8ff650, 0x1852080, 0x8e5e30, 0x16f7c6c, 0x1008ef0, 0x1852238, 0x1009b90, 0x18520c0, 0xf44680, 0xf44760, 0xf4a390, 0x18e0860, 0x873b80, 0x873df6, 0x873d1f, 0x873d5d, 0xf45eb0, 0xeaa1ba, 0x18d08ac, 0xed506d, 0x1224239, 0x16d9ab4, {0xed4c78, 0xed4cc1, 0xed4cdc}, 0xed4e92, 0xed4c00, 0xf4a570, 0xf4a550, 0x77a680, 0xee09d0, 0xed61e0, 0x8fb53c, 0xed5023}, // DX11
+	{0xc6ae10, 0xc6ac10, 0xebab30, 0x20ec, 0x8eb7d0, 0xe7c1e0, 0xf3a600, 0x17d97e0, 0xc76550, 0x2170, 0xc6d305, 0xebae50, 0xec1ff0, 0x18ce780, 0x18427b0, 0x7f3b00, 0x18420a4, 0x8efcf0, 0x1841fe0, 0x8d64d0, 0x16e7098, 0xff8b10, 0x1842198, 0xff97b0, 0x1842020, 0xf34940, 0xf34a20, 0xf3a660, 0x18ce774, 0x8644d0, 0x864746, 0x86466f, 0x8646ad, 0xf36170, 0xe9a44a, 0x18c080c, 0xec525d, 0x1213e59, 0x16c9a24, {0xec4e68, 0xec4eb1, 0xec4ecc}, 0xec5082, 0xec4df0, 0xf3a840, 0xf3a820, 0x76b4e0, 0xed0bc0, 0xec63d0, 0x8ebbdc, 0xec5213}, // DX9
 };
 // push esi; push edi; mov edi,[esp+0xc]; test di,di; (then jge rel32, left in place)
 const uint8_t kAddAmmoPrologue[] = {0x56, 0x57, 0x8b, 0x7c, 0x24, 0x0c, 0x66, 0x85, 0xff};
@@ -219,6 +221,7 @@ struct Rules {
 	bool team = false;
 };
 const int kSlotSecond = 7;
+const DWORD kContextRichMode = 0; // the SPA presence context naming the mode (Campaign, Online...)
 
 std::mutex g_mutex;
 std::map<uint64_t, Rules> g_memberRules;
@@ -289,6 +292,20 @@ Rules Own()
 	return r;
 }
 
+// A lobby's match setting (session properties as the game advertises them: 0x10000001 rule, 0 Elimination /
+// 1 Team Elimination; 0x10000002 sub-type, 1 Kills).
+const uint32_t kPropRule = 0x10000001, kPropSubRule = 0x10000002;
+
+bool LobbyRule(CSteamID lobby, uint32_t propertyId, long* out)
+{
+	const char* v = SteamMatchmaking()->GetLobbyData(lobby, FormatA("%sp%08x", Cfg().lobbyKeyPrefix.c_str(), propertyId).c_str());
+	if (!v || !*v) {
+		return false;
+	}
+	*out = strtol(v, nullptr, 10);
+	return true;
+}
+
 // Once a second: the lobby owner's rules (ours outside lobbies or until the owner's arrive).
 DWORD WINAPI SyncThread(LPVOID)
 {
@@ -310,6 +327,21 @@ DWORD WINAPI SyncThread(LPVOID)
 			if (host != SteamLocalId().ConvertToUint64() && it != g_memberRules.end()) {
 				r = it->second;
 			}
+			// Survival only where the lobby's match is Survival: the rules come from the create screen's last
+			// state, which a lobby set up another way (System Link, a later Battle Gauge / Points / VS match)
+			// doesn't change
+			long rule = -1, sub = -1;
+			if (r.survival && (!LobbyRule(lobby, kPropRule, &rule) || !LobbyRule(lobby, kPropSubRule, &sub) || rule > 1 || sub != kSubKills)) {
+				r.survival = false;
+				r.lives = 0;
+				r.team = false;
+			}
+		}
+		// The rules are VS match settings: none in the Campaign (the presence context RICH_MODE, id 0, is
+		// SINGLE 0 / COOP 1 / CAMPAIGN 5 there; Online, System Link and Training have their own values)
+		DWORD mode = 0;
+		if (UserGetContext(0, kContextRichMode, &mode) && (mode <= 1 || mode == 5)) {
+			r = Rules();
 		}
 		if (g_offline && g_botArmed && g_botSurvival && g_botRule <= 1) { // a training bot match set to Survival
 			r.survival = true;
@@ -588,15 +620,17 @@ void HideHud(bool hide)
 	XLS_LOG_INFO("mods: rules: survival: HUD %s.", hide ? "hidden while spectating" : "back");
 }
 
-// The battle HUD's player list (top left: rank, name, value) shows each player's Battle Gauge
-// (results +0x103c, s32 by slot) in Elimination. In Survival (free for all) it shows the respawns left
-// instead, or ELIMINATED in red. Its sprintf call is redirected here; the gauge's slot comes from
-// the pointer the game holds in esi, the row's colour (ABGR) is the edi it draws with next.
+// The battle HUD's player list (top left: rank, name, value) shows by game status +0x8174: 1 the
+// Battle Gauge (results +0x103c, "%d"), 2 the kills (+0x193c, "%03d/%03d" with a kill target, else
+// "%03d/-----"), 3 the points (+0x19bc). In Survival (free for all) it shows the respawns left instead,
+// or ELIMINATED in red. Both its sprintf calls are redirected here (online Survival is Kills, so the
+// target call too); the slot comes from the pointer the game holds in esi (into one of the arrays),
+// the row's colour (ABGR) is the edi it draws with next.
 const char* g_gaugeFormat = nullptr;
 uint8_t** g_results = nullptr;
 const uint32_t kResultsGauge = 0x103c, kResultsKills = 0x193c, kColourEliminated = 0xff3c3cff;
 
-extern "C" int __attribute__((cdecl)) ListValue(char* buf, const char* format, int value, uint8_t* gauge, uint32_t* colour)
+extern "C" int __attribute__((cdecl)) ListValue(char* buf, const char* format, int value, int value2, uint8_t* gauge, uint32_t* colour)
 {
 	uint8_t* results = g_results ? *g_results : nullptr;
 	// the list shows the Battle Gauge (training, Battle Gauge matches) or the kills (Kills, which online
@@ -608,12 +642,12 @@ extern "C" int __attribute__((cdecl)) ListValue(char* buf, const char* format, i
 		}
 	}
 	static bool logged = false;
-	if (g_survival && !g_team && format == g_gaugeFormat && !logged) {
+	if (g_survival && !g_team && !logged) {
 		logged = true;
 		XLS_LOG_INFO("mods: rules: survival: player list value at results+0x%x (%s).", results && gauge ? (unsigned)(gauge - results) : 0u,
 		             first ? "shown as respawns" : "not a known array, left alone");
 	}
-	if (g_survival && !g_team && g_lives > 0 && format == g_gaugeFormat && first) {
+	if (g_survival && !g_team && g_lives > 0 && first) {
 		int slot = (int)(gauge - first) / 4;
 		if (SlotOut(slot)) {
 			*colour = kColourEliminated;
@@ -622,7 +656,7 @@ extern "C" int __attribute__((cdecl)) ListValue(char* buf, const char* format, i
 		int left = std::max(g_lives - 1 - SlotDeaths(slot), 0); // 0 on the last life
 		return left == 0 ? sprintf(buf, "Last Life") : sprintf(buf, left == 1 ? "%d Respawn" : "%d Respawns", left);
 	}
-	return sprintf(buf, format, value);
+	return sprintf(buf, format, value, value2); // the "%d" call ignores the second
 }
 
 // Its order: in Survival (free for all) by lives left, then kills (results +0x193c), then the game's
@@ -718,14 +752,10 @@ std::atomic<int> g_teamRowsX{58}, g_teamRowsY{180}, g_teamRowsGap{13}; // team-h
 
 bool InPlay(int slot);
 
-void TeamRows(uint8_t* list)
+// The list's text style (from its template), left aligned, small.
+void ListTextStyle(uint32_t* style)
 {
-	uint8_t* results = g_results ? *g_results : nullptr;
-	if (!g_survival || !g_team || g_lives <= 0 || !g_text || !*g_textCtx || !results) {
-		return;
-	}
-	uint32_t style[16];
-	memcpy(style, g_textStyle, sizeof(style));
+	memcpy(style, g_textStyle, 16 * sizeof(uint32_t));
 	float* f = (float*)style;
 	style[0] = 1; // left aligned (4: right)
 	style[1] = (style[1] & 0xffff0000) | *g_textFont;
@@ -737,6 +767,16 @@ void TeamRows(uint8_t* list)
 	f[11] = 0.0f;
 	style[12] = style[13] = style[15] = 0;
 	f[14] = 1.0f;
+}
+
+void TeamRows(uint8_t* list)
+{
+	uint8_t* results = g_results ? *g_results : nullptr;
+	if (!g_survival || !g_team || g_lives <= 0 || !g_text || !*g_textCtx || !results) {
+		return;
+	}
+	uint32_t style[16];
+	ListTextStyle(style);
 	// the leading team on top, as mc_Kill (red until blue has more kills)
 	static bool blueTop = false;
 	int32_t red = *(int32_t*)(results + kResultsTeamKills), blue = *(int32_t*)(results + kResultsTeamKills + 4);
@@ -767,6 +807,21 @@ void TeamRows(uint8_t* list)
 	}
 }
 
+// Spectating (Survival, out of lives): the controls, under the list (the game has no prompt for them).
+void SpectateHint(uint8_t* list)
+{
+	if (!g_survival || !g_hudHidden || !g_text || !*g_textCtx) {
+		return;
+	}
+	uint32_t style[16];
+	ListTextStyle(style);
+	const char* const lines[] = {"SPECTATING", "Fire: next player", "Zoom: previous player"};
+	for (int i = 0; i < 3; i++) {
+		int32_t rect[4] = {g_teamRowsX, g_teamRowsY + (17 + i) * g_teamRowsGap, 12, 12};
+		g_text(*g_textCtx, list, lines[i], rect, 0, 0xffffffff, style, 0, 1.0f);
+	}
+}
+
 // Survival hides the team gauge bar: its update (which shows it for Team Elimination) is skipped, the
 // match start's reset hides it.
 ListDrawFn g_teamBarOriginal = nullptr;
@@ -778,9 +833,9 @@ void __attribute__((thiscall)) TeamBar(uint8_t* cockpit)
 	}
 }
 
-// Spectating hides the cockpit's movies that show the player's own state (their _root._visible): the
-// HUD manager (the list's owner) holds them as movie wrappers at +0x38..+0x64 (Flash at +0x24), told
-// apart by a clip of theirs: id750 LIFE, id751 weapons and T-ENG, id752 crosshair, id753 radar, id755
+// Spectating hides the cockpit clips that show the player's own state (each clip's _visible, not the
+// movie's: the movies hold more): the HUD manager (the list's owner) holds the movies as wrappers at
+// +0x38..+0x64 (Flash at +0x24), with these clips: id750 LIFE, id751 weapons and T-ENG, id752 crosshair, id753 radar, id755
 // Battle Gauge, prompts and action text, id756/757 scopes. The list, messages (id759) and the team
 // counters stay. Applied on the list's draw (the game thread, every frame, also while spectating).
 struct FlashValue {
@@ -797,26 +852,24 @@ const char* const kSpectateHide[] = {"_root.mc_cockpitLife._visible", "_root.mc_
 
 int CockpitShow(uint8_t* hud, bool show)
 {
+	// the clips themselves, not their movies' _root: a movie also holds other things the spectator needs
+	// (id755: the prompts, next / previous player among them)
 	int count = 0;
 	for (uint32_t at = kHudMoviesFirst; at <= kHudMoviesLast && g_flashGet; at += 4) {
 		uint8_t* movie = *(uint8_t**)(hud + at);
 		if (!movie || !*(void**)(movie + kMovieFlash)) {
 			continue;
 		}
-		bool ours = false;
 		for (const char* name : kSpectateHide) {
 			FlashValue value = {};
-			ours = g_flashGet(movie, name, &value) && value.type == 2; // the clip's _visible: there
+			bool there = g_flashGet(movie, name, &value) && value.type == 2; // the clip's _visible: there
 			g_flashFree(&value);
-			if (ours) {
-				break;
+			if (there) {
+				FlashValue v = {0, 3, show ? 1.0f : 0.0f};
+				g_flashSet(movie, name, &v);
+				g_flashFree(&v);
+				count++;
 			}
-		}
-		if (ours) {
-			FlashValue value = {0, 3, show ? 1.0f : 0.0f};
-			g_flashSet(movie, "_root._visible", &value);
-			g_flashFree(&value);
-			count++;
 		}
 	}
 	return count;
@@ -826,13 +879,14 @@ void __attribute__((thiscall)) ListDraw(uint8_t* list)
 {
 	g_listDrawOriginal(list);
 	TeamRows(list);
+	SpectateHint(list);
 	static bool hidden = false;
 	static DWORD applied = 0;
 	bool hide = g_survival && g_hudHidden;
-	if (hide != hidden || (hide && GetTickCount() - applied > 1000)) { // again now and then: movies load late
+	if (hide != hidden || (hide && GetTickCount() - applied > 250)) { // again now and then: movies load late, the game shows clips again
 		int count = CockpitShow(list, !hide);
 		if (hide != hidden) {
-			XLS_LOG_INFO("mods: rules: survival: %d cockpit movies %s.", count, hide ? "hidden while spectating" : "shown");
+			XLS_LOG_INFO("mods: rules: survival: %d cockpit clips %s.", count, hide ? "hidden while spectating" : "shown");
 		}
 		hidden = hide;
 		applied = GetTickCount();
@@ -889,7 +943,8 @@ bool RedirectCall(uint8_t* at, uint8_t* expect, void* to)
 	return true;
 }
 
-// cdecl (buf, format, value) from the list, plus esi and the address of the saved edi.
+// cdecl (buf, format, value, value2) from the list (the "%d" call's value2 is whatever is next on its
+// stack: unused), plus esi and the address of the saved edi.
 extern "C" void __attribute__((naked)) ListValueThunk()
 {
 	asm volatile(
@@ -897,11 +952,12 @@ extern "C" void __attribute__((naked)) ListValueThunk()
 	    "mov %%esp, %%eax\n\t"
 	    "push %%eax\n\t"
 	    "push %%esi\n\t"
-	    "pushl 24(%%esp)\n\t"
-	    "pushl 24(%%esp)\n\t"
-	    "pushl 24(%%esp)\n\t"
+	    "pushl 28(%%esp)\n\t"
+	    "pushl 28(%%esp)\n\t"
+	    "pushl 28(%%esp)\n\t"
+	    "pushl 28(%%esp)\n\t"
 	    "call %P0\n\t"
-	    "add $20, %%esp\n\t"
+	    "add $24, %%esp\n\t"
 	    "pop %%edi\n\t"
 	    "ret" ::"i"(ListValue));
 }
@@ -1449,6 +1505,16 @@ uint32_t __attribute__((thiscall)) Spawn(uint8_t* spawner, uint32_t respawn, voi
 		RespawnSecondJump(true);
 	}
 	uint32_t r = g_spawnOriginal(spawner, respawn, a, b);
+	if (respawn & 0xff) { // bug 14 (respawning with 0 grenades): the grenade object the controller handed over (+0xe0)
+		auto* g = (uint8_t*)b;
+		if (g && g_magazine) {
+			auto* m = (int16_t*)(g + g_magazine);
+			XLS_LOG_INFO("mods: rules: player %u respawn: weapon %p, grenades %p (kind 0x%02x, %d loaded, %d total).", spawner[kCtlSlot], a, b, g[0x1e], m[0], m[1]);
+		}
+		else {
+			XLS_LOG_INFO("mods: rules: player %u respawn: weapon %p, no grenade object (the grenade slot is skipped).", spawner[kCtlSlot], a);
+		}
+	}
 	if (second) {
 		RespawnSecondJump(false);
 		XLS_LOG_INFO("mods: rules: player %u respawned with secondary kind 0x%02x.", spawner[kCtlSlot], g_secondary.load());
@@ -1741,6 +1807,7 @@ void RulesInstall(unsigned char* base)
 	uint8_t* listCall = base + (kRulesVas[build].listValue - 0x400000);
 	uint8_t* sprintfFn = base + (kRulesVas[build].sprintfFn - 0x400000);
 	bool listed = memcmp(g_gaugeFormat, "%d", 3) == 0 && RedirectCall(listCall, sprintfFn, (void*)&ListValueThunk);
+	listed = RedirectCall(base + (kRulesVas[build].listValue2 - 0x400000), sprintfFn, (void*)&ListValueThunk) && listed;
 	uint8_t* rankOfCall = base + (kRulesVas[build].listRankOf - 0x400000);
 	uint8_t* rankOf = rankOfCall + 5 + *(int32_t*)(rankOfCall + 1); // the accessors, as the list calls them
 	uint8_t* slotAt = base + (kRulesVas[build].listSlotAt[0] - 0x400000);
@@ -1842,8 +1909,22 @@ int RulesStep(int rule, int key, uint8_t* value, const std::function<int()>& ori
 				survival = 1;
 			}
 		}
+		bool was = g_menuSurvival;
 		g_menuSurvival = SurvivalOn(value - kRuleSub);
 		g_menuTeam = value[kRuleMain - kRuleSub] == 1;
+		// Survival forces the kill target (infinite) and respawns (on); leaving it puts back what was there
+		static uint8_t savedTarget = 0, savedRespawn = 0;
+		static bool saved = false;
+		if (g_menuSurvival && !was) {
+			savedTarget = value[kRuleKillTarget - kRuleSub];
+			savedRespawn = value[kRuleRespawn - kRuleSub];
+			saved = true;
+		}
+		else if (!g_menuSurvival && was && saved) {
+			value[kRuleKillTarget - kRuleSub] = savedTarget;
+			value[kRuleRespawn - kRuleSub] = savedRespawn;
+			saved = false;
+		}
 		if (g_menuSurvival) {
 			value[kRuleKillTarget - kRuleSub] = kKillTargetInfinite;
 			value[kRuleRespawn - kRuleSub] = kRespawnOn;

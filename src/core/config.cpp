@@ -210,6 +210,7 @@ bool ConfigLoad()
 			const Json& presence = root["presence"];
 			config.richPresenceKey = presence["key"].GetString("status");
 			config.richPresenceSteamDisplay = presence["steam_display"].GetBool(true);
+			config.updateAuto = root["update"]["auto"].GetBool(true);
 			config.discordEnabled = root["discord"]["enabled"].GetBool(true);
 			config.discordAppId = root["discord"]["app_id"].GetString(config.discordAppId);
 
