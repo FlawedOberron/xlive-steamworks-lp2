@@ -306,6 +306,18 @@ bool LobbyRule(CSteamID lobby, uint32_t propertyId, long* out)
 	return true;
 }
 
+template <typename T>
+bool ReadGame(const void* at, T* out)
+{
+	SIZE_T got = 0;
+	return at && ReadProcessMemory(GetCurrentProcess(), at, out, sizeof(T), &got) && got == sizeof(T);
+}
+
+uint8_t** g_players = nullptr;
+// players +0x8174: what the match scores by (the battle HUD's player list shows it): 1 Battle Gauge, 2 kills, 3 points
+const uint32_t kPlayersListMode = 0x8174;
+const int32_t kListGauge = 1, kListKills = 2, kListPoints = 3;
+
 // Once a second: the lobby owner's rules (ours outside lobbies or until the owner's arrive).
 DWORD WINAPI SyncThread(LPVOID)
 {
@@ -332,6 +344,17 @@ DWORD WINAPI SyncThread(LPVOID)
 			// doesn't change
 			long rule = -1, sub = -1;
 			if (r.survival && (!LobbyRule(lobby, kPropRule, &rule) || !LobbyRule(lobby, kPropSubRule, &sub) || rule > 1 || sub != kSubKills)) {
+				r.survival = false;
+				r.lives = 0;
+				r.team = false;
+			}
+		}
+		else if (r.survival) {
+			// No lobby to ask (System Link): the create screen's last state is no guide either, Survival only
+			// while the match being played is scored by kills (the game's own state)
+			uint8_t* players = nullptr;
+			int32_t mode = 0;
+			if (!ReadGame(g_players, &players) || !ReadGame(players + kPlayersListMode, &mode) || mode != kListKills) {
 				r.survival = false;
 				r.lives = 0;
 				r.team = false;
@@ -901,6 +924,8 @@ ListDrawFn g_hudUpdateOriginal = nullptr;
 const uint32_t kHudEntry = 0x2c;
 extern std::atomic<DWORD> g_localSeen;
 
+void DeathProbe(uint8_t* ctl);
+
 void __attribute__((thiscall)) HudUpdate(uint8_t* hud)
 {
 	int self = g_localIndex;
@@ -924,6 +949,9 @@ void __attribute__((thiscall)) HudUpdate(uint8_t* hud)
 	g_hudUpdateOriginal(hud);
 	if (swap) {
 		*entry = own;
+	}
+	if (own && !out) {
+		DeathProbe(own); // every frame of the match (the controller update only runs while dead)
 	}
 }
 
@@ -995,6 +1023,152 @@ void PutSecondary(uint8_t index, const char* when)
 	g_secondaryGiven[index] = want;
 }
 
+// Death probe (finding how the game kills a falling player, for custom maps' kill floor): while
+// ModCache\deathprobe.on exists, the local controller (0x600 B), its player (+0x480, 0x1000 B) and
+// body (player +0x40, 0x3000 B) are copied every 100 ms into a 12 s ring; when the
+// controller update next runs for the local player (it only runs while dead; the ring is fed from the
+// HUD update, every frame alive) the ring goes to ModCache\deathprobe\death-<n>.bin (oldest first), and F8
+// writes the latest snapshot alone to snap-<n>.bin (on foot vs riding something, to compare):
+//   'LPDP' u32 count; per snapshot: u32 tick, u32 state, u32 controller, player, body addresses,
+//   then the three copies (unreadable bytes are zero).
+struct ProbeShot {
+	DWORD tick;
+	uint32_t state, ctl, player, body;
+	uint8_t c[0x600], p[0x1000], b[0x3000];
+};
+const int kProbeShots = 120; // 12 s: long falls start well before the death
+ProbeShot* g_probe = nullptr;
+int g_probeNext = 0, g_probeCount = 0, g_probeFiles = 0;
+DWORD g_probeLast = 0, g_probeChecked = 0, g_probeWritten = 0;
+bool g_probeOn = false;
+bool g_probeArmed = false; // snapshots taken alive since the last write
+uint8_t g_probeState = 0;
+
+void ProbeCopy(uint8_t* dst, const void* src, size_t n)
+{
+	SIZE_T got = 0;
+	if (!src || !ReadProcessMemory(GetCurrentProcess(), src, dst, n, &got) || got != n) {
+		memset(dst, 0, n);
+	}
+}
+
+void DeathProbe(uint8_t* ctl)
+{
+	DWORD now = GetTickCount();
+	if (now - g_probeChecked > 2000) {
+		g_probeChecked = now;
+		bool on = GetFileAttributesW((Cfg().modCacheDir + L"deathprobe.on").c_str()) != INVALID_FILE_ATTRIBUTES;
+		if (on != g_probeOn) {
+			g_probeOn = on;
+			XLS_LOG_INFO("mods: rules: death probe %s.", on ? "on" : "off");
+		}
+	}
+	if (!g_probeOn) {
+		return;
+	}
+	if (!g_probe) {
+		g_probe = (ProbeShot*)VirtualAlloc(nullptr, sizeof(ProbeShot) * kProbeShots, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+		if (!g_probe) {
+			return;
+		}
+	}
+	uint8_t state = ctl[kCtlState];
+	if (now - g_probeLast >= 100 || state != g_probeState) {
+		g_probeLast = now;
+		ProbeShot& shot = g_probe[g_probeNext];
+		uint8_t* player = *(uint8_t**)(ctl + kCtlPlayer);
+		uint8_t* body = nullptr;
+		ProbeCopy((uint8_t*)&body, player ? player + kPlayerBody : nullptr, 4);
+		shot.tick = now;
+		shot.state = state;
+		shot.ctl = (uint32_t)(uintptr_t)ctl;
+		shot.player = (uint32_t)(uintptr_t)player;
+		shot.body = (uint32_t)(uintptr_t)body;
+		ProbeCopy(shot.c, ctl, sizeof(shot.c));
+		ProbeCopy(shot.p, player, sizeof(shot.p));
+		ProbeCopy(shot.b, body, sizeof(shot.b));
+		g_probeNext = (g_probeNext + 1) % kProbeShots;
+		g_probeCount = g_probeCount < kProbeShots ? g_probeCount + 1 : kProbeShots;
+		static DWORD said = 0;
+		if (g_probeCount == kProbeShots && now - said > 60000) {
+			said = now;
+			XLS_LOG_INFO("mods: rules: death probe: recording (state %u, player %p, body %08x).", state, player, shot.body);
+		}
+	}
+	static bool f8 = false;
+	bool f8now = (GetAsyncKeyState(VK_F8) & 0x8000) != 0;
+	if (f8now && !f8 && g_probeCount) {
+		std::wstring dir = Cfg().modCacheDir + L"deathprobe\\";
+		CreateDirectoryW(dir.c_str(), nullptr);
+		static int snaps = 0;
+		std::wstring path;
+		do {
+			path = dir + FormatW(L"snap-%d.bin", ++snaps);
+		} while (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES);
+		Bytes out;
+		uint32_t head[2] = {0x5044504c, 1};
+		out.insert(out.end(), (uint8_t*)head, (uint8_t*)(head + 2));
+		const ProbeShot& shot = g_probe[(g_probeNext - 1 + kProbeShots) % kProbeShots];
+		out.insert(out.end(), (const uint8_t*)&shot, (const uint8_t*)(&shot + 1));
+		WriteWholeFile(path, out);
+		XLS_LOG_INFO("mods: rules: death probe: snapshot -> %ls.", path.c_str());
+		// which of the player's (and its +0x40's) fields point at weapons (id 0x04KK0000 at +0x1c): the
+		// weapon in hand, carried ones, worn gear (the flyer pickup)
+		const uint8_t* objs[2] = {(const uint8_t*)(uintptr_t)shot.player, (const uint8_t*)(uintptr_t)shot.body};
+		const uint8_t* copies[2] = {shot.p, shot.b};
+		const size_t sizes[2] = {sizeof(shot.p), sizeof(shot.b)};
+		for (int o = 0; o < 2; o++) {
+			for (size_t at = 0; objs[o] && at + 4 <= sizes[o]; at += 4) {
+				uint32_t target = *(const uint32_t*)(copies[o] + at);
+				uint32_t id = 0;
+				if (target < 0x10000 || (target & 3)) {
+					continue;
+				}
+				ProbeCopy((uint8_t*)&id, (const void*)(uintptr_t)(target + 0x1c), 4);
+				if ((id & 0xff00ffff) == 0x04000000) {
+					XLS_LOG_INFO("mods: rules: death probe:   %s+0x%x -> %08x (weapon kind %02x).", o ? "body" : "player", (unsigned)at, target, (id >> 16) & 0xff);
+				}
+			}
+		}
+	}
+	f8 = f8now;
+	g_probeState = state;
+	g_probeArmed = true;
+}
+
+// The death: the controller update runs (only while dead) for the local player with the ring armed.
+void DeathProbeWrite(uint8_t* ctl)
+{
+	if (!g_probeOn || !g_probe || !g_probeArmed || !g_probeCount) {
+		return;
+	}
+	g_probeArmed = false;
+	uint8_t state = ctl[kCtlState];
+	if (g_probeWritten && GetTickCount() - g_probeWritten < 5000) { // still the same death
+		g_probeCount = 0;
+		return;
+	}
+	g_probeWritten = GetTickCount();
+	{
+		std::wstring dir = Cfg().modCacheDir + L"deathprobe\\";
+		CreateDirectoryW(dir.c_str(), nullptr);
+		std::wstring path;
+		do {
+			path = dir + FormatW(L"death-%d.bin", ++g_probeFiles);
+		} while (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES);
+		Bytes out;
+		uint32_t head[2] = {0x5044504c, (uint32_t)g_probeCount};
+		out.insert(out.end(), (uint8_t*)head, (uint8_t*)(head + 2));
+		for (int i = 0; i < g_probeCount; i++) {
+			const ProbeShot& shot = g_probe[(g_probeNext - g_probeCount + i + kProbeShots) % kProbeShots];
+			out.insert(out.end(), (const uint8_t*)&shot, (const uint8_t*)(&shot + 1));
+		}
+		WriteWholeFile(path, out);
+		XLS_LOG_INFO("mods: rules: death probe: death %d (state %u), %d snapshots -> %ls.", g_probeFiles, state, g_probeCount, path.c_str());
+		g_probeCount = 0;
+	}
+}
+
 void __attribute__((thiscall)) ControlUpdate(uint8_t* ctl)
 {
 	if (g_localSlot && *g_net) { // on the game thread, where the game asks it too
@@ -1020,6 +1194,7 @@ void __attribute__((thiscall)) ControlUpdate(uint8_t* ctl)
 	// once its body is removed the out player gets no update of its own (see HudUpdate)
 	if (local) {
 		g_localSeen = GetTickCount();
+		DeathProbeWrite(ctl);
 	}
 	if (!hold) {
 		if (local) {
@@ -1059,7 +1234,6 @@ EndCheckFn g_endCheckOriginal = nullptr;
 using RankingFn = void(__attribute__((thiscall)) *)(uint8_t*, int);
 RankingFn g_rankingOriginal = nullptr;
 const uint32_t kSetupRule = 0x28, kSetupPlayers = 0x70, kSetupSlotLeft = 0x6a; // +0x1b2 of a slot record: not in the ranking
-uint8_t** g_players = nullptr;
 const uint32_t kPlayersSlots = 0x28, kPlayerInPlay = 8; // bit 0
 const uint32_t kNetHostSlot = 0xa1f8, kNetLocalSlot = 0xa1fc;
 // 1: the training bot match, ranked by slot like 2; Team Elimination is 4, 5 the team kills rule (mc_Kill)
@@ -1383,13 +1557,6 @@ uint32_t __attribute__((thiscall)) ModeStart(void* launch, int mode)
 	return result;
 }
 
-template <typename T>
-bool ReadGame(const void* at, T* out)
-{
-	SIZE_T got = 0;
-	return at && ReadProcessMemory(GetCurrentProcess(), at, out, sizeof(T), &got) && got == sizeof(T);
-}
-
 DWORD WINAPI SurvivalThread(LPVOID)
 {
 	std::string last;
@@ -1709,6 +1876,81 @@ uint32_t __attribute__((thiscall)) AddAmmo(uint8_t* weapon, int16_t delta)
 	return ok;
 }
 
+// Score log (while ModCache\scorelog.on exists): every change of a slot's Battle Gauge / kills / points,
+// a team's gauge, and the three things that stop the game's death scoring (DX9 FUN_00f6b050: the
+// victim loses gauge on every death, a killer that isn't a teammate gains), read every 20 ms:
+//   game status +0x1467c bit 0x200000: the death isn't scored at all
+//   players +0x256 == 0 (offline-style rules) with the victim's slot record +0x1b1 set: both amounts 0
+// and what the match is scored by (players +0x8174: 1 gauge, 2 kills, 3 points).
+uint8_t** g_status = nullptr;
+const uint32_t kResultsPoints = 0x19bc, kResultsTeamGauge = 0x107c;
+const uint32_t kStatusFlags = 0x1467c, kStatusNoScore = 0x200000, kPlayersOnline = 0x256, kSlotNoScore = 0x69;
+
+DWORD WINAPI ScoreThread(LPVOID)
+{
+	struct Snap {
+		int32_t gauge[16], kills[16], points[16], team[2], mode;
+		uint32_t flags;
+		uint8_t online, noScore[16];
+	};
+	Snap last{};
+	bool have = false, on = false;
+	DWORD checked = 0;
+	for (;; Sleep(20)) {
+		if (GetTickCount() - checked > 2000) {
+			checked = GetTickCount();
+			bool now = GetFileAttributesW((Cfg().modCacheDir + L"scorelog.on").c_str()) != INVALID_FILE_ATTRIBUTES;
+			if (now != on) {
+				on = now;
+				have = false;
+				XLS_LOG_INFO("mods: rules: score log %s.", on ? "on" : "off");
+			}
+		}
+		if (!on) {
+			continue;
+		}
+		uint8_t *results = nullptr, *status = nullptr, *players = nullptr, *setup = nullptr;
+		ReadGame(g_results, &results);
+		ReadGame(g_status, &status);
+		ReadGame(g_players, &players);
+		ReadGame(g_matchSetup, &setup);
+		Snap s{};
+		if (!results || !ReadGame(results + kResultsGauge, &s.gauge) || !ReadGame(results + kResultsKills, &s.kills) ||
+		    !ReadGame(results + kResultsPoints, &s.points) || !ReadGame(results + kResultsTeamGauge, &s.team)) {
+			have = false;
+			continue;
+		}
+		ReadGame(status + kStatusFlags, &s.flags);
+		ReadGame(players + kPlayersOnline, &s.online);
+		ReadGame(players + kPlayersListMode, &s.mode);
+		for (int i = 0; i < 16; i++) {
+			ReadGame(setup + kSetupSlots + i * kSetupSlot + kSlotNoScore, &s.noScore[i]);
+		}
+		if (!have || s.mode != last.mode || s.online != last.online || (s.flags & kStatusNoScore) != (last.flags & kStatusNoScore)) {
+			XLS_LOG_INFO("mods: rules: score: scored by %s (mode %d), players+0x256 = %u, no-score flag %s.",
+			             s.mode == kListGauge ? "Battle Gauge" : s.mode == kListKills ? "kills" : s.mode == kListPoints ? "points" : "?",
+			             s.mode, s.online, s.flags & kStatusNoScore ? "SET (deaths not scored)" : "clear");
+		}
+		for (int i = 0; i < 16; i++) {
+			bool changed = !have || s.gauge[i] != last.gauge[i] || s.kills[i] != last.kills[i] || s.points[i] != last.points[i] ||
+			               s.noScore[i] != last.noScore[i];
+			bool used = s.gauge[i] > 0 || s.kills[i] > 0 || s.points[i] > 0 || (have && (last.gauge[i] > 0 || last.kills[i] > 0 || last.points[i] > 0));
+			if (changed && (used || have)) {
+				XLS_LOG_INFO("mods: rules: score: slot %d gauge %d -> %d, kills %d -> %d, points %d -> %d (slot +0x1b1 = %u).", i,
+				             have ? last.gauge[i] : s.gauge[i], s.gauge[i], have ? last.kills[i] : s.kills[i], s.kills[i],
+				             have ? last.points[i] : s.points[i], s.points[i], s.noScore[i]);
+			}
+		}
+		for (int t = 0; t < 2; t++) {
+			if (!have || s.team[t] != last.team[t]) {
+				XLS_LOG_INFO("mods: rules: score: team %d gauge %d -> %d.", t, have ? last.team[t] : s.team[t], s.team[t]);
+			}
+		}
+		last = s;
+		have = true;
+	}
+}
+
 }
 
 void RulesInstall(unsigned char* base)
@@ -1798,6 +2040,7 @@ void RulesInstall(unsigned char* base)
 	g_localSlot = (LocalSlotFn)(base + (kRulesVas[build].localSlot - 0x400000));
 	g_controllers = (uint8_t**)(base + (kRulesVas[build].controllers - 0x400000));
 	g_players = (uint8_t**)(base + (kRulesVas[build].players - 0x400000));
+	g_status = (uint8_t**)(base + (kRulesVas[build].status - 0x400000));
 	g_follow = (FollowFn)(base + (kRulesVas[build].follow - 0x400000));
 	g_followArg = (const float*)(base + (kRulesVas[build].followArg - 0x400000));
 	g_flashCall = (FlashCallFn)(base + (kRulesVas[build].flashCall - 0x400000));
@@ -1882,6 +2125,9 @@ void RulesInstall(unsigned char* base)
 	HANDLE survival = CreateThread(nullptr, 0, SurvivalThread, nullptr, 0, nullptr);
 	if (survival) {
 		CloseHandle(survival);
+	}
+	if (HANDLE score = CreateThread(nullptr, 0, ScoreThread, nullptr, 0, nullptr)) {
+		CloseHandle(score);
 	}
 	XLS_LOG_INFO("mods: rules: hooked (%s).", build == 0 ? "DX11" : "DX9");
 }
@@ -2155,6 +2401,11 @@ bool InsertRootScript(std::vector<uint8_t>* gfx, const Bytes& script, const char
 	return false;
 }
 
+}
+
+bool FlashAddRootScript(std::vector<uint8_t>* gfx, const std::vector<uint8_t>& script, const char* what)
+{
+	return InsertRootScript(gfx, Bytes(script.begin(), script.end()), what);
 }
 
 bool RulesPatchMenuFlash(std::vector<uint8_t>* gfx)

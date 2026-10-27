@@ -31,8 +31,16 @@ const char* RulesMessage(uint32_t id);
 uint32_t RulesMessageAlias(uint32_t id); // our ids that reuse a game message -> that message
 bool RulesPatchMenuFlash(std::vector<uint8_t>* gfx);
 bool RulesPatchTrainingFlash(std::vector<uint8_t>* gfx); // our AI Enemy Battle rows (flash\training\id300)
+// Adds a DoAction with script before a GFx movie's first ShowFrame (after the root's own script).
+bool FlashAddRootScript(std::vector<uint8_t>* gfx, const std::vector<uint8_t>& script, const char* what);
+// Options > Network (netmenu.cpp): the entry's script for the Options Flash (flash\option\id500_PC),
+// and the hook that answers it.
+bool NetMenuPatchFlash(std::vector<uint8_t>* gfx);
+// Adds the Network entry's texts to message\msgPC\MsgOption, every language (netmenu.cpp).
+bool NetMenuPatchMessages(std::vector<uint8_t>* file);
+void NetMenuInstall(unsigned char* base);
 // A map package was bound to online slot 13 / 14 (packages.cpp): its base map's preload list and its size class.
-void MapsRebind(int slot, int base, int size);
+void MapsRebind(int slot, int base, int size, const std::vector<std::string>& preload);
 
 // Enabled mod folders in load order (zip mods unpacked into ModCache), computed once.
 const std::vector<std::wstring>& ModRootList();

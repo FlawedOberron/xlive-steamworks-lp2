@@ -22,6 +22,7 @@ bool g_zoomPending = false;
 bool g_controlsPending = false;
 bool g_promptsPending = false;
 bool g_menuPending = false;
+bool g_reminderPending = false;
 bool g_hadScoped = false; // controls.json has a "scoped" section (else the wheel zooms by default)
 
 void LoadSettings()
@@ -54,7 +55,7 @@ void LoadSettings()
 		}
 	}
 	g_hadScoped = root["scoped"].IsObject();
-	for (const char* context : {"foot", "vs", "fly", "scoped"}) {
+	for (const char* context : {"foot", "vs", "fly", "scoped", "bike"}) {
 		for (const auto& remap : root[context].Items()) {
 			std::string source = remap.second.GetString(std::string());
 			if (!source.empty()) {
@@ -84,9 +85,12 @@ void SaveSettings()
 		"\t// Flying VS (inherits vs unless set here): the VS actions plus ascend, descend.\n"
 		"\t// Scoped (on foot while zoomed, inherits foot): the foot actions plus zoom_in, zoom_out\n"
 		"\t//   (\"key:MOUSE_WUP\" / \"key:MOUSE_WDOWN\" = the mouse wheel).\n"
-		"\t// fly_types: VS types (unit id byte 2) that fly. log: log on-foot / VS changes.\n";
+		"\t// Bike (the hover bike: on-foot controls, inherits foot): ascend, descend (the fly keys unless\n"
+		"\t//   set here) and boost (default: the shortcuts page's Dash key, slot 37).\n"
+		"\t// fly_types: more VS types (unit id byte 2) that fly; the game's flyers are built in.\n"
+		"\t// log: log on-foot / VS changes.\n";
 	text += std::string("\t\"hold_to_aim\": ") + (g_settings.holdToAim ? "true" : "false") + ",\n";
-	for (const char* context : {"foot", "vs", "fly", "scoped"}) {
+	for (const char* context : {"foot", "vs", "fly", "scoped", "bike"}) {
 		text += std::string("\t\"") + context + "\": {";
 		bool first = true;
 		for (const Remap& r : g_settings.remaps) {
@@ -132,6 +136,7 @@ extern "C" __declspec(dllexport) int lp2mod_load(const LP2ModHost* host)
 	}
 	g_zoomPending = true; // installed even when off, so the menu can switch it on
 	g_menuPending = true;
+	g_reminderPending = true;
 	bool rules = ControlsLoadRules();
 	g_controlsPending = rules || g_settings.log;
 	g_promptsPending = rules;
@@ -153,7 +158,10 @@ extern "C" __declspec(dllexport) int lp2mod_poll(void)
 	if (g_promptsPending && PromptsTryInstall(g_host->game_base)) {
 		g_promptsPending = false;
 	}
-	if ((g_zoomPending || g_controlsPending || g_promptsPending || g_menuPending) && g_host->title_started()) {
+	if (g_reminderPending && ReminderTryInstall(g_host->game_base)) {
+		g_reminderPending = false;
+	}
+	if ((g_zoomPending || g_controlsPending || g_promptsPending || g_menuPending || g_reminderPending) && g_host->title_started()) {
 		if (g_zoomPending) {
 			LOG_WARN("hold to aim: zoom check not found in this game build.");
 		}
@@ -166,7 +174,10 @@ extern "C" __declspec(dllexport) int lp2mod_poll(void)
 		if (g_menuPending) {
 			LOG_WARN("menu: key config code is not as expected, Controls page left as it is.");
 		}
+		if (g_reminderPending) {
+			LOG_WARN("menu: pause menu reminder code is not as expected, left as it is.");
+		}
 		return 1;
 	}
-	return !g_zoomPending && !g_controlsPending && !g_promptsPending && !g_menuPending;
+	return !g_zoomPending && !g_controlsPending && !g_promptsPending && !g_menuPending && !g_reminderPending;
 }

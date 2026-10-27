@@ -7,9 +7,14 @@
 #include "xlive/xlive_steamworks.h"
 #include "core/steam.h"
 
+#include <functional>
+#include <string>
+
 namespace xls {
 
 void NetInit();
+// Applies Cfg().sendRateKBytes (0 = auto) to Steam networking; again when the Network menu changes it.
+void NetApplySendRate();
 void NetShutdown();
 // Receives pending Steam messages into socket queues and services QoS and connection state.
 void NetPump();
@@ -52,6 +57,10 @@ bool NetKeyRegistered(const XNKID& xnkid);
 // --- QoS -----------------------------------------------------------------------------------------
 
 INT NetQosListen(const XNKID& xnkid, const uint8_t* data, UINT size, DWORD bitsPerSecond, DWORD flags);
+// Text added to every QoS answer we send (after the title's data; builds without this ignore it).
+void NetSetQosExtra(std::function<std::string()> source);
+// The text a QoS answer brought with title data starting like data (the newest such answer).
+bool NetQosExtraFor(const uint8_t* data, size_t size, std::string* out);
 INT NetQosLookup(UINT count, const XNADDR* xnaddrs[], const XNKID* xnkids[], const XNKEY* xnkeys[], UINT serviceCount, const IN_ADDR services[], const DWORD serviceIds[], UINT probes, DWORD bitsPerSecond, DWORD flags, WSAEVENT event, XNQOS** out);
 INT NetQosRelease(XNQOS* qos);
 INT NetQosListenStats(const XNKID& xnkid, XNQOSLISTENSTATS* stats);

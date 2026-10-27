@@ -5,6 +5,7 @@
 #include "core/config.h"
 #include "core/json.h"
 #include "core/log.h"
+#include "core/net.h"
 #include "core/utils.h"
 
 #include <windows.h>
@@ -34,6 +35,7 @@ struct ModMap {
 	int base;
 	int size; // 0 small, 1 medium, 2 large; -1 = the base map's
 	std::string name;
+	std::vector<std::string> preload; // the bound package's extra archives
 };
 
 std::vector<ModMap> g_maps; // always slots 13 and 14
@@ -59,6 +61,16 @@ struct DepEntry {
 	uint8_t id;
 	uint16_t pad;
 };
+// A map's arc list: {const char* name, u32 flags} pairs, null terminated, split into groups by "dummy"
+// entries: the first group loads for every match on the map, then one group per mode and layout
+// (DX11 FUN_007d1320 picks it). Map packages' extra archives (map.json "preload") go into the first.
+struct ArcEntry {
+	const char* name;
+	uint32_t flags;
+};
+// Lists built for map packages: never freed (a list may still be read by a load in progress).
+std::vector<std::vector<ArcEntry>*> g_builtLists;
+std::vector<std::string*> g_builtNames;
 DepEntry* g_preloadCopy = nullptr;        // the moved preload list (mod entries at the end)
 std::vector<DepEntry> g_preloadOriginal;  // the game's entries
 const uint32_t kDepRvas[2][2] = {{0x3d12d2, 0x3d1329}, {0x3c2462, 0x3c24b9}}; // DX11, DX9
@@ -116,6 +128,42 @@ bool InstallAvailability(uint8_t* base, int build)
 	return WriteCode(fn, jmp, sizeof(jmp));
 }
 
+// base's arc list with extra archives added to its common group (those it doesn't already have).
+const char** WithExtras(const char** arcs, const std::vector<std::string>& extra, int slot)
+{
+	if (!arcs || extra.empty()) {
+		return arcs;
+	}
+	auto* src = (const ArcEntry*)arcs;
+	auto* list = new std::vector<ArcEntry>();
+	size_t n = 0;
+	while (src[n].name) {
+		n++;
+	}
+	size_t common = 1;
+	while (common < n && _stricmp(src[common].name, src[0].name) != 0) {
+		common++;
+	}
+	list->assign(src, src + common);
+	int added = 0;
+	for (const std::string& e : extra) {
+		bool have = false;
+		for (size_t i = 1; i < common && !have; i++) {
+			have = _stricmp(src[i].name, e.c_str()) == 0;
+		}
+		if (!have) {
+			auto* name = new std::string(e);
+			g_builtNames.push_back(name);
+			list->push_back({name->c_str(), 0});
+			added++;
+		}
+	}
+	list->insert(list->end(), src + common, src + n + 1); // the rest and the terminator
+	g_builtLists.push_back(list);
+	XLS_LOG_INFO("mods: maps: slot %d preloads %d extra archive(s) for its package.", slot, added);
+	return (const char**)list->data();
+}
+
 bool InstallPreload(uint8_t* base, int build)
 {
 	uint8_t* sites[2] = {base + kDepRvas[build][0], base + kDepRvas[build][1]};
@@ -148,7 +196,7 @@ bool InstallPreload(uint8_t* base, int build)
 				arcs = entries[i].areaType == kAreaOnline && entries[i].id == 0 ? entries[i].arcs : nullptr;
 			}
 		}
-		entries.push_back({arcs, kAreaOnline, (uint8_t)m.slot, 0});
+		entries.push_back({WithExtras(arcs, m.preload, m.slot), kAreaOnline, (uint8_t)m.slot, 0});
 	}
 	entries.push_back({});
 	// Never freed: the game reads the list for the rest of the session.
@@ -282,13 +330,13 @@ bool MapsWanted()
 		SlotEntry(14);
 		for (const MapPackage& p : PackageMaps()) {
 			ModMap* m = SlotEntry(p.slot);
-			*m = {p.slot, p.base, p.size, p.name};
+			*m = {p.slot, p.base, p.size, p.name, p.preload};
 		}
 	}
 	return true;
 }
 
-void MapsRebind(int slot, int base, int size)
+void MapsRebind(int slot, int base, int size, const std::vector<std::string>& preload)
 {
 	if (slot != 13 && slot != 14) {
 		return;
@@ -296,11 +344,13 @@ void MapsRebind(int slot, int base, int size)
 	ModMap* m = SlotEntry(slot);
 	m->base = base;
 	m->size = size;
+	m->preload = preload;
 	if (g_preloadCopy) {
 		const char** arcs = nullptr;
 		for (const DepEntry& e : g_preloadOriginal) {
 			arcs = !arcs && e.areaType == kAreaOnline && e.id == base ? e.arcs : arcs;
 		}
+		arcs = WithExtras(arcs, preload, slot);
 		for (DepEntry* e = g_preloadCopy + g_preloadOriginal.size(); arcs && e->arcs; e++) {
 			if (e->id == slot) {
 				e->arcs = arcs;
@@ -382,6 +432,47 @@ int __attribute__((thiscall)) RuleStep(void* screen, int key, uint8_t* value, in
 	return *value != was;
 }
 
+// The session browser's detail panel (DX9 FUN_00e82360, DX11 0xe92430; thiscall(screen, entry)):
+// shows one search result's settings from the host's QoS data (screen+0x5c8 -> +0x288 + entry *
+// 0x94; the panel reads its fields from +0x290). The map is MsgOnline 126 + map, so on 13 / 14 every
+// session would show our own name for that slot (or the stock DUMMY): while the panel runs, the
+// name comes from the text the host sent with that QoS data (its maps' names, core/net.cpp).
+struct DetailVa {
+	uint32_t fn;
+	uint8_t prologue[9];   // sub esp,0x28; push esi; push <empty string>
+};
+const DetailVa kDetailVas[] = {
+	{0xe92430, {0x83, 0xec, 0x28, 0x56, 0x68, 0x6c, 0x84, 0x6e, 0x01}}, // DX11
+	{0xe82360, {0x83, 0xec, 0x28, 0x56, 0x68, 0xac, 0x7c, 0x6d, 0x01}}, // DX9
+};
+using DetailFn = void(__attribute__((thiscall)) *)(void*, uint32_t);
+DetailFn g_detailOriginal = nullptr;
+const uint8_t* g_detailEntry = nullptr;   // game thread only
+
+void __attribute__((thiscall)) Detail(void* screen, uint32_t entry)
+{
+	const uint8_t* list = *(const uint8_t**)((uint8_t*)screen + 0x5c8);
+	g_detailEntry = list && entry < 32 ? list + 0x288 + entry * 0x94 : nullptr;
+	g_detailOriginal(screen, entry);
+	g_detailEntry = nullptr;
+}
+
+// The browsed session's own name for its map in slot (13 / 14), from its QoS answer.
+const char* BrowsedName(uint32_t slot)
+{
+	static char name[128];
+	std::string extra;
+	if (!g_detailEntry || !(xls::NetQosExtraFor(g_detailEntry, 0x94, &extra) || xls::NetQosExtraFor(g_detailEntry + 8, 0x8c, &extra))) {
+		return nullptr;
+	}
+	std::string n = PackagesNameIn(extra, (int)slot);
+	if (n.empty()) {
+		return nullptr;
+	}
+	snprintf(name, sizeof(name), "%s", n.c_str());
+	return name;
+}
+
 const char* __attribute__((thiscall)) Message(void* messages, const char* file, uint32_t id, uint32_t lang)
 {
 	if (file && strcmp(file, "MsgOnline") == 0 && RulesMessageAlias(id) != id) {
@@ -391,6 +482,9 @@ const char* __attribute__((thiscall)) Message(void* messages, const char* file, 
 		return text;
 	}
 	if ((id == kMsgMapName + 13 || id == kMsgMapName + 14) && file && strcmp(file, "MsgOnline") == 0) {
+		if (const char* name = BrowsedName(id - kMsgMapName)) {
+			return name;
+		}
 		if (const char* name = PackagesSlotName((int)(id - kMsgMapName))) {
 			static bool logged = false;
 			if (!logged) {
@@ -413,6 +507,9 @@ void InstallPicker(uint8_t* base)
 	auto at = [&](uint32_t v) { return base + (v - (uintptr_t)exe); };
 	g_stepOriginal = (StepFn)Detour(at(va.step), kStepPrologue, sizeof(kStepPrologue), (void*)&RuleStep);
 	g_messageOriginal = (MessageFn)Detour(at(va.message), kMessagePrologue, sizeof(kMessagePrologue), (void*)&Message);
+	const DetailVa& dv = kDetailVas[g_build];
+	g_detailOriginal = (DetailFn)Detour(at(dv.fn), dv.prologue, sizeof(dv.prologue), (void*)&Detail);
+	XLS_LOG_INFO("mods: maps: session browser map names %s.", g_detailOriginal ? "hooked" : "NOT hooked (unknown code)");
 	XLS_LOG_INFO("mods: maps: create-match map picker %s, map names %s.", g_stepOriginal ? "hooked" : "NOT hooked (unknown code)", g_messageOriginal ? "hooked" : "NOT hooked");
 }
 

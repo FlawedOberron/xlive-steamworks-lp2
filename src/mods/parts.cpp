@@ -1608,6 +1608,7 @@ struct MemberParts {
 
 std::mutex g_membersMutex;
 std::map<uint64_t, MemberParts> g_members; // Steam id -> choices
+std::map<uint64_t, std::pair<XUID, std::string>> g_memberValues; // what each member published (kept while "receive" is off)
 int g_fakeSlot = -1;                       // the fake member plays this slot
 int g_infoXuidOffset = -1;                 // player info -> XUID (found from our own entry)
 std::atomic<bool> g_stageSeen{false};      // a stage load has started (PartsPlayer diagnostics)
@@ -1625,6 +1626,9 @@ thread_local const PartPackage* t_requestSet = nullptr; // the request being bui
 std::string PartsMemberValue()
 {
 	std::string value = "1";
+	if (!Cfg().partsShare) {
+		return value; // "share custom parts" off (Options > Network): no sets, others see stock parts
+	}
 	std::lock_guard<std::mutex> lock(g_carrierMutex);
 	for (int s = 0; s < kPartSlotCount; s++) {
 		if (!g_carrierSets[s].empty()) {
@@ -1745,7 +1749,9 @@ std::shared_ptr<xls::TransferSource> ServeBundle(const std::string& hash)
 	}
 	std::vector<std::pair<PartSet, std::wstring>> sets; // (set, its folder)
 	for (const PartSet& set : PartSets()) {
-		sets.emplace_back(set, SetFolder(set));
+		if (Cfg().partsShare) {
+			sets.emplace_back(set, SetFolder(set));
+		}
 	}
 	for (const PartSet& set : g_fakeSets) {
 		sets.emplace_back(set, set.source + L"\\");
@@ -1909,6 +1915,23 @@ const PartPackage* ResolveEntry(uint64_t member, uint32_t cat, const std::string
 
 void OnMemberParts(uint64_t steamId, XUID xuid, const std::string& value)
 {
+	{
+		std::lock_guard<std::mutex> lock(g_membersMutex);
+		if (value.empty()) {
+			g_memberValues.erase(steamId);
+		}
+		else {
+			g_memberValues[steamId] = {xuid, value};
+		}
+	}
+	if (!Cfg().partsReceive && steamId != kFakeMember && !value.empty()) {
+		// "receive custom parts" off (Options > Network): as if the member had no parts
+		std::lock_guard<std::mutex> lock(g_membersMutex);
+		if (g_members.erase(steamId)) {
+			g_lobbyGen++;
+		}
+		return;
+	}
 	MemberParts parts;
 	if (!value.empty() && !ParseMemberParts(value, &parts)) {
 		XLS_LOG_WARN("mods: parts: member %llu: unknown parts data \"%.40s\".", (unsigned long long)steamId, value.c_str());
@@ -1932,6 +1955,23 @@ void OnMemberParts(uint64_t steamId, XUID xuid, const std::string& value)
 		ResolveEntry(steamId, c.first % kPartSlotCount, c.second, true);
 	}
 }
+
+}
+
+void PartsNetworkChanged()
+{
+	PublishParts();
+	std::map<uint64_t, std::pair<XUID, std::string>> values;
+	{
+		std::lock_guard<std::mutex> lock(g_membersMutex);
+		values = g_memberValues;
+	}
+	for (const auto& kv : values) {
+		OnMemberParts(kv.first, kv.second.first, kv.second.second);
+	}
+}
+
+namespace {
 
 // The test stand-in for a second client (ModCache\parts\fake_member.txt): "slot <p>" and a parts
 // line; without one, it wears every set of ModCache\parts\fake_library\ (set folders this PC

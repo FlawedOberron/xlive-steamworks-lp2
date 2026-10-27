@@ -53,6 +53,7 @@ const RemapRow kRemapRows[] = {
 	{"scoped", "zoom_out", "Zoom out"},
 	{"vs", "transform", "VS Transform"},
 	{"fly", "transform", "Transform"},
+	{"fly", "dash", "Dash"},
 };
 
 struct Row {
@@ -82,7 +83,7 @@ const Row kRows[] = {
 	{42, 0x26}, {41, 0x27},                                   // reload VS right / left
 	{0, kSlotHeader + 4},
 	{0, kSlotRemap + 3}, {0, kSlotRemap + 4},                 // ascend, descend
-	{0, kSlotRemap + 8},                                      // transform (flying)
+	{0, kSlotRemap + 8}, {0, kSlotRemap + 9},                 // transform, dash (flying)
 };
 const size_t kRowCount = sizeof(kRows) / sizeof(kRows[0]);
 Row g_table[kRowCount + 8]; // padding: the original table was followed by more rows
@@ -103,13 +104,14 @@ struct MenuAddrs {
 	uint32_t invoke;    // thiscall(screen, result*, "path", args, count): call ActionScript
 	uint32_t valueFree; // thiscall(value*): release an ActionScript value
 	uint32_t keyNames;  // 100 x {char* "<KEY_..>", i32 virtual key, i32 mouse code}
+	uint32_t options;   // pointer to the options object (+0x68: the saved 45 key slots)
 };
 const MenuAddrs kDx11 = {0x1636c74, {0xf0522c, 0xf05b07, 0xf05dc9, 0xf06955, 0xf06a0a, 0xf06be1, 0xf07283, 0xf074d0}, 0xf06f82, 0xf06a46,
                          0xf056a0, 0xf074b0, 0xf069f0, 0xf06480, 0x1636dd0, 0x1373294, 0x18e0860, 0xf04d90, 0xf04e10, 0xf04f40,
-                         0x77b280, 0xf04b60, 0xf4a390, 0x77a680, 0x17fd228};
+                         0x77b280, 0xf04b60, 0xf4a390, 0x77a680, 0x17fd228, 0x1852238};
 const MenuAddrs kDx9 = {0x1626b2c, {0xef544c, 0xef5d27, 0xef5fe9, 0xef6b75, 0xef6c2a, 0xef6e01, 0xef74a3, 0xef76f0}, 0xef71a2, 0xef6c66,
                         0xef58c0, 0xef76d0, 0xef6c10, 0xef66a0, 0x1626c88, 0x13630c4, 0x18ce774, 0xef4fb0, 0xef5030, 0xef5160,
-                        0x76c0c0, 0xef4d80, 0xf3a660, 0x76b4e0, 0x17ed1c8};
+                        0x76c0c0, 0xef4d80, 0xf3a660, 0x76b4e0, 0x17ed1c8, 0x1842198};
 const MenuAddrs* A = &kDx11;
 
 const uint8_t kDrawPrologue[] = {0x83, 0xec, 0x20, 0x53, 0x55, 0x56, 0x8b, 0xf1};
@@ -195,16 +197,17 @@ std::string KeyText(int vk)
 	return ControlsKeyName(vk).substr(4);
 }
 
-std::string BindingText(uint8_t* screen, int slot)
+// binds = the 45 key slots (the page's working copy at screen+0x1e0, or the options object's).
+std::string BindingText(uint32_t* binds, int slot)
 {
 	if (slot < 0 || slot >= 45) {
 		return "-";
 	}
-	const char* key = ((KeyNameFn)(uintptr_t)A->keyName)((uint32_t*)(screen + 0x1e0 + slot * 4));
+	const char* key = ((KeyNameFn)(uintptr_t)A->keyName)(binds + slot);
 	return key ? key : "";
 }
 
-std::string RemapText(uint8_t* screen, const RemapRow& r)
+std::string RemapText(uint32_t* binds, const RemapRow& r)
 {
 	int sourceSlot = -1;
 	int vk = ControlsRuleFor(r.context, r.dest, &sourceSlot);
@@ -212,7 +215,7 @@ std::string RemapText(uint8_t* screen, const RemapRow& r)
 		return KeyText(vk);
 	}
 	if (vk == 0) {
-		return BindingText(screen, sourceSlot);
+		return BindingText(binds, sourceSlot);
 	}
 	if (strcmp(r.context, "fly") == 0 || strcmp(r.context, "scoped") == 0) {
 		// No rule of its own: inherited from vs / foot.
@@ -223,11 +226,11 @@ std::string RemapText(uint8_t* screen, const RemapRow& r)
 			return KeyText(vk);
 		}
 		if (vk == 0) {
-			return BindingText(screen, sourceSlot);
+			return BindingText(binds, sourceSlot);
 		}
 	}
 	int slot = ControlsActionSlot(r.context, r.dest);
-	return slot >= 0 ? BindingText(screen, slot) : std::string("-"); // the game's own key, or none
+	return slot >= 0 ? BindingText(binds, slot) : std::string("-"); // the game's own key, or none
 }
 
 void __attribute__((thiscall)) Draw(uint8_t* screen)
@@ -253,7 +256,7 @@ void __attribute__((thiscall)) Draw(uint8_t* screen)
 		if (row->slot >= kSlotRemap && row->slot < kSlotRemap + sizeof(kRemapRows) / sizeof(kRemapRows[0])) {
 			const RemapRow& remap = kRemapRows[row->slot - kSlotRemap];
 			setList(screen, r, remap.label, 1);
-			std::string text = first + r == g_captureRow ? std::string("?") : RemapText(screen, remap);
+			std::string text = first + r == g_captureRow ? std::string("?") : RemapText((uint32_t*)(screen + 0x1e0), remap);
 			setData(screen, r, text.c_str(), 1);
 			setArrow(screen, r, 0, 0);
 			continue;
@@ -446,6 +449,22 @@ void* Detour(uint8_t* fn, size_t length, void* detour)
 	return tramp;
 }
 
+}
+
+const char* MenuHeader(int index)
+{
+	return index >= 0 && index < (int)(sizeof(kHeaders) / sizeof(kHeaders[0])) ? kHeaders[index] : "";
+}
+
+std::string MenuRemapKey(const char* context, const char* dest)
+{
+	A = g_host->game_exe == LP2MOD_EXE_DX11 ? &kDx11 : &kDx9;
+	uint8_t* options = *(uint8_t**)(uintptr_t)A->options;
+	if (!options) {
+		return "-";
+	}
+	RemapRow r = {context, dest, ""};
+	return RemapText((uint32_t*)(options + 0x68), r);
 }
 
 bool MenuTryInstall(unsigned char* base)

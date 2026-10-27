@@ -24,7 +24,7 @@ struct Settings {
 	bool holdToAim = true;      // zoom while the zoom button is held, instead of toggling
 	bool log = false;           // log on-foot / VS context changes and the units seen
 	std::vector<Remap> remaps;  // per context: action dest takes the input of action source
-	std::vector<int> flyTypes = {0xa8, 0xda}; // VS types (unit id byte 2) that fly
+	std::vector<int> flyTypes;  // more VS types (unit id byte 2) that fly, besides the game's flying family (controls.cpp)
 };
 extern Settings g_settings;
 
@@ -47,6 +47,12 @@ bool ControlsLoadRules();
 bool ControlsTryInstall(unsigned char* base);
 // Key config menu (menu.cpp): true once done (or not mapped for this exe).
 bool MenuTryInstall(unsigned char* base);
+// For the pause menu reminder (menu.cpp): a Key Bindings header, and the key text of a rule row
+// ("<KEY_..>" tag, the game's binding it borrows or falls back to, or "-").
+const char* MenuHeader(int index);
+std::string MenuRemapKey(const char* context, const char* dest);
+// Pause menu key reminder lists (reminder.cpp): true once done.
+bool ReminderTryInstall(unsigned char* base);
 // Writes g_settings to controls.json (plugin.cpp).
 void SaveSettings();
 // For the menu (controls.cpp). Slot = key config slot of an action in a context (-1: none).
@@ -59,6 +65,10 @@ void ControlsSetKey(const char* context, const char* dest, int vk);
 std::string ControlsKeyName(int vk);
 // The game's mouse code pressed this frame (12 / 13 = wheel up / down); false where unmapped.
 bool ControlsMousePressed(int code);
+// True when the last pad update found the player in a flying VS (false without the pad hook).
+bool ControlsInFlyer();
+// True when the last pad update found the player in any VS (false without the pad hook).
+bool ControlsInVs();
 // Prompts follow the rules (controls.cpp): true once the prompt refresh is hooked.
 bool PromptsTryInstall(unsigned char* base);
 

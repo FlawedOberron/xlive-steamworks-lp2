@@ -1,8 +1,10 @@
 #include "core/config.h"
 
 #include "core/json.h"
+#include "core/spa.h"
 #include "core/utils.h"
 
+#include <ctype.h>
 #include <stdio.h>
 
 #include <mutex>
@@ -31,6 +33,170 @@ LogLevel ParseLogLevel(const std::string& text, LogLevel fallback)
 uint32_t KeyToId(const std::string& key)
 {
 	return (uint32_t)strtoul(key.c_str(), nullptr, 0);
+}
+
+// --- Text edits of the configuration file (comments and layout kept). Positions are byte offsets.
+size_t SkipBlank(const std::string& t, size_t at)
+{
+	while (at < t.size()) {
+		if (isspace((unsigned char)t[at])) {
+			at++;
+		}
+		else if (t.compare(at, 2, "//") == 0) {
+			at = t.find('\n', at);
+			at = at == std::string::npos ? t.size() : at + 1;
+		}
+		else if (t.compare(at, 2, "/*") == 0) {
+			at = t.find("*/", at + 2);
+			at = at == std::string::npos ? t.size() : at + 2;
+		}
+		else {
+			break;
+		}
+	}
+	return at;
+}
+
+size_t SkipString(const std::string& t, size_t at) // at = the opening quote
+{
+	for (at++; at < t.size(); at++) {
+		if (t[at] == '\\') {
+			at++;
+		}
+		else if (t[at] == '"') {
+			return at + 1;
+		}
+	}
+	return t.size();
+}
+
+size_t SkipValue(const std::string& t, size_t at)
+{
+	if (at >= t.size()) {
+		return at;
+	}
+	if (t[at] == '"') {
+		return SkipString(t, at);
+	}
+	if (t[at] == '{' || t[at] == '[') {
+		int depth = 0;
+		while (at < t.size()) {
+			at = SkipBlank(t, at);
+			if (at >= t.size()) {
+				break;
+			}
+			char c = t[at];
+			if (c == '"') {
+				at = SkipString(t, at);
+				continue;
+			}
+			at++;
+			if (c == '{' || c == '[') {
+				depth++;
+			}
+			else if ((c == '}' || c == ']') && --depth == 0) {
+				return at;
+			}
+		}
+		return t.size();
+	}
+	while (at < t.size() && t[at] != ',' && t[at] != '}' && t[at] != ']' && !isspace((unsigned char)t[at]) && t.compare(at, 2, "//") != 0) {
+		at++;
+	}
+	return at;
+}
+
+// The object whose '{' is at open: where key's value starts and ends (npos when missing), where its
+// last member's value ends (npos when empty) and where its '}' is.
+struct ObjectSpot {
+	size_t valueBegin = std::string::npos, valueEnd = std::string::npos, lastEnd = std::string::npos, close = std::string::npos;
+	std::string indent = "\t";
+};
+
+ObjectSpot FindMember(const std::string& t, size_t open, const std::string& key)
+{
+	ObjectSpot spot;
+	size_t at = open + 1;
+	bool first = true;
+	for (;;) {
+		at = SkipBlank(t, at);
+		if (at >= t.size()) {
+			return spot;
+		}
+		if (t[at] == '}') {
+			spot.close = at;
+			return spot;
+		}
+		if (t[at] != '"') {
+			return spot;
+		}
+		if (first) {
+			size_t line = t.rfind('\n', at);
+			line = line == std::string::npos ? 0 : line + 1;
+			if (line > open && t.find_first_not_of(" \t", line) == at) {
+				spot.indent = t.substr(line, at - line);
+			}
+			first = false;
+		}
+		size_t keyEnd = SkipString(t, at);
+		std::string name = t.substr(at + 1, keyEnd - at - 2);
+		at = SkipBlank(t, keyEnd);
+		if (at >= t.size() || t[at] != ':') {
+			return spot;
+		}
+		size_t begin = SkipBlank(t, at + 1), end = SkipValue(t, begin);
+		if (name == key && spot.valueBegin == std::string::npos) {
+			spot.valueBegin = begin;
+			spot.valueEnd = end;
+		}
+		spot.lastEnd = end;
+		at = SkipBlank(t, end);
+		if (at < t.size() && t[at] == ',') {
+			at++;
+		}
+	}
+}
+
+// Sets section.key to the JSON text value in the file text (adding the key / section as needed).
+bool SetSetting(std::string* text, const std::string& section, const std::string& key, const std::string& value)
+{
+	std::string& t = *text;
+	size_t root = SkipBlank(t, 0);
+	if (root >= t.size() || t[root] != '{') {
+		return false;
+	}
+	ObjectSpot top = FindMember(t, root, section);
+	if (top.close == std::string::npos && top.valueBegin == std::string::npos) {
+		return false;
+	}
+	if (top.valueBegin == std::string::npos) {
+		std::string add = "\"" + section + "\": {\n" + top.indent + top.indent + "\"" + key + "\": " + value + "\n" + top.indent + "}";
+		if (top.lastEnd == std::string::npos) {
+			t.insert(top.close, "\n" + top.indent + add + "\n");
+		}
+		else {
+			t.insert(top.lastEnd, ",\n" + top.indent + add);
+		}
+		return true;
+	}
+	if (t[top.valueBegin] != '{') {
+		t.replace(top.valueBegin, top.valueEnd - top.valueBegin, "{\"" + key + "\": " + value + "}");
+		return true;
+	}
+	ObjectSpot sec = FindMember(t, top.valueBegin, key);
+	if (sec.valueBegin != std::string::npos) {
+		t.replace(sec.valueBegin, sec.valueEnd - sec.valueBegin, value);
+	}
+	else if (sec.lastEnd != std::string::npos) {
+		t.insert(sec.lastEnd, ",\n" + (sec.indent == "\t" ? top.indent + top.indent : sec.indent) + "\"" + key + "\": " + value);
+	}
+	else if (sec.close != std::string::npos) {
+		t.insert(sec.close, "\"" + key + "\": " + value);
+	}
+	else {
+		return false;
+	}
+	return true;
 }
 
 std::wstring PathSetting(const Json& value, const std::wstring& fallback)
@@ -148,6 +314,7 @@ bool ConfigLoad()
 
 	std::vector<uint8_t> bytes;
 	bool loaded = false;
+	bool legacyLeaderboards = false;
 	if (ReadFileBytes(g_configPath, bytes)) {
 		std::string text(bytes.begin(), bytes.end());
 		Json root;
@@ -194,6 +361,21 @@ bool ConfigLoad()
 			config.leaderboardNameFormat = leaderboards["name_format"].GetString("LB_%u");
 			config.leaderboardsCreateIfMissing = leaderboards["create_if_missing"].GetBool(true);
 			LoadLeaderboards(leaderboards["map"], config);
+			// the json shipped up to test-2026-10-23 mapped every view to LB_<id> ranked by column 28 (a hidden
+			// column, not the Score) with create_if_missing off: self-update keeps that json, so set it aside here
+			auto legacy = [&config](uint32_t id) {
+				auto it = config.leaderboards.find(id);
+				return it != config.leaderboards.end() && it->second.name == FormatA("LB_%u", id) && it->second.ratingColumn == 28;
+			};
+			bool allLegacy = !config.leaderboards.empty();
+			for (const auto& item : config.leaderboards) {
+				allLegacy = allLegacy && legacy(item.first);
+			}
+			if (allLegacy) {
+				config.leaderboards.clear();
+				config.leaderboardsCreateIfMissing = true;
+				legacyLeaderboards = true;
+			}
 
 			for (const auto& item : root["stats"].Items()) {
 				config.stats[item.first] = item.second.GetString(std::string());
@@ -238,6 +420,8 @@ bool ConfigLoad()
 			config.mapsDir = PathSetting(root["mods"]["maps_dir"], config.mapsDir);
 			config.partsDir = PathSetting(root["mods"]["parts_dir"], config.partsDir);
 			config.partsAnyFaction = root["mods"]["parts_any_faction"].GetBool(false);
+			config.partsShare = root["mods"]["share_parts"].GetBool(true);
+			config.partsReceive = root["mods"]["receive_parts"].GetBool(true);
 			config.rulesUnlimitedAmmo = root["mods"]["rules"]["unlimited_ammo"].GetBool(false);
 			config.rulesUnlimitedGrenades = root["mods"]["rules"]["unlimited_grenades"].GetBool(false);
 			config.rulesSecondary = root["mods"]["rules"]["secondary"].GetString(std::string());
@@ -269,6 +453,9 @@ bool ConfigLoad()
 	}
 	if (loaded) {
 		XLS_LOG_INFO("config: loaded %ls.", g_configPath.c_str());
+	}
+	if (legacyLeaderboards) {
+		XLS_LOG_INFO("config: the old leaderboards map (LB_<view>) is ignored; boards use the game's view names and Score.");
 	}
 	else {
 		XLS_LOG_INFO("config: no xlive_steamworks.json found, defaults are in use.");
@@ -318,6 +505,13 @@ std::string LeaderboardName(uint32_t viewId)
 	if (mapping && !mapping->name.empty()) {
 		return mapping->name;
 	}
+	// default format: the SPA view's own name ("RANK_TRIAL_A_00_00") where it has one
+	if (g_config.leaderboardNameFormat == "LB_%u") {
+		const spa::StatView* view = spa::FindStatView(viewId);
+		if (view && !view->name.empty() && view->name.find(L' ') == std::wstring::npos) {
+			return WideToUtf8(view->name.c_str());
+		}
+	}
 	return FormatA(g_config.leaderboardNameFormat.c_str(), viewId);
 }
 
@@ -329,6 +523,37 @@ const std::string* StatNameFor(uint32_t viewId, uint16_t columnId)
 		return &it->second;
 	}
 	return nullptr;
+}
+
+void ConfigSetNetwork(bool share, bool receive, uint32_t sendRateKBytes, bool updateAuto)
+{
+	g_config.partsShare = share;
+	g_config.partsReceive = receive;
+	g_config.sendRateKBytes = sendRateKBytes;
+	g_config.updateAuto = updateAuto;
+	std::vector<uint8_t> bytes;
+	std::string text = "{\n}\n";
+	if (ReadFileBytes(g_configPath, bytes)) {
+		text.assign(bytes.begin(), bytes.end());
+	}
+	if (!SetSetting(&text, "mods", "share_parts", share ? "true" : "false") || !SetSetting(&text, "mods", "receive_parts", receive ? "true" : "false") ||
+	    !SetSetting(&text, "network", "send_rate_kbytes", std::to_string(sendRateKBytes)) ||
+	    !SetSetting(&text, "update", "auto", updateAuto ? "true" : "false")) {
+		XLS_LOG_WARN("config: couldn't place the network settings in %ls; not saved.", g_configPath.c_str());
+		return;
+	}
+	Json check;
+	std::string error;
+	if (!Json::Parse(text, check, &error)) {
+		XLS_LOG_WARN("config: the network settings edit broke %ls (%s); not saved.", g_configPath.c_str(), error.c_str());
+		return;
+	}
+	if (!WriteFileBytes(g_configPath, text.data(), text.size())) {
+		XLS_LOG_WARN("config: couldn't write %ls.", g_configPath.c_str());
+		return;
+	}
+	XLS_LOG_INFO("config: network settings saved (share parts %d, receive parts %d, send rate %u KB/s (0 = auto), auto update %d).", share, receive,
+	             sendRateKBytes, updateAuto);
 }
 
 }

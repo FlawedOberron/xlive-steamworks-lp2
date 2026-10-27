@@ -98,6 +98,9 @@ void PartsStartUnlocker();
 // Scans Parts\ (once; thread-safe): <name>.zip or folders, each holding lpc.json and the models
 // the Blender exporter wrote (body.rModel, head.rModel, back.rModel, legs.rModel).
 void PartsLoad();
+// Options > Network changed share / receive (Cfg().partsShare / partsReceive): republishes ours and
+// re-reads every member's parts.
+void PartsNetworkChanged();
 const std::vector<PartSet>& PartSets();
 
 }

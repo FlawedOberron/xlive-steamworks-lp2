@@ -40,7 +40,12 @@ struct QosReply {
 	uint32_t sentTick;
 	uint8_t flags;    // QosReplyFlags
 	uint8_t reserved[3];
-	// dataSize bytes follow.
+	// dataSize bytes follow, then optionally QosExtra + its bytes (older builds read only dataSize).
+};
+
+struct QosExtra {
+	uint32_t magic;   // kQosExtraMagic
+	uint16_t size;
 };
 #pragma pack(pop)
 
@@ -55,6 +60,8 @@ enum QosReplyFlags : uint8_t {
 };
 
 const int kControlChannel = 0x10000;           // Above every UDP port.
+const uint32_t kQosExtraMagic = 0x5832504C;    // 'LP2X'
+const size_t kMaxQosExtras = 64;
 const uint32_t kXnaddrMagic = 0x53544D57;      // 'STMW' in abOnline, after the Steam id.
 const size_t kMaxQueuedDatagrams = 512;
 const DWORD kQosProbeTimeoutMs = 3000;
@@ -136,6 +143,7 @@ struct QosTarget {
 	uint8_t probesReceived = 0;
 	std::vector<uint16_t> rtts;
 	std::vector<uint8_t> data;
+	std::string extra;   // the host's QosExtra text (map names), if it sent one
 	bool dataReceived = false;
 	bool disabled = false;
 	bool complete = false;
@@ -156,6 +164,11 @@ struct QosLookup {
 
 std::map<uint64_t, QosListener> g_qosListeners;
 std::vector<QosLookup*> g_qosLookups;
+// Text the host adds to its QoS answers (mods: its custom maps' names), and what lookups got back:
+// the title's data with the text that came with it, newest last.
+std::function<std::string()> g_qosExtraSource;
+std::mutex g_qosExtraMutex;
+std::vector<std::pair<std::vector<uint8_t>, std::string>> g_qosExtras;
 
 // --- Sockets -------------------------------------------------------------------------------------
 
@@ -387,6 +400,14 @@ void HandleQosProbe(CSteamID from, const QosProbe* probe)
 		reply.dataSize = (uint16_t)std::min<size_t>(state.data.size(), 0xFFFF);
 		packet.resize(sizeof(QosReply) + reply.dataSize);
 		memcpy(packet.data() + sizeof(QosReply), state.data.data(), reply.dataSize);
+		std::string extra = g_qosExtraSource ? g_qosExtraSource() : std::string();
+		if (!extra.empty() && extra.size() < 0x4000) {
+			QosExtra x = {kQosExtraMagic, (uint16_t)extra.size()};
+			size_t at = packet.size();
+			packet.resize(at + sizeof(x) + extra.size());
+			memcpy(packet.data() + at, &x, sizeof(x));
+			memcpy(packet.data() + at + sizeof(x), extra.data(), extra.size());
+		}
 		state.stats.dwNumDataRepliesSent++;
 		state.stats.dwNumDataReplyBytesSent += reply.dataSize;
 		state.stats.dwNumProbeRepliesSent++;
@@ -412,6 +433,14 @@ void HandleQosReply(CSteamID from, const QosReply* reply, size_t size)
 			else if (!target.dataReceived && reply->dataSize && size >= sizeof(QosReply) + reply->dataSize) {
 				target.data.assign((const uint8_t*)reply + sizeof(QosReply), (const uint8_t*)reply + sizeof(QosReply) + reply->dataSize);
 				target.dataReceived = true;
+				size_t at = sizeof(QosReply) + reply->dataSize;
+				QosExtra x;
+				if (size >= at + sizeof(x)) {
+					memcpy(&x, (const uint8_t*)reply + at, sizeof(x));
+					if (x.magic == kQosExtraMagic && size >= at + sizeof(x) + x.size) {
+						target.extra.assign((const char*)reply + at + sizeof(x), x.size);
+					}
+				}
 			}
 		}
 	}
@@ -447,6 +476,13 @@ void FinishQosTarget(QosLookup* lookup, size_t index)
 		info.cbData = (uint16_t)target.data.size();
 		info.pbData = new uint8_t[target.data.size()];
 		memcpy(info.pbData, target.data.data(), target.data.size());
+		if (!target.extra.empty()) {
+			std::lock_guard<std::mutex> lock(g_qosExtraMutex);
+			g_qosExtras.emplace_back(target.data, target.extra);
+			if (g_qosExtras.size() > kMaxQosExtras) {
+				g_qosExtras.erase(g_qosExtras.begin());
+			}
+		}
 	}
 	if (!target.rtts.empty()) {
 		std::vector<uint16_t> sorted = target.rtts;
@@ -799,6 +835,29 @@ bool ExceptReady(XlsSocket* socket)
 
 // --- Lifecycle -----------------------------------------------------------------------------------
 
+void NetApplySendRate()
+{
+	if (!SteamReady()) {
+		return;
+	}
+	if (Cfg().sendRateKBytes && SteamNetworkingUtils()) {
+		SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_SendRateMin, (int32)(Cfg().sendRateKBytes * 1024));
+		SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_SendRateMax, (int32)(Cfg().sendRateKBytes * 1024));
+		XLS_LOG_INFO("net: send rate %u KB/s per peer.", Cfg().sendRateKBytes);
+	}
+	else if (SteamNetworkingUtils()) {
+		// Steam's congestion control still decides the rate between these: it starts a connection at
+		// the minimum (Steam's default 256 KB/s) and ramps up slowly, so a map / part download
+		// (core/transfer.cpp, a few MB) used to finish before it got going. Start at 1 MB/s, allow 16,
+		// and give the send buffer room for transfer.cpp's window. "network": {"send_rate_kbytes"}
+		// sets a fixed rate instead (slow uploads).
+		SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_SendRateMin, 1024 * 1024);
+		SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_SendRateMax, 16 * 1024 * 1024);
+		SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_SendBufferSize, 4 * 1024 * 1024);
+		XLS_LOG_INFO("net: send rate auto (1-16 MB/s per peer).");
+	}
+}
+
 void NetInit()
 {
 	std::lock_guard<std::recursive_mutex> lock(g_mutex);
@@ -819,21 +878,7 @@ void NetInit()
 		if (g_p2pTransportSet) {
 			ApplyP2PTransport();
 		}
-		if (Cfg().sendRateKBytes && SteamNetworkingUtils()) {
-			SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_SendRateMin, (int32)(Cfg().sendRateKBytes * 1024));
-			SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_SendRateMax, (int32)(Cfg().sendRateKBytes * 1024));
-			XLS_LOG_INFO("net: send rate %u KB/s per peer.", Cfg().sendRateKBytes);
-		}
-		else if (SteamNetworkingUtils()) {
-			// Steam's congestion control still decides the rate between these: it starts a connection at
-			// the minimum (Steam's default 256 KB/s) and ramps up slowly, so a map / part download
-			// (core/transfer.cpp, a few MB) used to finish before it got going. Start at 1 MB/s, allow 16,
-			// and give the send buffer room for transfer.cpp's window. "network": {"send_rate_kbytes"}
-			// sets a fixed rate instead (slow uploads).
-			SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_SendRateMin, 1024 * 1024);
-			SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_SendRateMax, 16 * 1024 * 1024);
-			SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_SendBufferSize, 4 * 1024 * 1024);
-		}
+		NetApplySendRate();
 	}
 	else {
 		memset(&g_localXnaddr, 0, sizeof(g_localXnaddr));
@@ -1152,6 +1197,24 @@ bool NetKeyRegistered(const XNKID& xnkid)
 }
 
 // --- QoS -----------------------------------------------------------------------------------------
+
+void NetSetQosExtra(std::function<std::string()> source)
+{
+	g_qosExtraSource = std::move(source);
+}
+
+bool NetQosExtraFor(const uint8_t* data, size_t size, std::string* out)
+{
+	std::lock_guard<std::mutex> lock(g_qosExtraMutex);
+	for (auto it = g_qosExtras.rbegin(); it != g_qosExtras.rend(); ++it) {
+		size_t n = std::min(size, it->first.size());
+		if (n >= 16 && memcmp(data, it->first.data(), n) == 0) {
+			*out = it->second;
+			return true;
+		}
+	}
+	return false;
+}
 
 INT NetQosListen(const XNKID& xnkid, const uint8_t* data, UINT size, DWORD bitsPerSecond, DWORD flags)
 {

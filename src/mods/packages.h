@@ -19,6 +19,7 @@ struct MapPackage {
 	std::string hash;     // FNV-1a 64 of the zip (16 hex): the package's identity between players
 	std::wstring zip;     // the zip it was loaded from
 	bool remote = false;  // downloaded from another player (ModCache\maps\remote\), never bound by default
+	std::vector<std::string> preload; // extra autoArc archives ("uVs50", "uWp63") added to the base map's preload list
 };
 
 // Scans the package folders and unpacks what changed (once; thread-safe).
@@ -33,6 +34,8 @@ bool PackagesSlotBound(int slot);
 bool PackagesPick(int step, bool enter);
 // The name of the package bound to slot 13 / 14 (stays valid), or nullptr.
 const char* PackagesSlotName(int slot);
+// The name for slot in a "13=<name>\n14=<name>" value (another player's published map names), or "".
+std::string PackagesNameIn(const std::string& value, int slot);
 // The bound package's file for rel (lower game-relative path, "nativepc\..."), if it has one.
 bool PackagesMapFile(const std::wstring& rel, std::wstring* out);
 // A generated replacement for the shared game file rel (lower game-relative path), built from

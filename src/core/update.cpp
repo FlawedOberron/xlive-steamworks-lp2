@@ -124,6 +124,23 @@ void Check()
 	if (!self.empty()) {
 		DeleteFileW((self + L".old").c_str()); // the one an earlier update replaced
 	}
+	std::string ours = XLS_RELEASE_TAG;
+	if (!ours.empty()) {
+		// downloaded zips of this release or older ones: installed already, not needed again
+		std::wstring dir = Cfg().modCacheDir + L"update\\";
+		WIN32_FIND_DATAW found;
+		HANDLE find = FindFirstFileW((dir + L"*.zip").c_str(), &found);
+		if (find != INVALID_HANDLE_VALUE) {
+			do {
+				std::wstring name = found.cFileName;
+				std::string tag = WideToUtf8(name.substr(0, name.size() - 4).c_str(), -1);
+				if (!(found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && !Newer(tag, ours) && DeleteFileW((dir + name).c_str())) {
+					XLS_LOG_INFO("update: removed the old download %ls.", name.c_str());
+				}
+			} while (FindNextFileW(find, &found));
+			FindClose(find);
+		}
+	}
 	std::vector<uint8_t> body;
 	if (!HttpsGet(kHost, kLatest, &body)) {
 		XLS_LOG_INFO("update: couldn't ask GitHub for the latest release.");
@@ -136,7 +153,6 @@ void Check()
 		return;
 	}
 	std::string latest = root["tag_name"].GetString(std::string());
-	std::string ours = XLS_RELEASE_TAG;
 	if (ours.empty()) {
 		XLS_LOG_INFO("update: development build; the latest release is %s (not installed).", latest.c_str());
 		return;

@@ -46,15 +46,15 @@ const uint32_t kSiteRvas[] = {0xb8d96c /* DX11 */, 0xb7d9cc /* DX9 */};
 const uint32_t kOptionsPtrs[] = {0x1852238 /* DX11 */, 0x1842198 /* DX9 */};
 // The game's slot -> action bits table: 45 x {u64 bits, u64 default binding}. Context-free: the VS
 // code reads the same bits differently (slot 8 grenade 0x200 = VS secondary, slot 13 action 1 0x1 =
-// get out, slot 12 change weapon 0x8 = ascend, slot 18 T-ENG w2 0x40000, ...).
+// get out, slot 12 change weapon 0x8, slot 18 T-ENG w2 0x40000, slot 6 turn right 0x10000 = ascend, ...).
 const uint32_t kSlotBits[] = {0x1645040 /* DX11 */, 0x1634f08 /* DX9 */};
 const uint32_t kSetsOffset = 0x3b8 - 0x3b0; // from ecx (pad+0x3b0)
 const int kSetCount = 5;
 
 constexpr uint64_t W2(uint32_t bits) { return (uint64_t)bits << 32; }
 
-enum Context { kFoot, kVs, kFly, kScoped, kContextCount };
-const char* const kContextNames[kContextCount] = {"foot", "vs", "fly", "scoped"};
+enum Context { kFoot, kVs, kFly, kScoped, kBike, kContextCount };
+const char* const kContextNames[kContextCount] = {"foot", "vs", "fly", "scoped", "bike"};
 
 // An action as the pad shows it: any bit of test means the button is down; set is what the game
 // itself produces for it; clear is what a rule removes (bits shared with other actions are left
@@ -66,6 +66,7 @@ struct Action {
 	uint64_t set;
 	uint64_t clear;
 	int slot; // key config slot = prompt tag index (-1: none), for the on-screen prompts
+	uint64_t held = 0; // also set, but only in the held word (no press edge)
 };
 
 // From the 2026-10-16 pad rounds (lp2-tools/padmap.py, the user's bindings).
@@ -104,12 +105,36 @@ const Action kVsActions[] = {
 	{"jump", 0x2, 0x2 | 0x10 | 0x1000 | W2(0x40 | 0x80), 0x2, 19},
 };
 
-// Flying VSs: the VS actions plus these (ascend = the change weapon button, descend = the drop
-// weapon button as the game's controls page lists them; descend's bit is from one test, unconfirmed).
+// Flying VSs: the VS actions plus these. The game's own VS reminder (MsgOption per VS type, the PDA
+// VS tab) gives the flyers (GAF-14, GAN-36, GAN-37 / GAN-3AM in flight) Ascend on the Turn right
+// button and Descend on Turn left: slot 6 = 0x10000 and slot 5 = 0x20000 (the slot -> bits table).
+// w2 0x80000 as well (pad VS turns set it): without it the 0x78 transport doesn't climb and the turn
+// bit alone dashes; with its press edge it toggled night vision (2026-10-25 tests), so held only.
 const Action kFlyActions[] = {
-	{"ascend", 0x8, 0x8, 0x8, 12},
-	{"descend", W2(0x40000), W2(0x40000), W2(0x40000), 16},
+	{"ascend", 0x10000, 0x10000, 0x10000, 6, W2(0x80000)},
+	{"descend", 0x20000, 0x20000, 0x20000, 5, W2(0x80000)},
 };
+
+// Which VSs fly (the game's classes, DX9 decompile): the player controller cThinkPlVsCB and the
+// unit class uVsCB, with the types below them. The transport family flies all the time; the
+// uVsD1 / uVsCE family (0x2a, 0x7a, 0x9a, 0xaa) transforms and runs as a ground VS in form 0 and
+// as a flyer in forms 1 and 2 (form byte +0x272c, uVsCB vf755; cThinkPlVsCE asks it the same way).
+// Bikes ("bike"): the flying gear (the uWp1b family, kinds 0x1d / 0x1f / 0x21 / 0x23, model vsd1: LP1's
+// VS56 "ONLINE BIKE" on custom maps), a weapon the soldier wears rather than a VS: while it is worn the
+// soldier's body (unit+0x40, category 1) holds it at +0x1688 (2026-10-26 snapshots: on foot no weapon
+// there, riding the 0x1f gear, after getting off it is gone again). The game drives it with the on-foot
+// controls, climbing and diving on Turn right / left. The foot rules apply, plus ascend / descend (the
+// "fly" rules unless "bike" sets them) and boost (the VS boost bits), by default on the Dash key.
+// The armour gear (uWp1a, 0x1c / 0x1e / 0x20 / 0x22) sits in the same slot and stays on the foot rules.
+const int kGearSlot = 0x1688;
+const uint8_t kBikeKinds[] = {0x1d, 0x1f, 0x21, 0x23};
+const Action kBikeActions[] = {
+	{"boost", 0x2, 0x2 | 0x10 | 0x1000 | W2(0x40 | 0x80), 0x2, 19},
+};
+const int kDashSlot = 37; // the shortcuts page's Dash (V by default; the VS "dash" action's slot)
+const uint8_t kFlyingTypes[] = {0x28, 0x78, 0x98, 0xa8, 0xcb, 0xcc, 0xd9, 0xda, 0xdb, 0xdc, 0xfa};
+const uint8_t kTransformingTypes[] = {0x2a, 0x7a, 0x9a, 0xaa, 0xce, 0xd1};
+const uint32_t kFormOffset = 0x272c;
 
 // Scoped (on foot, zoomed in): the foot actions plus zoom steps (no pad bits: they step the zoom
 // level through zoom.cpp).
@@ -126,6 +151,7 @@ struct Rule {
 	const Action* dest;
 	const Action* source; // nullptr when the source is a key
 	int vk = 0;           // virtual-key code of a key source
+	int slot = -1;        // >= 0: the key is whatever the game binds to this key config slot (read live)
 	bool down = false;    // key state at the previous pad update
 	bool wasDown = false;
 };
@@ -150,6 +176,19 @@ bool MousePressed(int code)
 
 const Action* FindAction(Context context, const std::string& name)
 {
+	if (context == kBike) {
+		for (const Action& a : kBikeActions) {
+			if (_stricmp(a.name, name.c_str()) == 0) {
+				return &a;
+			}
+		}
+		for (const Action& a : kFlyActions) {
+			if (_stricmp(a.name, name.c_str()) == 0) {
+				return &a;
+			}
+		}
+		context = kFoot;
+	}
 	if (context == kFly) {
 		for (const Action& a : kFlyActions) {
 			if (_stricmp(a.name, name.c_str()) == 0) {
@@ -253,6 +292,25 @@ uint32_t BindingCode(int vk)
 	return (uint32_t)vk;
 }
 
+// The virtual key the player bound to a key config slot (0: none / unknown).
+int SlotKey(int slot)
+{
+	uint8_t* options = g_optionsPtr ? *(uint8_t**)(uintptr_t)g_optionsPtr : nullptr;
+	if (!options) {
+		return 0;
+	}
+	uint32_t code = *(uint32_t*)(options + 0x68 + slot * 4);
+	switch (code) {
+	case 0x80000003:
+		return VK_LBUTTON;
+	case 0x80000004:
+		return VK_RBUTTON;
+	case 0x80000005:
+		return VK_MBUTTON;
+	}
+	return code & 0x80000000 ? 0 : (int)(code & 0xff);
+}
+
 // A key source takes its key over in its context: whatever the player bound to that key in the
 // game's own config is dropped there (e.g. right click no longer zooms in a VS once it fires the
 // second weapon; wheel down no longer swaps to T-ENG while scoped). Uses the player's bindings and
@@ -286,7 +344,7 @@ bool ControlsLoadRules()
 			}
 		}
 		if (context < 0) {
-			LOG_WARN("unknown context \"%s\" (use foot, vs or fly).", remap.context.c_str());
+			LOG_WARN("unknown context \"%s\" (use foot, vs, fly, scoped or bike).", remap.context.c_str());
 			continue;
 		}
 		const Action* dest = FindAction((Context)context, remap.dest);
@@ -327,6 +385,28 @@ bool ControlsLoadRules()
 	};
 	inherit(kVs, kFly);
 	inherit(kFoot, kScoped);
+	for (const Rule& r : g_rules[kFly]) {   // bikes climb / dive like the flyers
+		bool mine = _stricmp(r.dest->name, "ascend") == 0 || _stricmp(r.dest->name, "descend") == 0;
+		for (const Rule& b : g_rules[kBike]) {
+			mine &= _stricmp(b.dest->name, r.dest->name) != 0;
+		}
+		if (mine) {
+			g_rules[kBike].push_back(r);
+		}
+	}
+	bool boost = false;
+	for (const Rule& b : g_rules[kBike]) {
+		boost |= _stricmp(b.dest->name, "boost") == 0;
+	}
+	if (!boost) {
+		Rule rule;
+		rule.dest = FindAction(kBike, "boost");
+		rule.source = nullptr;
+		rule.slot = kDashSlot;
+		g_rules[kBike].push_back(rule);
+		LOG_INFO("bike: boost <- the Dash key (key config slot %d).", kDashSlot);
+	}
+	inherit(kFoot, kBike);
 	return any;
 }
 
@@ -347,25 +427,46 @@ Context CurrentContext(uint8_t* pad)
 	uint8_t* ride = Alive(unit) ? *(uint8_t**)(unit + 0x40) : nullptr;
 	bool vs = Alive(ride) && ride != unit && ride[0x1f] == 2;
 	bool fly = false;
+	int form = -1;
+	bool bike = false;
+	if (!vs && Alive(ride) && ride[0x1f] == 1) {
+		const uint8_t* gear = *(const uint8_t**)(ride + kGearSlot);
+		if (gear && (*(const uint32_t*)(gear + 0x1c) & 0xff00ffff) == 0x04000000) {
+			for (uint8_t k : kBikeKinds) {
+				bike |= k == gear[0x1e];
+			}
+		}
+	}
 	if (vs) {
 		int type = ride[0x1e];
+		for (uint8_t t : kFlyingTypes) {
+			fly |= t == type;
+		}
+		for (uint8_t t : kTransformingTypes) {
+			if (t == type) {
+				form = ride[kFormOffset];
+				fly |= form == 1 || form == 2;
+			}
+		}
 		for (int t : g_settings.flyTypes) {
 			fly |= t == type;
 		}
 	}
-	Context context = fly ? kFly : vs ? kVs : kFoot;
+	Context context = bike ? kBike : fly ? kFly : vs ? kVs : kFoot;
 	if (context == kFoot && Alive(ride) && ZoomLevelOf(ride) > 0) {
 		context = kScoped;
 	}
 	if (g_settings.log) {
 		static uint8_t* lastUnit = nullptr;
 		static uint8_t* lastRide = nullptr;
-		if (unit != lastUnit || ride != lastRide) {
+		static int lastForm = -1;
+		if (unit != lastUnit || ride != lastRide || form != lastForm) {
 			lastUnit = unit;
 			lastRide = ride;
-			LOG_INFO("pad %p unit %p (id %08x) ride %p (id %08x) -> %s.", pad, unit,
+			lastForm = form;
+			LOG_INFO("pad %p unit %p (id %08x) ride %p (id %08x, form %d) -> %s.", pad, unit,
 			             Alive(unit) ? *(uint32_t*)(unit + 0x1c) : 0, ride, Alive(ride) ? *(uint32_t*)(ride + 0x1c) : 0,
-			             kContextNames[context]);
+			             form, kContextNames[context]);
 		}
 	}
 	return context;
@@ -399,7 +500,7 @@ void ApplyRules(uint64_t* sets, const std::vector<Rule>& rules, uint64_t extraCl
 				on = byKind[k];
 			}
 			if (on) {
-				out |= r.dest->set;
+				out |= r.dest->set | (k == 0 ? r.dest->held : 0);
 			}
 		}
 		sets[k] = out;
@@ -430,6 +531,7 @@ using RefreshFn = void(__attribute__((thiscall)) *)(uint8_t*);
 RefreshFn g_refresh = nullptr; // trampoline to the game's refresh
 uint8_t* volatile g_messageSystem = nullptr;
 int g_promptContext = kFoot;
+int g_lastContext = kFoot; // the context of the last pad update (the pause menu's VS reminder)
 
 int IconOfKey(int vk)
 {
@@ -500,6 +602,13 @@ void __attribute__((thiscall)) PadUpdate(uint8_t* self)
 	bool front = GameInFront();
 	for (std::vector<Rule>& list : g_rules) {
 		for (Rule& r : list) {
+			if (r.slot >= 0) {
+				r.vk = SlotKey(r.slot);
+				if (!r.vk) {
+					r.down = false;
+					continue;
+				}
+			}
 			if (r.vk) {
 				r.wasDown = r.down;
 				r.down = front && (r.vk >= 0x100 ? MousePressed(r.vk - 0x100) : (GetAsyncKeyState(r.vk) & 0x8000) != 0);
@@ -507,6 +616,7 @@ void __attribute__((thiscall)) PadUpdate(uint8_t* self)
 		}
 	}
 	Context context = CurrentContext(pad);
+	g_lastContext = context;
 	PromptContext(context);
 	const std::vector<Rule>& rules = g_rules[context];
 	uint64_t* sets = (uint64_t*)(self + kSetsOffset);
@@ -689,6 +799,16 @@ void ControlsSetKey(const char* context, const char* dest, int vk)
 	if (g_messageSystem && g_refresh) {
 		PromptRefresh(g_messageSystem);
 	}
+}
+
+bool ControlsInFlyer()
+{
+	return g_lastContext == kFly;
+}
+
+bool ControlsInVs()
+{
+	return g_lastContext == kVs || g_lastContext == kFly;
 }
 
 bool ControlsMousePressed(int code)

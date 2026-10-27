@@ -7,8 +7,11 @@
 	//   quick_turn, zoom, melee, gesture, teng, dodge
 	// VS actions: fire, secondary, zoom, get_out (= the grenade button in a VS), brake, reload,
 	//   quick_turn, dash, boost
-	// Flying VS ("fly", inherits "vs" unless set here): the VS actions plus ascend (= change
-	//   weapon button) and descend (= drop weapon button). Which VS types fly: "fly_types".
+	// Flying VS ("fly", inherits "vs" unless set here): the VS actions plus ascend (= Turn
+	//   right button) and descend (= Turn left button). The game's flyers are built in
+	//   (transforming VSs count while in flight form); "fly_types": [..] adds more VS types.
+	//   A key a rule takes stops doing its game action in that context: when descend takes the
+	//   key the game dashes with, give "dash" a key of its own.
 	// A source is either another action (borrow its button; works for pads too) or a key:
 	//   "key:F", "key:5", "key:F13", "key:NUM5", "key:MOUSE_X1" (side button), "key:MOUSE_R",
 	//   "key:SPACE", "key:LSHIFT", "key:0x52" (any virtual-key code). Keyboard and mouse only.

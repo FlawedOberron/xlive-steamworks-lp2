@@ -12,6 +12,7 @@
 #include "core/steam.h"
 #include "core/content.h"
 #include "core/transfer.h"
+#include "core/net.h"
 
 #include <windows.h>
 
@@ -23,7 +24,8 @@
 #include <unordered_map>
 
 // Map packages: Maps\<name>.zip with
-//   map.json   {"name": "Test Arena", "size": "medium", "base": 0, "number": 0}
+//   map.json   {"name": "Test Arena", "size": "medium", "base": 0, "number": 0, "preload": ["uVs50"]}
+//              preload: archives in arcLp2Xml\autoArc the map needs beyond its base map's (VS, weapons it places)
 //   nativePC\...  the map's files, named and built for online map <number>
 //   thumbnail.rTexture  optional: the create-match picture (512x512 DXT5, circle in the alpha like the
 //                  stock ones), put over ID221_SC<slot>_ID in a generated aBattlePlayerCreate.arc
@@ -62,6 +64,8 @@ int g_default[2] = {-1, -1};    // what each slot holds outside other players' l
 std::atomic<bool> g_bound[2];
 std::atomic<int> g_picked{-1};  // picked in create match, bound by the sync thread (unpacking takes a while)
 std::map<uint64_t, std::string> g_memberMaps; // member -> their "maps" member data
+std::map<uint64_t, std::string> g_memberNames; // member -> their "mapnames" member data
+std::atomic<uint64_t> g_lobbyHost{0};          // another player's lobby we're in (0: none / our own)
 std::set<std::string> g_downloading;          // hashes being fetched
 bool g_unbound = false;                        // the host's maps aren't all bound here yet
 std::map<std::string, DWORD> g_failed;         // hash -> when its download failed (retried after 30 s)
@@ -235,6 +239,17 @@ bool ReadManifest(const Zip& zip, const std::wstring& label, MapPackage* map)
 	}
 	map->base = (int)root["base"].GetInt(0);
 	map->number = (int)root["number"].GetInt(map->base);
+	map->preload.clear();
+	for (const Json& e : root["preload"].Elements()) {
+		std::string arc = e.GetString(std::string());
+		bool ok = arc.size() >= 3 && arc.size() <= 32 && arc.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_") == std::string::npos;
+		if (ok) {
+			map->preload.push_back(arc);
+		}
+		else {
+			XLS_LOG_WARN("mods: map %ls: preload entry \"%s\" skipped (an archive name in arcLp2Xml\\autoArc).", label.c_str(), arc.c_str());
+		}
+	}
 	std::string size = root["size"].GetString(std::string());
 	map->size = size == "small" ? 0 : size == "medium" ? 1 : size == "large" ? 2 : -1;
 	if (map->number < 0 || map->number > 99 || map->base < 0 || map->base > 15) {
@@ -283,7 +298,7 @@ bool Bind(int k, int i, const char* why)
 	g_bound[k] = i >= 0;
 	g_generation++;
 	if (i >= 0) {
-		MapsRebind(kSlots[k], g_all[i].base, g_all[i].size);
+		MapsRebind(kSlots[k], g_all[i].base, g_all[i].size, g_all[i].preload);
 		XLS_LOG_INFO("mods: map \"%s\" (%ls, %s) in online slot %d (%s).", g_all[i].name.c_str(), g_all[i].package.c_str(), g_all[i].hash.c_str(), kSlots[k], why);
 	}
 	else {
@@ -366,9 +381,26 @@ std::string MapsValue()
 	return v;
 }
 
+// "13=<name>\n14=<name>": the bound maps' names, for players who don't have them (member data
+// "mapnames" in lobbies, our QoS answers for the session browser).
+std::string NamesValue()
+{
+	std::lock_guard<std::recursive_mutex> lock(g_mutex);
+	std::string v;
+	for (int k = 0; k < 2; k++) {
+		if (g_bind[k].package >= 0) {
+			std::string name = g_all[g_bind[k].package].name;
+			std::replace(name.begin(), name.end(), '\n', ' ');
+			v += FormatA("%s%d=%s", v.empty() ? "" : "\n", kSlots[k], name.substr(0, 100).c_str());
+		}
+	}
+	return v;
+}
+
 void PublishMaps()
 {
 	xls::MemberDataSet("maps", MapsValue());
+	xls::MemberDataSet("mapnames", NamesValue());
 }
 
 struct Download {
@@ -416,6 +448,7 @@ void Reconcile()
 		host = LobbyOwner(SteamMatchmaking(), lobby).ConvertToUint64();
 	}
 	bool inGame = SessionPresenceInGame(); // before our lock: the session code calls our listener under its own
+	g_lobbyHost = host == SteamLocalId().ConvertToUint64() ? 0 : host;
 	if (inGame) {
 		return; // never swap files under a running match
 	}
@@ -588,6 +621,11 @@ void Load()
 		std::lock_guard<std::recursive_mutex> lock(g_mutex);
 		g_memberMaps[steamId] = value;
 	});
+	xls::MemberDataListen("mapnames", [](uint64_t steamId, XUID, const std::string& value) {
+		std::lock_guard<std::recursive_mutex> lock(g_mutex);
+		g_memberNames[steamId] = value;
+	});
+	xls::NetSetQosExtra([] { return NamesValue(); });
 	PublishMaps();
 	HANDLE t = CreateThread(nullptr, 0, SyncThread, nullptr, 0, nullptr);
 	if (t) {
@@ -606,6 +644,10 @@ bool GenerateNames(const std::wstring& source, const std::wstring& out)
 	}
 	bool changed = false;
 	for (ArcEntry& e : entries) {
+		if (_stricmp(e.name.c_str(), "message\\msgPC\\MsgOption") == 0) {
+			changed |= NetMenuPatchMessages(&e.data); // the Options Network entry's texts
+			continue;
+		}
 		if (_stricmp(e.name.c_str(), "message\\msgPC\\MsgOnline") != 0) {
 			continue;
 		}
@@ -616,8 +658,9 @@ bool GenerateNames(const std::wstring& source, const std::wstring& out)
 	return changed && WriteWholeFile(out, ArcWrite(entries));
 }
 
-// The menus with our rows added to their Flash: create match (flash\playermatch\id221, rule rows)
-// and training (flash\training\id300, AI Enemy Battle rows), in whichever archive carries them.
+// The menus with our rows added to their Flash: create match (flash\playermatch\id221, rule rows),
+// training (flash\training\id300, AI Enemy Battle rows) and Options (flash\option\id500_PC, the
+// Network entry), in whichever archive carries them.
 bool GenerateMenus(const std::wstring& source, const std::wstring& out)
 {
 	Bytes file;
@@ -636,6 +679,8 @@ bool GenerateMenus(const std::wstring& source, const std::wstring& out)
 			changed |= RulesPatchMenuFlash(&e.data);
 		} else if (_stricmp(name, "id300") == 0) {
 			changed |= RulesPatchTrainingFlash(&e.data);
+		} else if (_stricmp(name, "id500_PC") == 0) {
+			changed |= NetMenuPatchFlash(&e.data);
 		}
 	}
 	return changed && WriteWholeFile(out, ArcWrite(entries));
@@ -717,10 +762,36 @@ bool PackagesPick(int step, bool enter)
 	return true;
 }
 
+std::string PackagesNameIn(const std::string& value, int slot)
+{
+	std::string key = FormatA("%d=", slot);
+	for (size_t at = 0; at < value.size();) {
+		size_t end = value.find('\n', at);
+		std::string entry = value.substr(at, end == std::string::npos ? std::string::npos : end - at);
+		if (entry.compare(0, key.size(), key) == 0) {
+			return entry.substr(key.size());
+		}
+		at = end == std::string::npos ? value.size() : end + 1;
+	}
+	return std::string();
+}
+
 const char* PackagesSlotName(int slot)
 {
 	static char names[2][128];
+	static char hostNames[2][128];
 	std::lock_guard<std::recursive_mutex> lock(g_mutex);
+	// in another player's lobby: the host's map, by the name it published (we may not have it yet)
+	uint64_t host = g_lobbyHost;
+	auto it = host ? g_memberNames.find(host) : g_memberNames.end();
+	if (it != g_memberNames.end()) {
+		std::string name = PackagesNameIn(it->second, slot);
+		if (!name.empty()) {
+			char* out = hostNames[slot == kSlots[0] ? 0 : 1];
+			snprintf(out, 128, "%s", name.c_str());
+			return out;
+		}
+	}
 	for (int k = 0; k < 2; k++) {
 		int i = k == 0 && g_picked >= 0 ? (int)g_picked : g_bind[k].package;
 		if (kSlots[k] == slot && i >= 0) {
@@ -758,11 +829,12 @@ bool PackagesMapFile(const std::wstring& rel, std::wstring* out)
 const std::wstring* PackagesGenerated(const std::wstring& rel, const std::wstring& source)
 {
 	PackagesLoad();
-	// nativepc\arclp2xml\id_fcore_<lang>_pc.arc (names), the create-match Flash's archives (rule rows)
+	// nativepc\arclp2xml\id_fcore_<lang>_pc.arc (names, the Network entry texts), the create-match Flash's archives (rule rows)
 	static const std::wstring prefix = L"nativepc\\arclp2xml\\id_fcore_";
-	// the menu Flashes (id221 create match, id300 training) are also in the title archives, which load first
+	// the menu Flashes (id221 create match, id300 training, id500_PC options) are also in the title archives, which load first
 	static const std::wstring creates[] = {L"nativepc\\arcxmltmppc\\abattleplayercreate.arc", L"nativepc\\arcxmltmppc\\atrainingtop.arc",
-	                                       L"nativepc\\arclp2xml\\id_title.arc", L"nativepc\\arclp2xml\\id_title_multi.arc"};
+	                                       L"nativepc\\arclp2xml\\id_title.arc", L"nativepc\\arclp2xml\\id_title_multi.arc",
+	                                       L"nativepc\\arclp2xml\\id_title_pc.arc", L"nativepc\\arcxmltmppc\\aoption.arc"};
 	bool names = rel.compare(0, prefix.size(), prefix) == 0 && rel.size() >= 7 && rel.compare(rel.size() - 7, 7, L"_pc.arc") == 0;
 	if (!names && std::find(std::begin(creates), std::end(creates), rel) == std::end(creates)) {
 		return nullptr;

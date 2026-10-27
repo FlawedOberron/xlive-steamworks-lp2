@@ -115,6 +115,8 @@ struct Config {
 	std::wstring modDir;                // <exe dir>\Mods\ unless "mods": {"dir": ...}: overlay mods (folders or .zip).
 	std::wstring mapsDir;               // <exe dir>\Maps\ ("mods": {"maps_dir": ...}): map packages (.zip).
 	bool partsAnyFaction = false;       // "mods": {"parts_any_faction": true}: every part (stock and custom) for every faction.
+	bool partsShare = true;             // "mods": {"share_parts": false}: others get none of our custom parts (they see stock ones).
+	bool partsReceive = true;           // "mods": {"receive_parts": false}: no downloads of others' parts, they show stock ones.
 	bool rulesUnlimitedAmmo = false;    // "mods": {"rules": {"unlimited_ammo": true}}: our matches' extra rules (until the
 	bool rulesUnlimitedGrenades = false; // create-match rows exist); hosts' rules apply in their lobbies.
 	std::string rulesSecondary;         // "mods": {"rules": {"secondary": "sidearm"}}: spawn with it as the second weapon.
@@ -130,6 +132,10 @@ bool ConfigLoad();
 void ConfigEnsureLoaded();
 const Config& Cfg();
 const std::wstring& ConfigPath();
+// The Options menu's Network page (mods/netmenu.cpp): sets these in the running configuration and
+// writes them to xlive_steamworks.json ("mods": share_parts / receive_parts, "network":
+// send_rate_kbytes), keeping the file's other text and comments.
+void ConfigSetNetwork(bool share, bool receive, uint32_t sendRateKBytes, bool updateAuto);
 
 // Run-time overrides from the extension API, consulted before the file.
 bool ExtAchievementName(uint32_t achievementId, std::string* out);
