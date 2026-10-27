@@ -18,6 +18,9 @@
 #define XLS_RELEASE_TAG ""
 #endif
 
+// the tag as one string in the binary (the compiler builds `ours` below from immediates), for release/make.sh to check
+__attribute__((used)) static const char kReleaseTagMarker[] = "xls-release-tag:" XLS_RELEASE_TAG;
+
 namespace xls {
 namespace {
 

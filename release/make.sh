@@ -31,7 +31,7 @@ echo "$TAGS" | grep -qx "$TAG" && { echo "out of tags for $DATE"; exit 1; }
 
 cmake -S "$REPO" -B "$BUILD" -DXLS_RELEASE_TAG="$TAG" >/dev/null
 cmake --build "$BUILD" -j16
-grep -aq "$TAG" "$REPO/bin/xlive.dll" || { echo "xlive.dll doesn't carry $TAG"; exit 1; }
+grep -aq "xls-release-tag:$TAG" "$REPO/bin/xlive.dll" || { echo "xlive.dll doesn't carry $TAG"; exit 1; }
 
 OUT=$REPO/dist
 STAGE=$OUT/stage
