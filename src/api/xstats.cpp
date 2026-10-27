@@ -85,6 +85,8 @@ std::shared_ptr<LeaderboardLookup> Leaderboard(uint32_t viewId)
 
 // --- Column layout -------------------------------------------------------------------------------
 
+const uint16_t kRatingAttribute = 0xFFFE;
+
 struct ColumnLayout {
 	uint16_t columnId;
 	uint8_t type;
@@ -122,6 +124,14 @@ std::vector<ColumnLayout> LayoutFor(uint32_t viewId, const std::vector<uint16_t>
 		return layout;
 	}
 	int32_t ratingColumn = mapping ? mapping->ratingColumn : -1;
+	if (ratingColumn < 0 && view) {
+		// the column the SPA ranks the view by (attribute X_ATTRIBUTE_RATING, the XLAST "Score" field)
+		for (const xls::spa::StatColumn& column : view->columns) {
+			if (column.attributeId == kRatingAttribute && !column.isSystem) {
+				ratingColumn = column.columnId;
+			}
+		}
+	}
 	if (ratingColumn < 0) {
 		ratingColumn = columns.front().first;
 	}
@@ -568,6 +578,9 @@ public:
 
 DWORD CreateStatsEnumerator(std::shared_ptr<ReadRequest> request, DWORD rows, DWORD* bufferSize, HANDLE* handle)
 {
+	for (const ReadView& view : request->views) {
+		XLS_LOG_INFO("stats: list view %u (%s), %u rows.", view.spec.dwViewId, xls::LeaderboardName(view.spec.dwViewId).c_str(), rows);
+	}
 	auto enumerator = std::make_unique<StatsEnumerator>();
 	*bufferSize = request->RequiredSize(rows);
 	enumerator->requiredBufferSize = *bufferSize;
@@ -582,6 +595,7 @@ DWORD CreateStatsEnumerator(std::shared_ptr<ReadRequest> request, DWORD rows, DW
 DWORD WINAPI XSessionWriteStats(HANDLE hSession, XUID xuid, DWORD dwNumViews, const XSESSION_VIEW_PROPERTIES* pViews, XOVERLAPPED* pOverlapped)
 {
 	XLS_TRACE_FN();
+	XLS_LOG_INFO("stats: XSessionWriteStats session %p user 0x%016llx, %u views.", hSession, xuid, dwNumViews);
 	if (!dwNumViews || dwNumViews > X_STATS_MAX_VIEWS || !pViews) {
 		return ERROR_INVALID_PARAMETER;
 	}
@@ -590,7 +604,7 @@ DWORD WINAPI XSessionWriteStats(HANDLE hSession, XUID xuid, DWORD dwNumViews, co
 	}
 	if (xuid != xls::UserXuid(0)) {
 		// Only the local Steam user can write to Steam so a host writing for its guests is ignored.
-		XLS_LOG_DEBUG("XSessionWriteStats: skipping stats for remote user 0x%016llx.", xuid);
+		XLS_LOG_INFO("XSessionWriteStats: skipping stats for remote user 0x%016llx.", xuid);
 		return xls::OverlappedReturn(pOverlapped, ERROR_SUCCESS);
 	}
 	if (!xls::SteamReady()) {
@@ -603,9 +617,12 @@ DWORD WINAPI XSessionWriteStats(HANDLE hSession, XUID xuid, DWORD dwNumViews, co
 			continue;
 		}
 		std::vector<uint16_t> requested;
+		std::string values;
 		for (DWORD p = 0; p < view.dwNumProperties; p++) {
 			requested.push_back((uint16_t)(view.pProperties[p].dwPropertyId & X_PROPERTY_ID_MASK));
+			values += xls::FormatA(" %u=%lld", requested.back(), (long long)ScoreOf(view.pProperties[p].value));
 		}
+		XLS_LOG_INFO("stats: write view %u (%s):%s", view.dwViewId, xls::LeaderboardName(view.dwViewId).c_str(), values.c_str());
 		std::vector<ColumnLayout> layout = LayoutFor(view.dwViewId, requested);
 		auto find = [&](uint16_t columnId) -> const XUSER_PROPERTY* {
 			for (DWORD p = 0; p < view.dwNumProperties; p++) {

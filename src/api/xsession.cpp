@@ -888,6 +888,7 @@ void OnLobbyKicked(const LobbyKicked_t& kicked)
 DWORD WINAPI XSessionCreate(DWORD dwFlags, DWORD dwUserIndex, DWORD dwMaxPublicSlots, DWORD dwMaxPrivateSlots, uint64_t* pqwSessionNonce, XSESSION_INFO* pSessionInfo, XOVERLAPPED* pOverlapped, HANDLE* phSession)
 {
 	XLS_TRACE_FN();
+	XLS_LOG_INFO("XSessionCreate: flags 0x%x, %u public + %u private slots.", dwFlags, dwMaxPublicSlots, dwMaxPrivateSlots);
 	if (!xls::UserIndexValid(dwUserIndex)) {
 		return ERROR_NO_SUCH_USER;
 	}
@@ -948,6 +949,16 @@ DWORD WINAPI XSessionCreate(DWORD dwFlags, DWORD dwUserIndex, DWORD dwMaxPublicS
 			xls::OverlappedComplete(overlapped, ERROR_SUCCESS);
 			return true;
 		});
+	}
+
+	const DWORD kNetworkedFlags = XSESSION_CREATE_USES_PRESENCE | XSESSION_CREATE_USES_MATCHMAKING | XSESSION_CREATE_USES_ARBITRATION | XSESSION_CREATE_USES_PEER_NETWORK;
+	if (!(dwFlags & kNetworkedFlags)) {
+		// a local stats-only session (Basic Training writes its leaderboard score through one): nothing to join
+		session->nonce = ((uint64_t)GetTickCount64() << 24) ^ xls::SteamLocalId().ConvertToUint64();
+		session->info = *pSessionInfo;
+		*pqwSessionNonce = session->nonce;
+		XLS_LOG_INFO("session: local session (flags 0x%x), no lobby.", dwFlags);
+		return xls::OverlappedReturn(pOverlapped, ERROR_SUCCESS);
 	}
 
 	CSteamID lobby = LobbyFromKid(pSessionInfo->sessionID);
@@ -1089,6 +1100,7 @@ DWORD WINAPI XSessionStart(HANDLE hSession, DWORD dwFlags, XOVERLAPPED* pOverlap
 DWORD WINAPI XSessionEnd(HANDLE hSession, XOVERLAPPED* pOverlapped)
 {
 	XLS_TRACE_FN();
+	XLS_LOG_INFO("XSessionEnd: session %p.", hSession);
 	std::lock_guard<std::recursive_mutex> lock(g_mutex);
 	std::shared_ptr<Session> session = Find(hSession);
 	if (!session) {
@@ -1127,6 +1139,7 @@ DWORD WINAPI XSessionModify(HANDLE hSession, DWORD dwFlags, DWORD dwMaxPublicSlo
 DWORD WINAPI XSessionDelete(HANDLE hSession, XOVERLAPPED* pOverlapped)
 {
 	XLS_TRACE_FN();
+	XLS_LOG_INFO("XSessionDelete: session %p.", hSession);
 	std::lock_guard<std::recursive_mutex> lock(g_mutex);
 	std::shared_ptr<Session> session = Find(hSession);
 	if (!session) {
