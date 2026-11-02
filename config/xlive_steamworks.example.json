@@ -56,7 +56,9 @@
 	"sessions": {
 		"lobby_key_prefix": "xl_",
 		"lobby_distance_filter": 1,   // 0 close, 1 default, 2 far, 3 worldwide
-		"accept_any_peer": true       // accept SteamNetworkingMessages sessions from any user
+		"accept_any_peer": true,      // accept SteamNetworkingMessages sessions from any user
+		// game versions that may play together (Steam exes are 1.000, disc exes 1.100); [] = only the same version
+		"compatible_versions": ["1.000", "1.100"]
 	},
 
 	"presence": {

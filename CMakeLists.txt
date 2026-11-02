@@ -172,6 +172,15 @@ add_custom_command(TARGET xlive POST_BUILD
 )
 endif()
 
+# The network relay (relay/main.cpp): lobbies and peers as another Steam app (config steam.network_app_id).
+add_executable(xlive_relay WIN32 relay/main.cpp)
+target_include_directories(xlive_relay PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_link_libraries(xlive_relay PRIVATE steam_api)
+set_target_properties(xlive_relay PROPERTIES RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:xlive>")
+if(NOT MSVC)
+    target_link_options(xlive_relay PRIVATE -static -static-libgcc -static-libstdc++ -s)
+endif()
+
 # Vendored code keeps its own style, its narrowing warnings are not ours to fix.
 if(MSVC)
     set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/third-party/puff.c" PROPERTIES COMPILE_OPTIONS "/wd4244")

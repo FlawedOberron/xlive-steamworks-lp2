@@ -49,7 +49,7 @@ uint32_t* g_remapTable = nullptr;         // {map, size} x 16
 const uint8_t kAvailBytes[] = {0x8b, 0xd1, 0x0f, 0xb6, 0x4c, 0x24, 0x04, 0x8d, 0x41, 0xfe, 0x83, 0xf8, 0x0d, 0x77};
 const uint8_t kAvailField[] = {0x85, 0x82, 0x20, 0x0d, 0x05, 0x00};
 const size_t kAvailFieldAt = 0x30;
-const uint32_t kAvailRvas[] = {0x40e470, 0x3ff680}; // LP2DX11.exe, LP2DX9.exe
+const uint32_t kAvailRvas[kBuildCount] = {0x40e470, 0x3ff680, 0x40e670, 0x3ff720}; // LP2DX11.exe, LP2DX9.exe, 1.1 ones
 
 // Per-map preload list {const char** arcs, u8 areaType, u8 id}, null terminated (DX11 0x1730fe0).
 // Its two readers load the address as
@@ -73,7 +73,7 @@ std::vector<std::vector<ArcEntry>*> g_builtLists;
 std::vector<std::string*> g_builtNames;
 DepEntry* g_preloadCopy = nullptr;        // the moved preload list (mod entries at the end)
 std::vector<DepEntry> g_preloadOriginal;  // the game's entries
-const uint32_t kDepRvas[2][2] = {{0x3d12d2, 0x3d1329}, {0x3c2462, 0x3c24b9}}; // DX11, DX9
+const uint32_t kDepRvas[kBuildCount][2] = {{0x3d12d2, 0x3d1329}, {0x3c2462, 0x3c24b9}, {0x3d13b2, 0x3d1409}, {0x3c2592, 0x3c25e9}}; // DX11, DX9, 1.1 ones
 const uint8_t kAreaOnline = 7;
 
 bool __attribute__((thiscall)) MapAvailable(uint8_t* game, uint32_t mapArg, uint32_t flagArg)
@@ -368,17 +368,23 @@ void MapsRebind(int slot, int base, int size, const std::vector<std::string>& pr
 }
 
 // The create-match rule stepper (DX11 FUN_00e8c910, thiscall(screen, key, u8* value, max, min,
-// rule, wrap) -> changed; key 10 right / 11 left, rule 0x1b = map): on slot 13 left / right step
-// through the map packages first, so any number of them can be picked. Unbound 13 / 14 are
-// skipped. The map name (MsgOnline 126 + slot) comes from the message lookup (DX11 FUN_0077b280,
+// rule, wrap) -> changed; key 10 right / 11 left, rule 0x1b = map): for the map we step ourselves in
+// kMapOrder (the map packages after Frozen Wasteland, before the Random choices), with the
+// stepper's own availability rule (MapAvailable; its "VS mode" flag is the current rule page's
+// bytes +0x16 == 1 and +0x17 == 3, the page at screen+0x3d0 + [screen+0x418] * 4). On slot 13
+// left / right step through the map packages first, so any number of them can be picked; slot 14
+// only while bound (a host's map being downloaded). The map name (MsgOnline 126 + slot) comes from the message lookup (DX11 FUN_0077b280,
 // thiscall(messages, file, id, lang) -> text), which answers with the bound package's name.
 struct PickerVas {
-	uint32_t step, message, sound, soundOwner, soundIds;
+	uint32_t step, message, sound, soundOwner, soundIds, game;
 };
-const PickerVas kPickerVas[] = {
-	{0xe8c910, 0x77b280, 0x832f00, 0x185289c, 0x18e0860}, // DX11
-	{0xe7c880, 0x76c0c0, 0x824110, 0x18427fc, 0x18ce774}, // DX9
+const PickerVas kPickerVas[kBuildCount] = {
+	{0xe8c910, 0x77b280, 0x832f00, 0x185289c, 0x18e0860, 0x18520c0}, // DX11
+	{0xe7c880, 0x76c0c0, 0x824110, 0x18427fc, 0x18ce774, 0x1842020}, // DX9
+	{0xe8cdb0, 0x77b3f0, 0x833130, 0x185389c, 0x18e1860, 0x18530c0}, // DX11 1.1
+	{0xe7cdf0, 0x76c130, 0x8241c0, 0x18427fc, 0x18ce774, 0x1842020}, // DX9 1.1
 };
+const uint8_t kMapOrder[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 15, 13, 14, 16, 17, 18, 19};
 const uint8_t kStepPrologue[] = {0x83, 0xec, 0x08, 0x8b, 0x44, 0x24, 0x10, 0x53}; // sub esp,8; mov eax,[esp+0x10]; push ebx
 const uint8_t kMessagePrologue[] = {0x8b, 0x44, 0x24, 0x04, 0x56, 0x50, 0x8b, 0xf1}; // mov eax,[esp+4]; push esi; push eax; mov esi,ecx
 const int kRuleMap = 0x1b;
@@ -412,24 +418,43 @@ int __attribute__((thiscall)) RuleStep(void* screen, int key, uint8_t* value, in
 	}
 	int step = key == 10 ? 1 : -1;
 	uint8_t was = *value;
+	*((uint8_t*)screen + 0x3ce) = 1; // as the stepper does first thing
 	if (was == 13 && PackagesPick(step, false)) {
 		StepSound(screen);
 		return 1;
 	}
-	int changed = g_stepOriginal(screen, key, value, max, min, rule, wrap);
-	for (int i = 0; i < 2 && changed && (*value == 13 || *value == 14); i++) {
-		if (*value == 13 && PackagesPick(step, true)) {
-			break;
+	const PickerVas& va = kPickerVas[g_build];
+	uint8_t* game = *(uint8_t**)(uintptr_t)va.game;
+	uint8_t* page = *(uint8_t**)((uint8_t*)screen + 0x3d0 + *(int*)((uint8_t*)screen + 0x418) * 4);
+	uint32_t flag = page && page[0x16] == 1 && page[0x17] == 3 ? 1 : 0;
+	const int n = (int)sizeof(kMapOrder);
+	int at = 0;
+	while (at < n && kMapOrder[at] != was) {
+		at++;
+	}
+	if (at == n) {
+		return g_stepOriginal(screen, key, value, max, min, rule, wrap);
+	}
+	for (int tries = 1; tries < n; tries++) {
+		at += step;
+		if (at < 0 || at >= n) {
+			if (!wrap) {
+				return 0;
+			}
+			at = (at + n) % n;
 		}
-		if (*value == 14 && PackagesSlotBound(14)) {
-			break;
+		uint8_t v = kMapOrder[at];
+		if (v < min || v >= max) {
+			continue;
 		}
-		if (!g_stepOriginal(screen, key, value, max, min, rule, wrap)) { // nothing there: on to the next map
-			*value = was;
-			return 0;
+		bool ok = v == 13 ? PackagesPick(step, true) : v == 14 ? PackagesSlotBound(14) : game && MapAvailable(game, v, flag);
+		if (ok) {
+			*value = v;
+			StepSound(screen);
+			return 1;
 		}
 	}
-	return *value != was;
+	return 0;
 }
 
 // The session browser's detail panel (DX9 FUN_00e82360, DX11 0xe92430; thiscall(screen, entry)):
@@ -441,9 +466,11 @@ struct DetailVa {
 	uint32_t fn;
 	uint8_t prologue[9];   // sub esp,0x28; push esi; push <empty string>
 };
-const DetailVa kDetailVas[] = {
+const DetailVa kDetailVas[kBuildCount] = {
 	{0xe92430, {0x83, 0xec, 0x28, 0x56, 0x68, 0x6c, 0x84, 0x6e, 0x01}}, // DX11
 	{0xe82360, {0x83, 0xec, 0x28, 0x56, 0x68, 0xac, 0x7c, 0x6d, 0x01}}, // DX9
+	{0xe92880, {0x83, 0xec, 0x28, 0x56, 0x68, 0x6c, 0x88, 0x6e, 0x01}}, // DX11 1.1
+	{0xe82840, {0x83, 0xec, 0x28, 0x56, 0x68, 0x3c, 0x7f, 0x6d, 0x01}}, // DX9 1.1
 };
 using DetailFn = void(__attribute__((thiscall)) *)(void*, uint32_t);
 DetailFn g_detailOriginal = nullptr;
@@ -462,7 +489,16 @@ const char* BrowsedName(uint32_t slot)
 {
 	static char name[128];
 	std::string extra;
-	if (!g_detailEntry || !(xls::NetQosExtraFor(g_detailEntry, 0x94, &extra) || xls::NetQosExtraFor(g_detailEntry + 8, 0x8c, &extra))) {
+	// the game version (bytes 4..11 of the QoS data) is left out: compatible_versions hosts answer with their own
+	if (!g_detailEntry || !(xls::NetQosExtraFor(g_detailEntry, 0x94, &extra, 4, 8) || xls::NetQosExtraFor(g_detailEntry + 8, 0x8c, &extra, 4, 8))) {
+		static bool logged = false;
+		if (g_detailEntry && !logged) {
+			logged = true;
+			const uint8_t* e = g_detailEntry;
+			XLS_LOG_INFO("mods: maps: no host map names for the browsed session (entry %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x; %s).",
+				e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7], e[8], e[9], e[10], e[11], e[12], e[13], e[14], e[15],
+				xls::NetQosExtrasDiff(e, 0x94).c_str());
+		}
 		return nullptr;
 	}
 	std::string n = PackagesNameIn(extra, (int)slot);
@@ -531,7 +567,10 @@ void MapsPatchPickers(unsigned char* base)
 // Called from the worker until it returns true (the code must be decrypted first).
 bool MapsTryInstall(unsigned char* base)
 {
-	for (int build = 0; build < 2; build++) {
+	for (int build = 0; build < kBuildCount; build++) {
+		if (GameBuild() >= 0 && build != GameBuild()) {
+			continue;
+		}
 		if (memcmp(base + kAvailRvas[build], kAvailBytes, sizeof(kAvailBytes)) != 0) {
 			continue;
 		}
@@ -544,7 +583,7 @@ bool MapsTryInstall(unsigned char* base)
 			return true;
 		}
 		g_build = build;
-		XLS_LOG_INFO("mods: maps: %u mod map slot(s) enabled (%s).", (unsigned)g_maps.size(), build == 0 ? "DX11" : "DX9");
+		XLS_LOG_INFO("mods: maps: %u mod map slot(s) enabled (%s).", (unsigned)g_maps.size(), BuildName(build));
 		return true;
 	}
 	return false;

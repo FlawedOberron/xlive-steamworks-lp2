@@ -82,6 +82,12 @@ int HostTitleStarted()
 	return g_titleStarted != 0;
 }
 
+int HostGameVersion()
+{
+	int build = GameBuild();
+	return build < 0 ? 0 : build >= 2 ? 110 : 100;
+}
+
 int GameExe()
 {
 	char exe[MAX_PATH] = {};
@@ -135,6 +141,7 @@ void PluginsLoad()
 			p->host.log = HostLog;
 			p->host.write_code = HostWriteCode;
 			p->host.title_started = HostTitleStarted;
+			p->host.game_version = HostGameVersion;
 			t_current = p;
 			int result = load(&p->host);
 			t_current = nullptr;

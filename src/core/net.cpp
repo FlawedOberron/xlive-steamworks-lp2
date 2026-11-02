@@ -232,12 +232,21 @@ int g_p2pTransport = k_nSteamNetworkingConfig_P2P_Transport_ICE_Enable_Default;
 bool g_p2pTransportSet = false;
 bool g_hadPeers = false;
 
+// A networking setting in this process's Steam and, while lobbies go through the relay, in its helper too.
+bool SetNetConfig(ESteamNetworkingConfigValue value, int32 v)
+{
+	if (relay::Active()) {
+		relay::SetConfigInt32(value, v);
+	}
+	return SteamNetworkingUtils()->SetGlobalConfigValueInt32(value, v);
+}
+
 void ApplyP2PTransport()
 {
 	if (!SteamReady() || !SteamNetworkingUtils()) {
 		return;
 	}
-	SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_P2P_Transport_ICE_Enable, g_p2pTransport);
+	SetNetConfig(k_ESteamNetworkingConfig_P2P_Transport_ICE_Enable, g_p2pTransport);
 	XLS_LOG_INFO("net: P2P transport ICE mask %d%s.", g_p2pTransport, g_p2pTransport == k_nSteamNetworkingConfig_P2P_Transport_ICE_Enable_Disable ? " (relay only)" : "");
 }
 
@@ -840,20 +849,22 @@ void NetApplySendRate()
 	if (!SteamReady()) {
 		return;
 	}
+	if (SteamNetworkingUtils()) {
+		// room for transfer.cpp's window either way (Steam's default is 512 KB: 8 chunks)
+		SetNetConfig(k_ESteamNetworkingConfig_SendBufferSize, 4 * 1024 * 1024);
+	}
 	if (Cfg().sendRateKBytes && SteamNetworkingUtils()) {
-		SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_SendRateMin, (int32)(Cfg().sendRateKBytes * 1024));
-		SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_SendRateMax, (int32)(Cfg().sendRateKBytes * 1024));
+		SetNetConfig(k_ESteamNetworkingConfig_SendRateMin, (int32)(Cfg().sendRateKBytes * 1024));
+		SetNetConfig(k_ESteamNetworkingConfig_SendRateMax, (int32)(Cfg().sendRateKBytes * 1024));
 		XLS_LOG_INFO("net: send rate %u KB/s per peer.", Cfg().sendRateKBytes);
 	}
 	else if (SteamNetworkingUtils()) {
 		// Steam's congestion control still decides the rate between these: it starts a connection at
 		// the minimum (Steam's default 256 KB/s) and ramps up slowly, so a map / part download
 		// (core/transfer.cpp, a few MB) used to finish before it got going. Start at 1 MB/s, allow 16,
-		// and give the send buffer room for transfer.cpp's window. "network": {"send_rate_kbytes"}
-		// sets a fixed rate instead (slow uploads).
-		SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_SendRateMin, 1024 * 1024);
-		SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_SendRateMax, 16 * 1024 * 1024);
-		SteamNetworkingUtils()->SetGlobalConfigValueInt32(k_ESteamNetworkingConfig_SendBufferSize, 4 * 1024 * 1024);
+		// "network": {"send_rate_kbytes"} sets a fixed rate instead (slow uploads).
+		SetNetConfig(k_ESteamNetworkingConfig_SendRateMin, 1024 * 1024);
+		SetNetConfig(k_ESteamNetworkingConfig_SendRateMax, 16 * 1024 * 1024);
 		XLS_LOG_INFO("net: send rate auto (1-16 MB/s per peer).");
 	}
 }
@@ -1198,17 +1209,38 @@ bool NetKeyRegistered(const XNKID& xnkid)
 
 // --- QoS -----------------------------------------------------------------------------------------
 
+std::string NetQosExtrasDiff(const uint8_t* data, size_t size)
+{
+	std::lock_guard<std::mutex> lock(g_qosExtraMutex);
+	std::string out = FormatA("%zu answer(s) with names", g_qosExtras.size());
+	for (auto it = g_qosExtras.rbegin(); it != g_qosExtras.rend(); ++it) {
+		size_t n = std::min(size, it->first.size()), at = 0;
+		while (at < n && data[at] == it->first[at]) {
+			at++;
+		}
+		out += FormatA("; %zu bytes, first difference at %zu", it->first.size(), at);
+		if (at < n) {
+			out += FormatA(" (%02x, ours %02x)", it->first[at], data[at]);
+		}
+	}
+	return out;
+}
+
 void NetSetQosExtra(std::function<std::string()> source)
 {
 	g_qosExtraSource = std::move(source);
 }
 
-bool NetQosExtraFor(const uint8_t* data, size_t size, std::string* out)
+bool NetQosExtraFor(const uint8_t* data, size_t size, std::string* out, size_t skipAt, size_t skipSize)
 {
 	std::lock_guard<std::mutex> lock(g_qosExtraMutex);
 	for (auto it = g_qosExtras.rbegin(); it != g_qosExtras.rend(); ++it) {
 		size_t n = std::min(size, it->first.size());
-		if (n >= 16 && memcmp(data, it->first.data(), n) == 0) {
+		if (n < 16 || skipAt + skipSize > n) {
+			continue;
+		}
+		const uint8_t* q = it->first.data();
+		if (memcmp(data, q, skipAt) == 0 && memcmp(data + skipAt + skipSize, q + skipAt + skipSize, n - skipAt - skipSize) == 0) {
 			*out = it->second;
 			return true;
 		}

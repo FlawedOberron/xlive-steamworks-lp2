@@ -43,7 +43,9 @@ struct Layout {
 const Layout kLayouts[] = {
 	{"LP2DX11.exe", 0x523d30, 0x1852080, 0x9aab90, 0x14d766c, 0x2184, 0x2118},
 	{"LP2DX9.exe", 0x5143a0, 0x1841fe0, 0x99b3b0, 0x14c7514, 0x2174, 0x2108},
-};
+	{"LP2DX11.exe 1.1", 0x523ff0, 0x1853080, 0x9aae90, 0x14d78bc, 0x2184, 0x2118},
+	{"LP2DX9.exe 1.1", 0x5145a0, 0x1841fe0, 0x99b570, 0x14c777c, 0x2174, 0x2108},
+}; // GameBuild() order
 const Layout* g_layout = nullptr;
 
 using CheckFn = bool(__attribute__((thiscall)) *)(void*);
@@ -133,17 +135,12 @@ void ZoomRequest(int step)
 
 bool HoldZoomTryInstall(unsigned char* base)
 {
-	uint8_t* site = nullptr;
-	for (const Layout& L : kLayouts) {
-		if (InImage(base, L.siteRva, sizeof(kSiteBytes)) && memcmp(base + L.siteRva, kSiteBytes, sizeof(kSiteBytes)) == 0) {
-			site = base + L.siteRva;
-			g_layout = &L;
-			break;
-		}
-	}
-	if (!site) {
+	const Layout& L = kLayouts[GameBuild()];
+	if (!InImage(base, L.siteRva, sizeof(kSiteBytes)) || memcmp(base + L.siteRva, kSiteBytes, sizeof(kSiteBytes)) != 0) {
 		return false;
 	}
+	uint8_t* site = base + L.siteRva;
+	g_layout = &L;
 	uint8_t patch[kPatchSize] = {0x8b, 0xcd, 0x56, 0xe8, 0, 0, 0, 0, 0x90, 0x90, 0x90, 0x90, 0x90};
 	int32_t rel = (int32_t)((uint8_t*)&ZoomCheck - (site + kPatchAt + 3 + 5));
 	memcpy(patch + 4, &rel, 4);

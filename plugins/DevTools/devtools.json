@@ -1,6 +1,12 @@
 {
 	// Let a lobby host start a Player Match alone and play it (a private test box for maps and parts).
 	"solo_start": true,
-	// Copy the game's own debug messages into xlive_steamworks.log (LP2DX11.exe only).
-	"game_log": false
+	// Copy the game's own debug messages into xlive_steamworks.log (LP2DX11.exe and LP2DX9.exe).
+	"game_log": false,
+	// Experiment: Friction's crushers and uOm8322 objects bob up and down 2.5 m (does collision follow a moved object?).
+	"mover_test": false,
+	// Experiment: the first uOm8322 rides the first crusher's press (native joint parenting at runtime).
+	"parent_test": false,
+	// Experiment: Friction's conveyor belts (uOmMovementFloor) cycle every 15 s: 5 s stock, 5 s off, 5 s reversed; fields logged.
+	"conveyor_test": false
 }

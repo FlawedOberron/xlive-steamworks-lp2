@@ -271,7 +271,44 @@ bool SteamStart()
 	SteamNetworkingUtils()->InitRelayNetworkAccess();
 
 	XLS_LOG_INFO("steam: initialised app %u as %s (%llu).", SteamUtils()->GetAppID(), SteamFriends()->GetPersonaName(), xls::SteamUserId(SteamUser()).ConvertToUint64());
+	if (config.networkAppId && config.networkAppId != SteamUtils()->GetAppID()) {
+		relay::Start(config.networkAppId);
+	}
 	return true;
+}
+
+void SteamDispatchCallback(int id, const void* data, size_t size)
+{
+	// the callbacks the relay forwards (relay/main.cpp Forwarded) that a module acts on
+	switch (id) {
+	case LobbyChatUpdate_t::k_iCallback:
+		if (size >= sizeof(LobbyChatUpdate_t)) events::OnLobbyChatUpdate(*(const LobbyChatUpdate_t*)data);
+		break;
+	case LobbyDataUpdate_t::k_iCallback:
+		if (size >= sizeof(LobbyDataUpdate_t)) events::OnLobbyDataUpdate(*(const LobbyDataUpdate_t*)data);
+		break;
+	case LobbyKicked_t::k_iCallback:
+		if (size >= sizeof(LobbyKicked_t)) events::OnLobbyKicked(*(const LobbyKicked_t*)data);
+		break;
+	case GameLobbyJoinRequested_t::k_iCallback:
+		if (size >= sizeof(GameLobbyJoinRequested_t)) {
+			const GameLobbyJoinRequested_t* p = (const GameLobbyJoinRequested_t*)data;
+			events::OnLobbyJoinRequested(p->m_steamIDLobby, p->m_steamIDFriend);
+		}
+		break;
+	case SteamNetworkingMessagesSessionRequest_t::k_iCallback:
+		if (size >= sizeof(SteamNetworkingMessagesSessionRequest_t)) {
+			events::OnNetSessionRequest(((const SteamNetworkingMessagesSessionRequest_t*)data)->m_identityRemote);
+		}
+		break;
+	case SteamNetworkingMessagesSessionFailed_t::k_iCallback:
+		if (size >= sizeof(SteamNetworkingMessagesSessionFailed_t)) {
+			events::OnNetSessionFailed(((const SteamNetworkingMessagesSessionFailed_t*)data)->m_info);
+		}
+		break;
+	default:
+		break;
+	}
 }
 
 void SteamStop()
@@ -328,6 +365,9 @@ void SteamPumpForce()
 	g_lastPumpTick = GetTickCount();
 	if (g_ready && g_runCallbacks) {
 		SteamAPI_RunCallbacks();
+	}
+	if (relay::Active()) {
+		relay::Pump();
 	}
 	NetPump();
 	AsyncPump();

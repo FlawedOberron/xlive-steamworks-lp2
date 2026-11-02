@@ -112,6 +112,13 @@ const MenuAddrs kDx11 = {0x1636c74, {0xf0522c, 0xf05b07, 0xf05dc9, 0xf06955, 0xf
 const MenuAddrs kDx9 = {0x1626b2c, {0xef544c, 0xef5d27, 0xef5fe9, 0xef6b75, 0xef6c2a, 0xef6e01, 0xef74a3, 0xef76f0}, 0xef71a2, 0xef6c66,
                         0xef58c0, 0xef76d0, 0xef6c10, 0xef66a0, 0x1626c88, 0x13630c4, 0x18ce774, 0xef4fb0, 0xef5030, 0xef5160,
                         0x76c0c0, 0xef4d80, 0xf3a660, 0x76b4e0, 0x17ed1c8, 0x1842198};
+const MenuAddrs kDx11Disc = {0x1636ecc, {0xf055dc, 0xf05eb7, 0xf06179, 0xf06d05, 0xf06dba, 0xf06f91, 0xf07633, 0xf07880}, 0xf07332, 0xf06df6,
+                             0xf05a50, 0xf07860, 0xf06da0, 0xf06830, 0x1637028, 0x1373294, 0x18e1860, 0xf05140, 0xf051c0, 0xf052f0,
+                             0x77b3f0, 0xf04f10, 0xf4a7f0, 0x77a770, 0x17fe228, 0x1853238};
+const MenuAddrs kDx9Disc = {0x1626d8c, {0xef54ac, 0xef5d87, 0xef6049, 0xef6bd5, 0xef6c8a, 0xef6e61, 0xef7503, 0xef7750}, 0xef7202, 0xef6cc6,
+                            0xef5920, 0xef7730, 0xef6c70, 0xef6700, 0x1626ee8, 0x13630dc, 0x18ce774, 0xef5010, 0xef5090, 0xef51c0,
+                            0x76c130, 0xef4de0, 0xf3a730, 0x76b550, 0x17ed1c8, 0x1842198};
+const MenuAddrs* const kAll[] = {&kDx11, &kDx9, &kDx11Disc, &kDx9Disc}; // GameBuild() order
 const MenuAddrs* A = &kDx11;
 
 const uint8_t kDrawPrologue[] = {0x83, 0xec, 0x20, 0x53, 0x55, 0x56, 0x8b, 0xf1};
@@ -458,7 +465,7 @@ const char* MenuHeader(int index)
 
 std::string MenuRemapKey(const char* context, const char* dest)
 {
-	A = g_host->game_exe == LP2MOD_EXE_DX11 ? &kDx11 : &kDx9;
+	A = kAll[GameBuild()];
 	uint8_t* options = *(uint8_t**)(uintptr_t)A->options;
 	if (!options) {
 		return "-";
@@ -469,7 +476,7 @@ std::string MenuRemapKey(const char* context, const char* dest)
 
 bool MenuTryInstall(unsigned char* base)
 {
-	A = g_host->game_exe == LP2MOD_EXE_DX11 ? &kDx11 : &kDx9;
+	A = kAll[GameBuild()];
 	auto at = [&](uint32_t va) { return base + (va - 0x400000); };
 	// Every site must look exactly as expected, else leave the menu alone.
 	for (uint32_t ref : A->tableRefs) {

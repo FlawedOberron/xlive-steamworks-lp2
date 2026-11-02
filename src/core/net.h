@@ -60,7 +60,10 @@ INT NetQosListen(const XNKID& xnkid, const uint8_t* data, UINT size, DWORD bitsP
 // Text added to every QoS answer we send (after the title's data; builds without this ignore it).
 void NetSetQosExtra(std::function<std::string()> source);
 // The text a QoS answer brought with title data starting like data (the newest such answer).
-bool NetQosExtraFor(const uint8_t* data, size_t size, std::string* out);
+// For the log: how the stored answers' data compares with data.
+std::string NetQosExtrasDiff(const uint8_t* data, size_t size);
+// skipAt / skipSize: a byte range left out of the comparison (a field the reader may hold differently).
+bool NetQosExtraFor(const uint8_t* data, size_t size, std::string* out, size_t skipAt = 0, size_t skipSize = 0);
 INT NetQosLookup(UINT count, const XNADDR* xnaddrs[], const XNKID* xnkids[], const XNKEY* xnkeys[], UINT serviceCount, const IN_ADDR services[], const DWORD serviceIds[], UINT probes, DWORD bitsPerSecond, DWORD flags, WSAEVENT event, XNQOS** out);
 INT NetQosRelease(XNQOS* qos);
 INT NetQosListenStats(const XNKID& xnkid, XNQOSLISTENSTATS* stats);

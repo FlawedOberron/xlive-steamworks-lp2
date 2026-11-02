@@ -23,7 +23,7 @@
 extern "C" {
 #endif
 
-#define LP2MOD_HOST_VERSION 1
+#define LP2MOD_HOST_VERSION 2
 
 enum {
 	LP2MOD_EXE_UNKNOWN = 0,
@@ -51,6 +51,9 @@ typedef struct LP2ModHost {
 	int (*write_code)(void* at, const void* bytes, size_t size);
 	/* 1 once the game has called XLiveInitialize: its code is fully decrypted. */
 	int (*title_started)(void);
+	/* Version 2: the game's version, 100 (1.000, the Steam exes) or 110 (1.100, the disc exes), 0 while unknown
+	   (the Steam exes are readable once title_started). Check host->size covers it before calling. */
+	int (*game_version)(void);
 } LP2ModHost;
 
 /* Exported by the plugin (undecorated names, cdecl). */

@@ -340,6 +340,11 @@ void* HookImport(HMODULE module, const char* name, void* hook, const char* dll =
 
 }
 
+const std::wstring* OverlayRedirect(const std::wstring& path)
+{
+	return Redirect(path);
+}
+
 const std::vector<std::wstring>& ModRootList()
 {
 	static std::once_flag once;

@@ -338,6 +338,7 @@ bool ConfigLoad()
 			config.restartAppIfNecessary = steam["restart_app_if_necessary"].GetBool(false);
 			config.requireSteam = steam["required"].GetBool(true);
 			config.steamShutdownApi = steam["shutdown_api"].GetBool(true);
+			config.networkAppId = steam["network_app_id"].GetUint32(0);
 			config.asyncTimeoutMs = steam["async_timeout_ms"].GetUint32(15000);
 
 			const Json& title = root["title"];
@@ -386,6 +387,11 @@ bool ConfigLoad()
 			config.lobbyDistanceFilter = (int)sessions["lobby_distance_filter"].GetInt(1);
 			config.sessionsAcceptAnyPeer = sessions["accept_any_peer"].GetBool(true);
 			config.startWaitSeconds = (uint32_t)sessions["start_wait_seconds"].GetInt(180);
+			config.compatibleVersions.clear();
+			const Json& versions = sessions["compatible_versions"];
+			for (size_t i = 0; i < versions.Size(); i++) {
+				config.compatibleVersions.push_back(versions.At(i).GetString(std::string()));
+			}
 			config.relayOnly = root["network"]["relay_only"].GetBool(false);
 			config.sendRateKBytes = (uint32_t)root["network"]["send_rate_kbytes"].GetInt(0);
 

@@ -42,6 +42,11 @@ const ReminderAddrs kDx11 = {0xf2eb20, 0xf2ef70, 0xf2d3d0, {0xf330dc, 0xf334dc, 
                              0x77b280, 0x18e0860, 0x849730, 0xf4a390, 0x77a680};
 const ReminderAddrs kDx9 = {0xf1ed50, 0xf1f1a0, 0xf1d600, {0xf2330c, 0xf2370c, 0xf238c9}, 0x17ff0a0,
                             0x76c0c0, 0x18ce774, 0x83a2e0, 0xf3a660, 0x76b4e0};
+const ReminderAddrs kDx11Disc = {0xf2ef40, 0xf2f390, 0xf2d7f0, {0xf334fc, 0xf338fc, 0xf33ab9}, 0x1810100,
+                                 0x77b3f0, 0x18e1860, 0x8498e0, 0xf4a7f0, 0x77a770};
+const ReminderAddrs kDx9Disc = {0xf1edf0, 0xf1f240, 0xf1d6a0, {0xf233ac, 0xf237ac, 0xf23969}, 0x17ff0a0,
+                                0x76c130, 0x18ce774, 0x83a420, 0xf3a730, 0x76b550};
+const ReminderAddrs* const kAll[] = {&kDx11, &kDx9, &kDx11Disc, &kDx9Disc}; // GameBuild() order
 const ReminderAddrs* A = &kDx11;
 
 const uint8_t kFootPrologue[] = {0x81, 0xec, 0xa4, 0x0a, 0x00, 0x00}; // sub esp, 0xaa4
@@ -321,7 +326,7 @@ void* Detour(uint8_t* fn, size_t length, void* detour)
 
 bool ReminderTryInstall(unsigned char* base)
 {
-	A = g_host->game_exe == LP2MOD_EXE_DX11 ? &kDx11 : &kDx9;
+	A = kAll[GameBuild()];
 	auto at = [&](uint32_t va) { return base + (va - 0x400000); };
 	if (memcmp(at(A->foot), kFootPrologue, sizeof(kFootPrologue)) != 0 || memcmp(at(A->vs), kVsPrologue, sizeof(kVsPrologue)) != 0 ||
 	    memcmp(at(A->vsCount), kCountPrologue, sizeof(kCountPrologue)) != 0) {

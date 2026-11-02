@@ -7,6 +7,7 @@
 #include <steam/steam_api_flat.h>
 #pragma warning(pop)
 
+#include "core/relay.h"
 #include "xlive/xdefs.h"
 
 #include <string>
@@ -18,25 +19,39 @@ using ::SteamClient;
 using ::SteamUser;
 using ::SteamFriends;
 using ::SteamUtils;
-using ::SteamMatchmaking;
 using ::SteamUserStats;
 using ::SteamApps;
 using ::SteamRemoteStorage;
-using ::SteamNetworkingMessages;
 using ::SteamNetworkingSockets;
 using ::SteamNetworkingUtils;
+
+// Lobbies and peer messages: this process's Steam, or xlive_relay.exe's as another app (core/relay.h).
+inline ISteamMatchmaking* SteamMatchmaking() { return relay::Active() ? relay::Matchmaking() : ::SteamMatchmaking(); }
+inline ISteamNetworkingMessages* SteamNetworkingMessages() { return relay::Active() ? relay::Messages() : ::SteamNetworkingMessages(); }
 
 // Steam methods that return a CSteamID by value. MSVC returns that class through a hidden
 // pointer the callee pops, GCC/MinGW expects it in EDX:EAX, so calling these virtuals from a
 // MinGW build yields a garbage id and an unbalanced stack. The flat API returns a plain uint64,
 // which both compilers agree on; every call site goes through these instead.
 inline CSteamID SteamUserId(ISteamUser* user) { return CSteamID((uint64)SteamAPI_ISteamUser_GetSteamID(user)); }
-inline CSteamID LobbyOwner(ISteamMatchmaking* mm, CSteamID lobby) { return CSteamID((uint64)SteamAPI_ISteamMatchmaking_GetLobbyOwner(mm, lobby.ConvertToUint64())); }
-inline CSteamID LobbyMember(ISteamMatchmaking* mm, CSteamID lobby, int i) { return CSteamID((uint64)SteamAPI_ISteamMatchmaking_GetLobbyMemberByIndex(mm, lobby.ConvertToUint64(), i)); }
-inline CSteamID LobbyByIndex(ISteamMatchmaking* mm, int i) { return CSteamID((uint64)SteamAPI_ISteamMatchmaking_GetLobbyByIndex(mm, i)); }
+// (The relay's proxy is ours: asked directly.)
+inline CSteamID LobbyOwner(ISteamMatchmaking* mm, CSteamID lobby)
+{
+	return CSteamID((uint64)(relay::IsProxy(mm) ? relay::LobbyOwner(lobby.ConvertToUint64()) : SteamAPI_ISteamMatchmaking_GetLobbyOwner(mm, lobby.ConvertToUint64())));
+}
+inline CSteamID LobbyMember(ISteamMatchmaking* mm, CSteamID lobby, int i)
+{
+	return CSteamID((uint64)(relay::IsProxy(mm) ? relay::LobbyMember(lobby.ConvertToUint64(), i) : SteamAPI_ISteamMatchmaking_GetLobbyMemberByIndex(mm, lobby.ConvertToUint64(), i)));
+}
+inline CSteamID LobbyByIndex(ISteamMatchmaking* mm, int i)
+{
+	return CSteamID((uint64)(relay::IsProxy(mm) ? relay::LobbyByIndex(i) : SteamAPI_ISteamMatchmaking_GetLobbyByIndex(mm, i)));
+}
 inline CSteamID FriendByIndex(ISteamFriends* friends, int i, int flags) { return CSteamID((uint64)SteamAPI_ISteamFriends_GetFriendByIndex(friends, i, flags)); }
 
 bool SteamStart();
+// A Steam callback struct from elsewhere (the relay's helper) to the modules, as if this process's Steam sent it.
+void SteamDispatchCallback(int id, const void* data, size_t size);
 void SteamStop();
 // A title that calls SteamAPI_Init itself sets this before XLiveInitialize.
 void SteamSetOwnedByTitle(bool ownedByTitle);
@@ -84,6 +99,12 @@ struct SteamCall {
 			return true;
 		}
 		bool callFailed = false;
+		int relayed = relay::CallPoll(call, &result, sizeof(T), T::k_iCallback, &callFailed);
+		if (relayed >= 0) {
+			failed = relayed && callFailed;
+			done = relayed != 0;
+			return done;
+		}
 		if (!SteamUtils() || !SteamUtils()->IsAPICallCompleted(call, &callFailed)) {
 			return false;
 		}

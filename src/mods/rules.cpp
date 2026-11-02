@@ -117,9 +117,11 @@ struct RulesVas {
 	uint32_t respawnSecond; // Spawn's respawn case for slot 7 (mov edi,[esi+0xf0]), 0x10 before the info-id case (DX11 0x8fb53c)
 	uint32_t listValue2;    // the list's other sprintf call: Kills with a kill target, "%03d/%03d" (kills, target), esi at the kills
 };
-const RulesVas kRulesVas[] = {
+const RulesVas kRulesVas[kBuildCount] = {
 	{0xc7aa20, 0xc7a820, 0xeca930, 0x20fc, 0x8fb130, 0xe8c270, 0xf4a330, 0x17e9840, 0xc86160, 0x2180, 0xc7cf15, 0xecac50, 0xed1e00, 0x18e086c, 0x1852850, 0x8029c0, 0x1852144, 0x8ff650, 0x1852080, 0x8e5e30, 0x16f7c6c, 0x1008ef0, 0x1852238, 0x1009b90, 0x18520c0, 0xf44680, 0xf44760, 0xf4a390, 0x18e0860, 0x873b80, 0x873df6, 0x873d1f, 0x873d5d, 0xf45eb0, 0xeaa1ba, 0x18d08ac, 0xed506d, 0x1224239, 0x16d9ab4, {0xed4c78, 0xed4cc1, 0xed4cdc}, 0xed4e92, 0xed4c00, 0xf4a570, 0xf4a550, 0x77a680, 0xee09d0, 0xed61e0, 0x8fb53c, 0xed5023}, // DX11
 	{0xc6ae10, 0xc6ac10, 0xebab30, 0x20ec, 0x8eb7d0, 0xe7c1e0, 0xf3a600, 0x17d97e0, 0xc76550, 0x2170, 0xc6d305, 0xebae50, 0xec1ff0, 0x18ce780, 0x18427b0, 0x7f3b00, 0x18420a4, 0x8efcf0, 0x1841fe0, 0x8d64d0, 0x16e7098, 0xff8b10, 0x1842198, 0xff97b0, 0x1842020, 0xf34940, 0xf34a20, 0xf3a660, 0x18ce774, 0x8644d0, 0x864746, 0x86466f, 0x8646ad, 0xf36170, 0xe9a44a, 0x18c080c, 0xec525d, 0x1213e59, 0x16c9a24, {0xec4e68, 0xec4eb1, 0xec4ecc}, 0xec5082, 0xec4df0, 0xf3a840, 0xf3a820, 0x76b4e0, 0xed0bc0, 0xec63d0, 0x8ebbdc, 0xec5213}, // DX9
+	{0xc7aa40, 0xc7a840, 0xecad00, 0x20fc, 0x8fb410, 0xe8c710, 0xf4a790, 0x17ea840, 0xc86180, 0x2180, 0xc7cf35, 0xecb020, 0xed21d0, 0x18e186c, 0x1853850, 0x802ae0, 0x1853144, 0x8ff930, 0x1853080, 0x8e6110, 0x16f805c, 0x10091e0, 0x1853238, 0x1009e80, 0x18530c0, 0xf44aa0, 0xf44b80, 0xf4a7f0, 0x18e1860, 0x873f10, 0x874186, 0x8740af, 0x8740ed, 0xf462d0, 0xeaa5ba, 0x18d18ac, 0xed543d, 0x12245c8, 0x16d9e64, {0xed5048, 0xed5091, 0xed50ac}, 0xed5262, 0xed4fd0, 0xf4a9d0, 0xf4a9b0, 0x77a770, 0xee0da0, 0xed65b0, 0x8fb81c, 0xed53f3}, // DX11 1.1
+	{0xc6aa00, 0xc6a800, 0xebabd0, 0x20ec, 0x8eb980, 0xe7c750, 0xf3a6b0, 0x17d97e0, 0xc76140, 0x2170, 0xc6cef5, 0xebaef0, 0xec2090, 0x18ce780, 0x18427b0, 0x7f3c60, 0x18420a4, 0x8efea0, 0x1841fe0, 0x8d6680, 0x16e72f8, 0xff8e20, 0x1842198, 0xff9ac0, 0x1842020, 0xf34a10, 0xf34af0, 0xf3a730, 0x18ce774, 0x864760, 0x8649d6, 0x8648ff, 0x86493d, 0xf36240, 0xe9a4da, 0x18c080c, 0xec52fd, 0x1214028, 0x16c9c8c, {0xec4f08, 0xec4f51, 0xec4f6c}, 0xec5122, 0xec4e90, 0xf3a910, 0xf3a8f0, 0x76b550, 0xed0c60, 0xec6470, 0x8ebd8c, 0xec52b3}, // DX9 1.1
 };
 // push esi; push edi; mov edi,[esp+0xc]; test di,di; (then jge rel32, left in place)
 const uint8_t kAddAmmoPrologue[] = {0x56, 0x57, 0x8b, 0x7c, 0x24, 0x0c, 0x66, 0x85, 0xff};
@@ -1956,7 +1958,10 @@ DWORD WINAPI ScoreThread(LPVOID)
 void RulesInstall(unsigned char* base)
 {
 	int build = -1;
-	for (int b = 0; b < 2 && build < 0; b++) {
+	for (int b = 0; b < kBuildCount && build < 0; b++) {
+		if (GameBuild() >= 0 && b != GameBuild()) {
+			continue;
+		}
 		const uint8_t* add = base + (kRulesVas[b].addAmmo - 0x400000);
 		const uint8_t* reserve = base + (kRulesVas[b].reserve - 0x400000);
 		if (memcmp(add, kAddAmmoPrologue, sizeof(kAddAmmoPrologue)) == 0 && memcmp(add + sizeof(kAddAmmoPrologue), kAddAmmoNext, sizeof(kAddAmmoNext)) == 0 &&
@@ -2129,7 +2134,7 @@ void RulesInstall(unsigned char* base)
 	if (HANDLE score = CreateThread(nullptr, 0, ScoreThread, nullptr, 0, nullptr)) {
 		CloseHandle(score);
 	}
-	XLS_LOG_INFO("mods: rules: hooked (%s).", build == 0 ? "DX11" : "DX9");
+	XLS_LOG_INFO("mods: rules: hooked (%s).", BuildName(build));
 }
 
 
@@ -2223,6 +2228,29 @@ uint32_t RulesMessageAlias(uint32_t id)
 	return id;
 }
 
+unsigned char* RulesBody(int slot)
+{
+	return slot >= 0 && slot < 16 ? Body(slot) : nullptr;
+}
+
+int RulesSlotOf(const uint8_t* character)
+{
+	if (!g_controllers || !character) {
+		return -1;
+	}
+	for (int slot = 0; slot < 16; slot++) {
+		if (Body(slot) == character) {
+			return slot;
+		}
+	}
+	return -1;
+}
+
+int RulesLocalSlot()
+{
+	return g_localIndex;
+}
+
 const char* RulesMessage(uint32_t id)
 {
 	if (id >= (uint32_t)kMsgSecondary && id < (uint32_t)(kMsgSecondary + kSecondaryValues)) {
@@ -2238,6 +2266,10 @@ const char* RulesMessage(uint32_t id)
 		return "Respawns"; // the Kills row's label while Survival is picked
 	}
 	if (id == (uint32_t)kMsgSubElim + 2 || id == (uint32_t)kMsgSubTeam + 2) {
+		return kSurvivalName;
+	}
+	// in a Survival lobby: its match is Elimination / Team scored by kills, so the lobby's rules say "Kills"
+	if (!g_offline && g_survival && (id == (uint32_t)kSubElimGameMsg[kSubKills] || id == (uint32_t)kSubTeamGameMsg[kSubKills])) {
 		return kSurvivalName;
 	}
 	if (id >= (uint32_t)(kMsgKillRow + kKillTargets) && id < (uint32_t)(kMsgKillRow + kKillTargets + kLivesValues)) {

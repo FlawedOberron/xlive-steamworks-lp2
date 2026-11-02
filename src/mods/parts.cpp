@@ -1,4 +1,5 @@
 #include "mods/parts.h"
+#include "mods/lp2.h"
 
 #include "api/xsession.h"
 #include "core/content.h"
@@ -1526,9 +1527,9 @@ DWORD WINAPI UnlockThread(LPVOID param)
 
 void PartsStartUnlocker()
 {
-	char exe[MAX_PATH] = {};
-	GetModuleFileNameA(nullptr, exe, MAX_PATH);
-	uint32_t gamePtr = strstr(exe, "LP2DX11") ? 0x18520c0 : strstr(exe, "LP2DX9") ? 0x1842020 : 0;
+	static const uint32_t kGamePtrs[kBuildCount] = {0x18520c0, 0x1842020, 0x18530c0, 0x1842020};
+	int build = GameBuild();
+	uint32_t gamePtr = build >= 0 ? kGamePtrs[build] : 0;
 	if (!gamePtr || PartPackages().empty()) {
 		return;
 	}
@@ -2144,9 +2145,11 @@ struct LobbyVas {
 	int shift;              // the preview's fields sit this far from DX11's (DX9: 0x10 lower)
 };
 // DX9 by signature (lp2-tools/sigport.py); the member table's layout is the same in both.
-const LobbyVas kLobbyVas[] = {
+const LobbyVas kLobbyVas[kBuildCount] = {
 	{0x1852850, 0xc3db30, 0xc3dc00, 0xc3b700, 0xc3a0c0, 0xf4a350, {{0xe97b30, 0xe98c80, 0}, {0xea3e80, 0xea4f10, 1}}, 0},      // DX11
 	{0x18427b0, 0xc2df40, 0xc2e010, 0xc2bb10, 0xc2a4d0, 0xf3a620, {{0xe87a60, 0xe88bb0, 0}, {0xe940d0, 0xe95160, 1}}, -0x10}, // DX9
+	{0x1853850, 0xc3dba0, 0xc3dc70, 0xc3b770, 0xc3a130, 0xf4a7b0, {{0xe97de0, 0xe98f30, 0}, {0xea4270, 0xea5300, 1}}, 0},      // DX11 1.1
+	{0x18427b0, 0xc2da90, 0xc2db60, 0xc2b660, 0xc2a020, 0xf3a6f0, {{0xe87f40, 0xe89090, 0}, {0xe941c0, 0xe95250, 1}}, -0x10}, // DX9 1.1
 };
 const LobbyVas* g_lobbyVas = nullptr;
 uintptr_t g_lobbyRebase = 0; // module base - 0x400000
@@ -3268,11 +3271,15 @@ struct MenuVas {
 	uint32_t step, swatch, locked, apply, descriptorId, partCode, partId, partStep, dlcName, menuUpdate, previewState, partRequest;
 	uint32_t stageRequest, nameSprintf[2], sprintfFn, game, unitParts, slotMap;
 };
-const MenuVas kMenuVas[] = {
+const MenuVas kMenuVas[kBuildCount] = {
 	{0xeeb9a0, 0xee5060, 0xee4c40, 0xeed720, 0xf5c860, 0xf5cae0, 0xf5c9a0, 0xee4ac0, 0x8654a0, 0xef0c20, 0x20d4, 0x7d3fd0,
 	 0x7d4260, {0x7d4097, 0x7d4118}, 0x1224239, 0x18520c0, 0x6f70, 0x7e5d10}, // DX11
 	{0xedbb80, 0xed5240, 0xed4e20, 0xedd900, 0xf4cb40, 0xf4cdc0, 0xf4cc80, 0xed4ca0, 0x855df0, 0xee0e00, 0x20c4, 0x7c5120,
 	 0x7c53b0, {0x7c51e7, 0x7c5268}, 0x1213e59, 0x1842020, 0x6f60, 0x7d6e50}, // DX9
+	{0xeebd70, 0xee5420, 0xee5000, 0xeedaf0, 0xf5cce0, 0xf5cf60, 0xf5ce20, 0xee4e80, 0x865850, 0xef0ff0, 0x20d4, 0x7d40f0,
+	 0x7d4380, {0x7d41b7, 0x7d4238}, 0x12245c8, 0x18530c0, 0x6f70, 0x7e5e30}, // DX11 1.1
+	{0xedbc20, 0xed52e0, 0xed4ec0, 0xedd9a0, 0xf4ce20, 0xf4d0a0, 0xf4cf60, 0xed4d40, 0x856090, 0xee0ea0, 0x20c4, 0x7c5290,
+	 0x7c5520, {0x7c5357, 0x7c53d8}, 0x1214028, 0x1842020, 0x6f60, 0x7d6fb0}, // DX9 1.1
 };
 
 const uint8_t kPreviewApplyPrologue[] = {0x8b, 0x44, 0x24, 0x08, 0x56, 0x57, 0x8b, 0x7c, 0x24, 0x0c}; // mov eax,[esp+8]; push esi; push edi; mov edi,[esp+0xc]
@@ -3377,7 +3384,7 @@ void InstallMenuColours(uint8_t* base, const MenuVas& va)
 }
 
 const uint8_t kPathPrologue[] = {0x81, 0xec, 0xd0, 0x00, 0x00, 0x00, 0x53, 0x55, 0x8b, 0xac, 0x24, 0xe4, 0x00, 0x00, 0x00, 0x56, 0x8b, 0xf1, 0xb8};
-const uint32_t kPathRvas[] = {0xb664b0 /* DX11 */, 0xb56650 /* DX9 */};
+const uint32_t kPathRvas[kBuildCount] = {0xb664b0 /* DX11 */, 0xb56650 /* DX9 */, 0xb66930 /* DX11 1.1 */, 0xb56930 /* DX9 1.1 */};
 
 }
 
@@ -3452,10 +3459,13 @@ bool PartsCarrierRedirect(const std::wstring& path, std::wstring* out)
 
 bool PartsTryInstallPathHook(unsigned char* base)
 {
+	// runs before the build is known (from the first ticks, while SteamStub decrypts): the prologue decides
 	uint8_t* fn = nullptr;
-	for (uint32_t rva : kPathRvas) {
-		if (memcmp(base + rva, kPathPrologue, sizeof(kPathPrologue)) == 0) {
-			fn = base + rva;
+	int build = -1;
+	for (int b = 0; b < kBuildCount; b++) {
+		if (memcmp(base + kPathRvas[b], kPathPrologue, sizeof(kPathPrologue)) == 0) {
+			fn = base + kPathRvas[b];
+			build = b;
 		}
 	}
 	if (!fn) {
@@ -3483,8 +3493,8 @@ bool PartsTryInstallPathHook(unsigned char* base)
 	VirtualProtect(fn, len, old, &old);
 	FlushInstructionCache(GetCurrentProcess(), fn, len);
 	XLS_LOG_INFO("mods: parts: path builder hooked at 0x%p.", fn);
-	InstallMenuColours(base, kMenuVas[fn == base + kPathRvas[0] ? 0 : 1]);
-	InstallLobbyPreviews(base, kLobbyVas[fn == base + kPathRvas[0] ? 0 : 1]);
+	InstallMenuColours(base, kMenuVas[build]);
+	InstallLobbyPreviews(base, kLobbyVas[build]);
 	return true;
 }
 

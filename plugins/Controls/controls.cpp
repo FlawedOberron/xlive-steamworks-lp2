@@ -40,14 +40,14 @@ namespace {
 
 const uint8_t kSiteBytes[] = {0x8d, 0x8e, 0xb0, 0x03, 0x00, 0x00, 0xe8, 0, 0, 0, 0, 0xe8};
 const uint8_t kSiteMask[] = {1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1};
-const uint32_t kSiteRvas[] = {0xb8d96c /* DX11 */, 0xb7d9cc /* DX9 */};
+const uint32_t kSiteRvas[] = {0xb8d96c /* DX11 */, 0xb7d9cc /* DX9 */, 0xb8ddec /* DX11 1.1 */, 0xb7dd0c /* DX9 1.1 */};
 // Pointer to the options object; its +0x68 holds the 45 key bindings (u32: virtual-key code, or
 // mouse code | 0x80000000), copied there when the key config menu closes.
-const uint32_t kOptionsPtrs[] = {0x1852238 /* DX11 */, 0x1842198 /* DX9 */};
+const uint32_t kOptionsPtrs[] = {0x1852238 /* DX11 */, 0x1842198 /* DX9 */, 0x1853238 /* DX11 1.1 */, 0x1842198 /* DX9 1.1 */};
 // The game's slot -> action bits table: 45 x {u64 bits, u64 default binding}. Context-free: the VS
 // code reads the same bits differently (slot 8 grenade 0x200 = VS secondary, slot 13 action 1 0x1 =
 // get out, slot 12 change weapon 0x8, slot 18 T-ENG w2 0x40000, slot 6 turn right 0x10000 = ascend, ...).
-const uint32_t kSlotBits[] = {0x1645040 /* DX11 */, 0x1634f08 /* DX9 */};
+const uint32_t kSlotBits[] = {0x1645040 /* DX11 */, 0x1634f08 /* DX9 */, 0x1645298 /* DX11 1.1 */, 0x1635160 /* DX9 1.1 */};
 const uint32_t kSetsOffset = 0x3b8 - 0x3b0; // from ecx (pad+0x3b0)
 const int kSetCount = 5;
 
@@ -521,6 +521,8 @@ struct PromptLayout {
 const PromptLayout kPromptLayouts[] = {
 	{0x448110, 0x1372d78}, // LP2DX11.exe
 	{0x438cc0, 0x1362ba8}, // LP2DX9.exe
+	{0x448310, 0x1372d78}, // LP2DX11.exe 1.1
+	{0x438e00, 0x1362bc0}, // LP2DX9.exe 1.1
 };
 // sub esp,0x10; push ebx; push esi; push edi; mov edi,ecx
 const uint8_t kRefreshPrologue[] = {0x83, 0xec, 0x10, 0x53, 0x56, 0x57, 0x8b, 0xf9};
@@ -664,23 +666,23 @@ bool SiteMatches(const uint8_t* at)
 
 bool ControlsTryInstall(unsigned char* base)
 {
-	uint8_t* site = nullptr;
-	for (uint32_t rva : kSiteRvas) {
-		if (InImage(base, rva, sizeof(kSiteBytes)) && SiteMatches(base + rva)) {
-			site = base + rva;
-			break;
-		}
-	}
-	if (!site) {
+	int build = GameBuild();
+	uint32_t rva = kSiteRvas[build];
+	if (!InImage(base, rva, sizeof(kSiteBytes)) || !SiteMatches(base + rva)) {
 		return false;
 	}
+	uint8_t* site = base + rva;
 	uint8_t* call = site + 6;
 	g_update = (UpdateFn)(call + 5 + *(int32_t*)(call + 1));
-	g_optionsPtr = site == base + kSiteRvas[0] ? kOptionsPtrs[0] : kOptionsPtrs[1];
-	g_slotBits = site == base + kSiteRvas[0] ? kSlotBits[0] : kSlotBits[1];
-	if (site == base + kSiteRvas[0]) {
+	g_optionsPtr = kOptionsPtrs[build];
+	g_slotBits = kSlotBits[build];
+	if (build == 0) {
 		g_inputPtr = 0x18de7f4; // LP2DX11.exe
 		g_mouseFn = 0x860f70;
+	}
+	else if (build == 2) {
+		g_inputPtr = 0x18df7f4; // LP2DX11.exe 1.1
+		g_mouseFn = 0x861200;
 	}
 	int32_t rel = (int32_t)((uint8_t*)&PadUpdate - (call + 5));
 	DWORD old = 0;
@@ -696,17 +698,12 @@ bool ControlsTryInstall(unsigned char* base)
 
 bool PromptsTryInstall(unsigned char* base)
 {
-	uint8_t* fn = nullptr;
-	for (const PromptLayout& L : kPromptLayouts) {
-		if (InImage(base, L.refreshRva, sizeof(kRefreshPrologue)) && memcmp(base + L.refreshRva, kRefreshPrologue, sizeof(kRefreshPrologue)) == 0) {
-			fn = base + L.refreshRva;
-			g_prompt = &L;
-			break;
-		}
-	}
-	if (!fn) {
+	const PromptLayout& L = kPromptLayouts[GameBuild()];
+	if (!InImage(base, L.refreshRva, sizeof(kRefreshPrologue)) || memcmp(base + L.refreshRva, kRefreshPrologue, sizeof(kRefreshPrologue)) != 0) {
 		return false;
 	}
+	uint8_t* fn = base + L.refreshRva;
+	g_prompt = &L;
 	auto* tramp = (uint8_t*)VirtualAlloc(nullptr, 16, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
 	if (!tramp) {
 		return false;

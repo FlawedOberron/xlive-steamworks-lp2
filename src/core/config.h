@@ -51,6 +51,8 @@ struct Config {
 	bool restartAppIfNecessary = false; // SteamAPI_RestartAppIfNecessary(appId) before init.
 	bool requireSteam = true;           // false = keep running signed-out when Steam is absent.
 	bool steamShutdownApi = true;       // SteamAPI_Shutdown on XLiveUninitialize when no peer was ever addressed.
+	uint32_t networkAppId = 0;          // lobbies and peers as this app (480: with disc copies) through xlive_relay.exe;
+	                                    // 0 or the process's own app = directly
 
 	// Title identity.
 	uint32_t titleId = 0;               // 0 = from the SPA.
@@ -86,6 +88,7 @@ struct Config {
 	// Presence.
 	std::string richPresenceKey = "status";
 	bool richPresenceSteamDisplay = true;
+	std::vector<std::string> compatibleVersions; // "sessions": {"compatible_versions"}: game versions ("1.000", "1.100") that all match each other (mods/versions.cpp).
 	uint32_t startWaitSeconds = 180;    // "sessions": {"start_wait_seconds"}: how long a match start waits for players still downloading maps/parts.
 	bool updateAuto = true;             // "update": {"auto": false}: no self-update from GitHub releases (update.cpp).
 	bool discordEnabled = true;         // "discord": {"enabled": false} turns Discord rich presence off.

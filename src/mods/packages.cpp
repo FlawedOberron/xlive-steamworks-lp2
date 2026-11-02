@@ -50,9 +50,12 @@ const char* const kCacheVersion = "lp2-maps 3";
 // Largest map package we download from another player.
 const uint64_t kMaxMapDownload = 512ull << 20;
 
+// A slot's package: light (picked in the menu: its name, picture, base, size; files listed, not unpacked) or full
+// (unpacked for a match: in a lobby, or when the game opens one of its files).
 struct Binding {
 	int package = -1;                                   // index into g_all, -1 = empty
-	std::unordered_map<std::wstring, std::wstring> files; // lower game-relative path -> cache file
+	bool full = false;
+	std::unordered_map<std::wstring, std::wstring> files; // lower game-relative path -> cache file ("" while light)
 	std::wstring thumbnail;
 };
 
@@ -63,6 +66,7 @@ Binding g_bind[2];              // per kSlots entry
 int g_default[2] = {-1, -1};    // what each slot holds outside other players' lobbies
 std::atomic<bool> g_bound[2];
 std::atomic<int> g_picked{-1};  // picked in create match, bound by the sync thread (unpacking takes a while)
+std::atomic<DWORD> g_pickedAt{0}; // when: a pick is bound once left alone a moment, not every map scrolled past
 std::map<uint64_t, std::string> g_memberMaps; // member -> their "maps" member data
 std::map<uint64_t, std::string> g_memberNames; // member -> their "mapnames" member data
 std::atomic<uint64_t> g_lobbyHost{0};          // another player's lobby we're in (0: none / our own)
@@ -72,6 +76,11 @@ std::map<std::string, DWORD> g_failed;         // hash -> when its download fail
 std::mutex g_generatedMutex;
 std::map<std::wstring, std::wstring> g_generated; // lower game-relative path + "|" + version -> generated file
 std::atomic<int> g_generation{0};                  // bumped on every rebind (names / thumbnails change)
+std::atomic<bool> g_picDirty[2];                   // a rebind since the slot's picture was last written (mappics.cpp)
+std::mutex g_stockPicsMutex;
+Bytes g_stockPics[14];                              // the stock create-match pictures (ID221_SC00 .. SC13), once seen
+std::mutex g_unpackMutex;                           // one unpack at a time (the sync thread, the game's loader); never take g_mutex under it
+std::atomic<bool> g_unpacking{false};               // our lobby's map being unpacked: match starts wait
 
 std::wstring LowerPath(std::wstring s)
 {
@@ -138,6 +147,27 @@ std::string HashFile(const std::wstring& path)
 	}
 	CloseHandle(f);
 	return FormatA("%016llx", (unsigned long long)h);
+}
+
+// HashFile, remembered by file name, size and time (ModCache\maps\hashes.txt): the zips aren't read through on
+// every start.
+std::string CachedHash(const std::wstring& path, const std::wstring& name, std::map<std::wstring, std::string>* cache, bool* changed)
+{
+	WIN32_FILE_ATTRIBUTE_DATA a;
+	if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &a)) {
+		return std::string();
+	}
+	std::wstring key = FormatW(L"%lu.%lu.%lu.%lu|", a.nFileSizeHigh, a.nFileSizeLow, a.ftLastWriteTime.dwHighDateTime, a.ftLastWriteTime.dwLowDateTime) + LowerPath(name);
+	auto it = cache->find(key);
+	if (it != cache->end()) {
+		return it->second;
+	}
+	std::string hash = HashFile(path);
+	if (!hash.empty()) {
+		(*cache)[key] = hash;
+		*changed = true;
+	}
+	return hash;
 }
 
 std::string Stamp(const MapPackage& map, int slot)
@@ -250,6 +280,251 @@ bool ReadManifest(const Zip& zip, const std::wstring& label, MapPackage* map)
 			XLS_LOG_WARN("mods: map %ls: preload entry \"%s\" skipped (an archive name in arcLp2Xml\\autoArc).", label.c_str(), arc.c_str());
 		}
 	}
+	map->physics = MapPhysics();
+	bool lowGravity = root["low_gravity"].GetBool(false);
+	map->physics.jumpPacks = root["jump_packs"].GetBool(false) || lowGravity;
+	map->physics.underwater = root["underwater"].GetBool(false);
+	map->physics.gravity = (float)root["gravity"].GetNumber(1.0) * (lowGravity ? 0.3f : 1.0f);
+	for (const Json& e : root["gravity_volumes"].Elements()) {
+		GravityVolume v;
+		bool ok = e["min"].Elements().size() == 3 && e["max"].Elements().size() == 3;
+		for (int i = 0; ok && i < 3; i++) {
+			v.min[i] = (float)e["min"].Elements()[i].GetNumber(0.0);
+			v.max[i] = (float)e["max"].Elements()[i].GetNumber(0.0);
+		}
+		v.gravity = (float)e["gravity"].GetNumber(1.0);
+		SetTurn(v.turn, e["yaw"].GetNumber(0.0));
+		v.sid = (int)e["sid"].GetInt(-1);
+		if (ok) {
+			map->physics.volumes.push_back(v);
+		}
+	}
+	for (const Json& e : root["water_volumes"].Elements()) {
+		WaterVolume v;
+		bool ok = e["min"].Elements().size() == 3 && e["max"].Elements().size() == 3;
+		for (int i = 0; ok && i < 3; i++) {
+			v.min[i] = (float)e["min"].Elements()[i].GetNumber(0.0);
+			v.max[i] = (float)e["max"].Elements()[i].GetNumber(0.0);
+		}
+		SetTurn(v.turn, e["yaw"].GetNumber(0.0));
+		v.sid = (int)e["sid"].GetInt(-1);
+		if (ok) {
+			map->physics.water.push_back(v);
+		}
+	}
+	for (const Json& e : root["damage_volumes"].Elements()) {
+		DamageVolume v;
+		bool ok = e["min"].Elements().size() == 3 && e["max"].Elements().size() == 3;
+		for (int i = 0; ok && i < 3; i++) {
+			v.min[i] = (float)e["min"].Elements()[i].GetNumber(0.0);
+			v.max[i] = (float)e["max"].Elements()[i].GetNumber(0.0);
+		}
+		v.player = (float)e["player"].GetNumber(0.0);
+		v.vs = (float)e["vs"].GetNumber(0.0);
+		v.playerKill = e["player_kill"].GetBool(false);
+		v.vsKill = e["vs_kill"].GetBool(false);
+		SetTurn(v.turn, e["yaw"].GetNumber(0.0));
+		v.sid = (int)e["sid"].GetInt(-1);
+		if (ok) {
+			map->physics.damage.push_back(v);
+		}
+	}
+	for (const Json& e : root["oneway_volumes"].Elements()) {
+		OnewayVolume v;
+		bool ok = e["min"].Elements().size() == 3 && e["max"].Elements().size() == 3;
+		for (int i = 0; ok && i < 3; i++) {
+			v.min[i] = (float)e["min"].Elements()[i].GetNumber(0.0);
+			v.max[i] = (float)e["max"].Elements()[i].GetNumber(0.0);
+		}
+		const char* names[] = {"players", "vs", "bullets", "grenades", "akrid"};
+		for (int i = 0; i < 5; i++) {
+			v.flags |= e[names[i]].GetBool(false) ? 1 << i : 0;
+		}
+		SetTurn(v.turn, e["yaw"].GetNumber(0.0));
+		v.sid = (int)e["sid"].GetInt(-1);
+		if (ok && v.flags) {
+			map->physics.oneway.push_back(v);
+		}
+	}
+	for (const Json& e : root["post_volumes"].Elements()) {
+		PostVolume v;
+		bool ok = e["min"].Elements().size() == 3 && e["max"].Elements().size() == 3;
+		for (int i = 0; ok && i < 3; i++) {
+			v.min[i] = (float)e["min"].Elements()[i].GetNumber(0.0);
+			v.max[i] = (float)e["max"].Elements()[i].GetNumber(0.0);
+			v.tint[i] = i < (int)e["tint"].Elements().size() ? (float)e["tint"].Elements()[i].GetNumber(1.0) : 1.0f;
+		}
+		v.brightness = (float)e["brightness"].GetNumber(1.0);
+		v.saturation = (float)e["saturation"].GetNumber(1.0);
+		v.contrast = (float)e["contrast"].GetNumber(1.0);
+		v.fade = (float)e["fade"].GetNumber(0.5);   // packages from before "fade"
+		SetTurn(v.turn, e["yaw"].GetNumber(0.0));
+		v.sid = (int)e["sid"].GetInt(-1);
+		if (ok) {
+			map->physics.post.push_back(v);
+		}
+	}
+	ScriptGraph& sc = map->physics.script;
+	const Json& js = root["script"];
+	sc.volumes = (int)js["volumes"].GetInt(0);
+	sc.vars = (int)js["vars"].GetInt(0);
+	for (const Json& e : js["start_off"].Elements()) {
+		sc.startOff.push_back((int)e.GetInt(-1));
+	}
+	for (const Json& e : js["var_names"].Elements()) {
+		sc.varNames.push_back(e.GetString(std::string()));
+	}
+	for (const Json& e : js["var_kinds"].Elements()) {
+		std::string k = e.GetString(std::string());
+		sc.varKinds.push_back(k == "player" ? kVarPlayer : k == "list" ? kVarList : k == "marker" ? kVarMarker
+			: k == "markers" ? kVarMarkers : k == "vector" ? kVarVector : kVarNumber);
+	}
+	auto operand = [](const Json& j) {
+		ScriptOperand o;
+		if (j.IsObject()) {
+			o.var = (int)j["var"].GetInt(-1);
+		}
+		else {
+			o.num = (float)j.GetNumber(0.0);
+		}
+		return o;
+	};
+	std::vector<std::vector<std::pair<int, std::string>>> ins; // per node, per output port: (target, its input name)
+	for (const Json& e : js["nodes"].Elements()) {
+		ScriptNode n;
+		std::string type = e["type"].GetString(std::string());
+		n.type = -1;
+		for (int t = 0; t < kScriptTypes; t++) {
+			if (type == kScriptTypeInfo[t].name) {
+				n.type = t;
+			}
+		}
+		if (n.type < 0) {
+			XLS_LOG_WARN("mods: map %ls: script node type \"%s\" unknown (a newer editor?): it does nothing.", label.c_str(), type.c_str());
+			n.type = kScriptLog;
+		}
+		n.sid = (int)e["sid"].GetInt(-1);
+		std::string who = e["who"].GetString("any");
+		n.who = who == "player" ? 1 : who == "vs" ? 2 : 0;
+		n.var = (int)e["var"].GetInt(-1);
+		n.toggle = e["toggle"].GetBool(false);
+		if (n.type == kScriptSet && !e.Has("a") && !n.toggle) {   // older maps: "value" on / off / toggle
+			std::string value = e["value"].GetString("toggle");
+			n.toggle = value == "toggle";
+			n.a.num = value == "on" ? 1.0f : 0.0f;
+		}
+		n.a = e.Has("a") ? operand(e["a"]) : n.a;
+		n.b = operand(e["b"]);
+		std::string op = e["op"].GetString("+");
+		for (int k = 0; k < kOps; k++) {
+			if (op == kScriptOps[k]) {
+				n.op = k;
+			}
+		}
+		std::string setting = e["setting"].GetString(std::string());
+		for (int k = 0; k < kSettings; k++) {
+			if (setting == kScriptSettings[k]) {
+				n.setting = k;
+			}
+		}
+		n.integer = e["integer"].GetBool(false);
+		n.player = (int)e["player"].GetInt(-1);
+		n.list = (int)e["list"].GetInt(-1);
+		n.random = e["random"].GetBool(false);
+		n.spawnKind = e["kind"].GetString("weapon") == "vs" ? 2 : 4;
+		n.marker = (int)e["marker"].GetInt(-1);
+		n.face = e["face"].GetBool(true);
+		for (const Json& c : e["cases"].Elements()) {
+			n.cases.push_back((float)c.GetNumber(0.0));
+		}
+		for (const Json& k : e["items"].Elements()) {
+			n.items.push_back((int)k.GetInt(-1));
+		}
+		auto pick = [](const std::string& v, const char* const* names, int count, int fallback) {
+			for (int k = 0; k < count; k++) {
+				if (v == names[k]) {
+					return k;
+				}
+			}
+			return fallback;
+		};
+		n.check = pick(e["check"].GetString(std::string()), kScriptChecks, kChecks, kCheckGone);
+		n.stat = pick(e["stat"].GetString(std::string()), kScriptStats, kStats, kStatHealth);
+		n.action = pick(e["action"].GetString(std::string()), kScriptActions, kActions, kActDamage);
+		n.vec = (int)e["vec"].GetInt(-1);
+		n.fromMarker = e["from"].GetString("player") == "marker";
+		n.vecOp = pick(e["vecop"].GetString(std::string()), kScriptVecOps, kVecOps, kVecAdd);
+		n.target = (int)e["target"].GetInt(1);
+		n.seconds = (float)e["seconds"].GetNumber(n.type == kScriptSetValue ? 0.0 : 1.0);
+		n.maxSeconds = (float)e["max_seconds"].GetNumber(0.0);
+		n.repeat = e["repeat"].GetBool(false);
+		n.autostart = e["autostart"].GetBool(false);
+		n.text = e["text"].GetString(std::string());
+		ins.emplace_back();
+		for (const auto& port : e["out"].Items()) {
+			for (int k = 0; k < kScriptOuts; k++) {
+				const char* name = kScriptTypeInfo[n.type].outs[k];
+				if (!name || port.first != name) {
+					continue;
+				}
+				for (const Json& l : port.second.Elements()) {
+					n.out[k].push_back({(int)l.At(0).GetInt(-1), -1});
+					ins.back().emplace_back(k, l.At(1).GetString(std::string()));
+				}
+			}
+		}
+		sc.nodes.push_back(n);
+	}
+	// links' input ports by name, from their target's type
+	for (size_t i = 0; i < sc.nodes.size(); i++) {
+		ScriptNode& n = sc.nodes[i];
+		std::vector<ScriptLink> out[kScriptOuts];
+		size_t at[kScriptOuts] = {};
+		for (const auto& in : ins[i]) {
+			ScriptLink link = n.out[in.first][at[in.first]++];
+			if (link.node < 0 || link.node >= (int)sc.nodes.size()) {
+				continue;
+			}
+			const ScriptTypeInfo& t = kScriptTypeInfo[sc.nodes[link.node].type];
+			for (int k = 0; k < kScriptIns; k++) {
+				if (t.ins[k] && in.second == t.ins[k]) {
+					link.in = k;
+				}
+			}
+			if (link.in >= 0) {
+				out[in.first].push_back(link);
+			}
+		}
+		for (int k = 0; k < kScriptOuts; k++) {
+			n.out[k] = out[k];
+		}
+	}
+	for (const Json& e : root["script_volumes"].Elements()) {
+		ScriptBox b;
+		bool ok = e["min"].Elements().size() == 3 && e["max"].Elements().size() == 3;
+		for (int i = 0; ok && i < 3; i++) {
+			b.min[i] = (float)e["min"].Elements()[i].GetNumber(0.0);
+			b.max[i] = (float)e["max"].Elements()[i].GetNumber(0.0);
+		}
+		SetTurn(b.turn, e["yaw"].GetNumber(0.0));
+		b.sid = (int)e["sid"].GetInt(-1);
+		if (ok && b.sid >= 0) {
+			sc.boxes.push_back(b);
+		}
+	}
+	for (const Json& e : root["script_markers"].Elements()) {
+		ScriptMarker m;
+		m.name = e["name"].GetString(std::string());
+		for (char& c : m.name) {
+			c = (char)tolower((unsigned char)c);
+		}
+		for (int i = 0; i < 3; i++) {
+			m.pos[i] = (float)e["pos"].At(i).GetNumber(0.0);
+			m.size[i] = (float)e["size"].At(i).GetNumber(100.0);
+		}
+		m.yaw = (float)e["yaw"].GetNumber(0.0);
+		sc.markers.push_back(m);
+	}
 	std::string size = root["size"].GetString(std::string());
 	map->size = size == "small" ? 0 : size == "medium" ? 1 : size == "large" ? 2 : -1;
 	if (map->number < 0 || map->number > 99 || map->base < 0 || map->base > 15) {
@@ -259,11 +534,16 @@ bool ReadManifest(const Zip& zip, const std::wstring& label, MapPackage* map)
 	return true;
 }
 
-// Unpacks (if stale) and indexes package i for slot.
-bool Prepare(int i, int slot, Binding* out)
+std::wstring UnpackDir(const MapPackage& map, int slot)
 {
-	const MapPackage& map = g_all[i];
-	std::wstring dir = Cfg().modCacheDir + L"maps\\" + map.package + FormatW(L"\\s%d\\", slot);
+	return Cfg().modCacheDir + L"maps\\" + map.package + FormatW(L"\\s%d\\", slot);
+}
+
+// Unpacks the package for slot unless that's done already.
+bool Unpacked(const MapPackage& map, int slot)
+{
+	std::lock_guard<std::mutex> unpacking(g_unpackMutex);
+	std::wstring dir = UnpackDir(map, slot);
 	std::string stamp = Stamp(map, slot);
 	Bytes old;
 	if (!(ReadWholeFile(dir + L"stamp.txt", &old) && std::string(old.begin(), old.end()) == stamp)) {
@@ -273,33 +553,80 @@ bool Prepare(int i, int slot, Binding* out)
 		}
 		WriteWholeFile(dir + L"stamp.txt", Bytes(stamp.begin(), stamp.end()));
 	}
+	return true;
+}
+
+// Unpacks (if stale) and indexes package i for slot.
+bool Prepare(int i, int slot, Binding* out)
+{
+	const MapPackage& map = g_all[i];
+	std::wstring dir = UnpackDir(map, slot);
+	if (!Unpacked(map, slot)) {
+		return false;
+	}
 	out->package = i;
+	out->full = true;
 	out->files.clear();
 	IndexTree(dir, L"nativePC\\", &out->files); // keys are nativepc\..., like the overlay's
 	out->thumbnail = GetFileAttributesW((dir + L"thumbnail.rTexture").c_str()) != INVALID_FILE_ATTRIBUTES ? dir + L"thumbnail.rTexture" : std::wstring();
 	return true;
 }
 
+// Package i's names and thumbnail for slot, without unpacking: the thumbnail alone into the package's cache folder.
+bool Light(int i, int slot, Binding* out)
+{
+	const MapPackage& map = g_all[i];
+	Zip zip;
+	if (!zip.Open(map.zip)) {
+		XLS_LOG_WARN("mods: map %ls: cannot read the package.", map.package.c_str());
+		return false;
+	}
+	out->package = i;
+	out->full = false;
+	out->files.clear();
+	out->thumbnail.clear();
+	for (const ZipEntry& e : zip.Entries()) {
+		if (_strnicmp(e.name.c_str(), "nativePC/", 9) == 0 && SafeEntryName(e.name)) {
+			out->files[LowerPath(Utf8ToWide(RenumberName(e.name, map.number, slot).c_str()))] = std::wstring();
+		}
+	}
+	if (const ZipEntry* e = zip.Find("thumbnail.rTexture")) {
+		std::wstring thumb = Cfg().modCacheDir + L"maps\\" + map.package + L"\\thumb-" + Utf8ToWide(map.hash.c_str()) + L".rTexture";
+		Bytes data;
+		if (GetFileAttributesW(thumb.c_str()) != INVALID_FILE_ATTRIBUTES || (zip.Read(*e, &data) && WriteWholeFile(thumb, data))) {
+			out->thumbnail = thumb;
+		}
+	}
+	return !out->files.empty();
+}
+
 void PublishMaps();
 
-// Binds package i (-1 = none) to slot k. Only between matches: an area being played keeps the
+// Binds package i (-1 = none) to slot k, light or full (a light binding of the same package is made full). Only between matches: an area being played keeps the
 // files it has open, but loads after this see the new package.
-bool Bind(int k, int i, const char* why)
+bool Bind(int k, int i, const char* why, bool full)
 {
 	std::lock_guard<std::recursive_mutex> lock(g_mutex);
-	if (g_bind[k].package == i) {
+	if (g_bind[k].package == i && (g_bind[k].full || !full || i < 0)) {
 		return true;
 	}
 	Binding b;
-	if (i >= 0 && !Prepare(i, kSlots[k], &b)) {
+	if (i >= 0 && !(full ? Prepare(i, kSlots[k], &b) : Light(i, kSlots[k], &b))) {
 		return false;
+	}
+	if (g_bind[k].package == i) {
+		g_bind[k] = std::move(b);
+		XLS_LOG_INFO("mods: map \"%s\" unpacked for online slot %d (%s).", g_all[i].name.c_str(), kSlots[k], why);
+		return true;
 	}
 	g_bind[k] = std::move(b);
 	g_bound[k] = i >= 0;
 	g_generation++;
+	g_picDirty[k] = true;
 	if (i >= 0) {
 		MapsRebind(kSlots[k], g_all[i].base, g_all[i].size, g_all[i].preload);
-		XLS_LOG_INFO("mods: map \"%s\" (%ls, %s) in online slot %d (%s).", g_all[i].name.c_str(), g_all[i].package.c_str(), g_all[i].hash.c_str(), kSlots[k], why);
+		XLS_LOG_INFO("mods: map \"%s\" (%ls, %s) in online slot %d (%s%s).", g_all[i].name.c_str(), g_all[i].package.c_str(), g_all[i].hash.c_str(), kSlots[k], why,
+		             g_bind[k].full ? ", unpacked" : "");
 	}
 	else {
 		XLS_LOG_INFO("mods: online slot %d emptied (%s).", kSlots[k], why);
@@ -320,6 +647,22 @@ int FindHash(const std::string& hash)
 
 void LoadMaps()
 {
+	std::map<std::wstring, std::string> hashes;
+	bool hashesChanged = false;
+	std::wstring hashesFile = Cfg().modCacheDir + L"maps\\hashes.txt";
+	Bytes saved;
+	if (ReadWholeFile(hashesFile, &saved)) {
+		std::string text(saved.begin(), saved.end());
+		for (size_t at = 0; at < text.size();) {
+			size_t end = text.find('\n', at);
+			std::string line = text.substr(at, end == std::string::npos ? std::string::npos : end - at);
+			size_t space = line.find(' ');
+			if (space == 16) {
+				hashes[Utf8ToWide(line.substr(17).c_str())] = line.substr(0, 16);
+			}
+			at = end == std::string::npos ? text.size() : end + 1;
+		}
+	}
 	for (const std::wstring& file : ListFiles(Cfg().mapsDir, L"*.zip")) {
 		MapPackage map;
 		map.package = file.substr(0, file.size() - 4);
@@ -328,7 +671,10 @@ void LoadMaps()
 		if (!zip.Open(map.zip) || !ReadManifest(zip, file, &map)) {
 			continue;
 		}
-		map.hash = HashFile(map.zip);
+		map.hash = CachedHash(map.zip, file, &hashes, &hashesChanged);
+		if (map.hash.empty()) {
+			continue;
+		}
 		if (FindHash(map.hash) >= 0) {
 			XLS_LOG_WARN("mods: map %ls is a copy of %ls, skipped.", file.c_str(), g_all[FindHash(map.hash)].package.c_str());
 			continue;
@@ -349,9 +695,15 @@ void LoadMaps()
 			g_all.push_back(map);
 		}
 	}
+	if (hashesChanged) {
+		std::string text;
+		for (const auto& h : hashes) {
+			text += h.second + " " + WideToUtf8(h.first.c_str()) + "\n";
+		}
+		WriteWholeFile(hashesFile, Bytes(text.begin(), text.end()));
+	}
 	// slot 13 holds the last package picked in create match (or the first one); 14 only the hosts'
 	std::string last;
-	Bytes saved;
 	if (ReadWholeFile(Cfg().modCacheDir + L"maps\\last.txt", &saved)) {
 		last.assign(saved.begin(), saved.end());
 		last = last.substr(0, last.find_first_of("\r\n "));
@@ -363,7 +715,7 @@ void LoadMaps()
 			pick = g_all[i].remote ? -1 : (int)i;
 		}
 	}
-	if (pick >= 0 && Bind(0, pick, "default")) {
+	if (pick >= 0 && Bind(0, pick, "default", false)) {
 		g_default[0] = pick;
 	}
 }
@@ -439,7 +791,7 @@ DWORD WINAPI DownloadThread(LPVOID param)
 	return 0;
 }
 
-// Once a second: bind the lobby host's maps (or our own outside lobbies).
+// Once a second (a pick: soon after): bind the lobby host's maps (or our own outside lobbies).
 void Reconcile()
 {
 	CSteamID lobby = SessionPresenceLobby();
@@ -452,14 +804,37 @@ void Reconcile()
 	if (inGame) {
 		return; // never swap files under a running match
 	}
+	// our own lobby: the map unpacked for the match; in the menu only its name and picture (light)
+	bool full = lobby.IsValid();
+	if (!host || host == SteamLocalId().ConvertToUint64()) {
+		int picked = g_picked;
+		if (picked >= 0 && GetTickCount() - g_pickedAt < 300) {
+			return; // still scrolling
+		}
+		// unzip before taking the lock: the menu asks for names (under it) every frame
+		MapPackage want;
+		bool unzip = false;
+		{
+			std::lock_guard<std::recursive_mutex> lock(g_mutex);
+			if (full && g_default[0] >= 0 && !(g_bind[0].package == g_default[0] && g_bind[0].full)) {
+				want = g_all[g_default[0]];
+				unzip = true;
+			}
+		}
+		if (unzip) {
+			g_unpacking = true;
+			Unpacked(want, kSlots[0]);
+		}
+	}
 	std::lock_guard<std::recursive_mutex> lock(g_mutex);
 	g_unbound = false;
 	if (!host || host == SteamLocalId().ConvertToUint64()) {
 		int picked = g_picked;
 		bool ok = true;
 		for (int k = 0; k < 2; k++) {
-			ok &= Bind(k, g_default[k], picked >= 0 && k == 0 ? "picked" : "own maps") || k;
+			ok &= Bind(k, g_default[k], picked >= 0 && k == 0 ? "picked" : "own maps", full) || k;
 		}
+		g_unpacking = false;
 		if (picked >= 0 && (g_bind[0].package == picked || !ok)) { // a pick that fails to unpack doesn't hold match starts
 			const std::string& hash = g_all[picked].hash;
 			WriteWholeFile(Cfg().modCacheDir + L"maps\\last.txt", Bytes(hash.begin(), hash.end()));
@@ -487,12 +862,17 @@ void Reconcile()
 		}
 		int i = FindHash(want);
 		if (i >= 0) {
-			Bind(k, i, "the host's");
+			Bind(k, i, "the host's", true);
 			continue;
 		}
 		auto failed = g_failed.find(want);
 		if (failed != g_failed.end() && GetTickCount() - failed->second < 30000) {
-			continue; // not holding match starts for a map we can't get
+			// not holding match starts for a map we can't get, unless the slot has nothing at all (the game would
+			// fail to open its files): then wait for the retry
+			if (g_bind[k].package < 0) {
+				g_unbound = true;
+			}
+			continue;
 		}
 		g_failed.erase(want);
 		g_unbound = true;
@@ -506,11 +886,46 @@ void Reconcile()
 	}
 }
 
+// A rebound slot's picture into the loaded one (it stays loaded once shown): its thumbnail, else its base map's.
+// Outside g_mutex: the game's resource lock is taken in there.
+void WritePictures()
+{
+	for (int k = 0; k < 2; k++) {
+		if (!g_picDirty[k].exchange(false)) {
+			continue;
+		}
+		std::wstring thumb;
+		int base = -1;
+		{
+			std::lock_guard<std::recursive_mutex> lock(g_mutex);
+			if (g_bind[k].package < 0) {
+				continue;
+			}
+			thumb = g_bind[k].thumbnail;
+			int b = g_all[g_bind[k].package].base;
+			base = b <= 12 ? b : b == 15 ? 13 : 0;
+		}
+		Bytes pic;
+		{
+			std::lock_guard<std::mutex> lock(g_stockPicsMutex);
+			if (g_stockPics[13].empty()) {
+				XLS_LOG_INFO("mods: maps: picture of slot %d: the menu pictures aren't loaded yet.", kSlots[k]);
+				continue; // they'll load the slot's own
+			}
+			if (thumb.empty() || !ReadWholeFile(thumb, &pic) || pic.size() != g_stockPics[13].size()) {
+				pic = g_stockPics[base];
+			}
+		}
+		MapPicsUpdate(k, pic);
+	}
+}
+
 DWORD WINAPI SyncThread(LPVOID)
 {
 	for (;;) {
-		Sleep(1000);
+		Sleep(g_picked >= 0 ? 250 : 1000); // a pick waiting: soon after scrolling stops
 		Reconcile();
+		WritePictures();
 	}
 }
 
@@ -615,7 +1030,7 @@ void Load()
 	xls::ContentAddPending([] {
 		std::lock_guard<std::recursive_mutex> lock(g_mutex);
 		// unbound: about to start one; picked: our pick isn't bound yet
-		return (int)g_downloading.size() + (g_unbound && g_downloading.empty()) + (g_picked >= 0);
+		return (int)g_downloading.size() + (g_unbound && g_downloading.empty()) + (g_picked >= 0) + (int)g_unpacking;
 	});
 	xls::MemberDataListen("maps", [](uint64_t steamId, XUID, const std::string& value) {
 		std::lock_guard<std::recursive_mutex> lock(g_mutex);
@@ -658,6 +1073,83 @@ bool GenerateNames(const std::wstring& source, const std::wstring& out)
 	return changed && WriteWholeFile(out, ArcWrite(entries));
 }
 
+// An archive's own list (rArchive 'ARCS': u16 8, u16 count, count x (name hash, class hash)): the name hash is the
+// lowercased name's crc32 register (zlib's crc32 ^ ~0, all 32 bits, unlike ClassHash).
+uint32_t NameHash(const std::string& name)
+{
+	uint32_t crc = 0xffffffff;
+	for (char c : name) {
+		crc ^= (uint8_t)tolower((unsigned char)c);
+		for (int k = 0; k < 8; k++) {
+			crc = crc & 1 ? (crc >> 1) ^ 0xedb88320 : crc >> 1;
+		}
+	}
+	return crc;
+}
+
+// The mod slots' create-match pictures (the Flash's frames 15 / 16 show ID221_SC14_ID / SC15_ID, thumbflash.cpp):
+// the bound map's thumbnail.rTexture, else its base map's stock picture, beside the stock ones (in archives that
+// have them), and in the archive's list.
+void AddMapPictures(std::vector<ArcEntry>* entries)
+{
+	const ArcEntry* stock[14] = {};
+	std::string dir;
+	for (const ArcEntry& e : *entries) {
+		size_t at = e.name.find_last_of('\\');
+		int n = -1;
+		if (at != std::string::npos && sscanf(e.name.c_str() + at + 1, "ID221_SC%d_ID", &n) == 1 && n >= 0 && n < 14) {
+			stock[n] = &e;
+			dir = e.name.substr(0, at + 1);
+		}
+	}
+	if (!stock[13]) {
+		return;
+	}
+	{
+		std::lock_guard<std::mutex> lock(g_stockPicsMutex);
+		for (int n = 0; n < 14; n++) {
+			if (stock[n] && g_stockPics[n].empty()) {
+				g_stockPics[n] = stock[n]->data;
+			}
+		}
+	}
+	std::vector<MapPackage> maps = PackageMaps();
+	std::vector<ArcEntry> add;
+	for (int k = 0; k < 2; k++) {
+		int slot = 13 + k;
+		ArcEntry e = *stock[13];
+		e.name = dir + (k ? "ID221_SC15_ID" : "ID221_SC14_ID");
+		for (const MapPackage& m : maps) {
+			if (m.slot != slot) {
+				continue;
+			}
+			Bytes thumb;
+			int base = m.base <= 12 ? m.base : m.base == 15 ? 13 : 0;   // the stock picture of frame base + 2
+			if (!m.thumbnail.empty() && ReadWholeFile(m.thumbnail, &thumb) && thumb.size() == stock[13]->data.size()) {
+				e.data = thumb;
+			} else if (stock[base]) {
+				e.data = stock[base]->data;
+			}
+		}
+		add.push_back(e);
+	}
+	for (ArcEntry& e : *entries) {
+		if (e.data.size() >= 8 && memcmp(e.data.data(), "ARCS", 4) == 0 && e.name.size() >= 5
+				&& _stricmp(e.name.c_str() + e.name.size() - 5, "id221") == 0) {
+			uint16_t count = (uint16_t)(e.data[6] | e.data[7] << 8);
+			for (const ArcEntry& a : add) {
+				uint32_t h[2] = {NameHash(a.name), a.classHash};
+				const uint8_t* p = (const uint8_t*)h;
+				e.data.insert(e.data.end(), p, p + 8);
+				count++;
+			}
+			e.data[6] = (uint8_t)count;
+			e.data[7] = (uint8_t)(count >> 8);
+		}
+	}
+	entries->insert(entries->end(), add.begin(), add.end());
+}
+
 // The menus with our rows added to their Flash: create match (flash\playermatch\id221, rule rows),
 // training (flash\training\id300, AI Enemy Battle rows) and Options (flash\option\id500_PC, the
 // Network entry), in whichever archive carries them.
@@ -668,7 +1160,7 @@ bool GenerateMenus(const std::wstring& source, const std::wstring& out)
 	if (!ReadWholeFile(source, &file) || !ArcRead(file, &entries)) {
 		return false;
 	}
-	bool changed = false;
+	bool changed = false, pictures = false;
 	for (ArcEntry& e : entries) {
 		size_t at = e.name.find_last_of('\\');
 		const char* name = e.name.c_str() + (at == std::string::npos ? 0 : at + 1);
@@ -677,53 +1169,42 @@ bool GenerateMenus(const std::wstring& source, const std::wstring& out)
 		}
 		if (_stricmp(name, "id221") == 0) {
 			changed |= RulesPatchMenuFlash(&e.data);
+			int r = ThumbsPatchMenuFlash(&e.data);
+			if (r < 0) {
+				XLS_LOG_WARN("mods: maps: the create-match Flash isn't laid out as expected, no mod map pictures.");
+			}
+			pictures |= r > 0;
+			changed |= r > 0;
 		} else if (_stricmp(name, "id300") == 0) {
 			changed |= RulesPatchTrainingFlash(&e.data);
 		} else if (_stricmp(name, "id500_PC") == 0) {
 			changed |= NetMenuPatchFlash(&e.data);
 		}
 	}
+	if (pictures) {
+		AddMapPictures(&entries);
+	}
 	return changed && WriteWholeFile(out, ArcWrite(entries));
 }
 
-// The create-match pictures of the bound maps that ship a thumbnail, for aBattlePlayerCreate.arc.
-// NOT YET: the picture is the id221 Flash's mc_monitor frame map + 2, and the frames for 13 / 14 are
-// empty (the 14 pictures ID221_SC00..SC13 are maps 0-12 and 15: SC13 is Frozen Wasteland's), so a
-// thumbnail needs those frames given a picture in the Flash; until then nothing is replaced.
-bool GenerateThumbnails(const std::wstring& source, const std::wstring& out)
-{
-	if (source.size() || out.size()) {
-		return false;
-	}
-	Bytes file;
-	std::vector<ArcEntry> entries;
-	if (!ReadWholeFile(source, &file) || !ArcRead(file, &entries)) {
-		return false;
-	}
-	bool changed = false;
-	for (const MapPackage& m : PackageMaps()) {
-		Bytes thumb;
-		if (m.thumbnail.empty() || !ReadWholeFile(m.thumbnail, &thumb)) {
-			continue;
-		}
-		char want[32];
-		snprintf(want, sizeof(want), "ID221_SC%02d_ID", m.slot);
-		for (ArcEntry& e : entries) {
-			size_t at = e.name.find_last_of('\\');
-			if (_stricmp(e.name.c_str() + (at == std::string::npos ? 0 : at + 1), want) == 0) {
-				e.data = thumb;
-				changed = true;
-			}
-		}
-	}
-	return changed && WriteWholeFile(out, ArcWrite(entries));
-}
 
 }
 
 void PackagesLoad()
 {
 	std::call_once(g_once, Load);
+}
+
+bool PackagesSlotPhysics(int slot, MapPhysics* out)
+{
+	std::lock_guard<std::recursive_mutex> lock(g_mutex);
+	for (int k = 0; k < 2; k++) {
+		if (kSlots[k] == slot && g_bind[k].package >= 0) {
+			*out = g_all[g_bind[k].package].physics;
+			return true;
+		}
+	}
+	return false;
 }
 
 std::vector<MapPackage> PackageMaps()
@@ -758,6 +1239,7 @@ bool PackagesPick(int step, bool enter)
 		return false;
 	}
 	g_default[0] = own[next];
+	g_pickedAt = GetTickCount();
 	g_picked = own[next];
 	return true;
 }
@@ -815,12 +1297,39 @@ bool PackagesSlotBound(int slot)
 bool PackagesMapFile(const std::wstring& rel, std::wstring* out)
 {
 	PackagesLoad();
-	std::lock_guard<std::recursive_mutex> lock(g_mutex);
-	for (const Binding& b : g_bind) {
-		auto it = b.files.find(rel);
-		if (it != b.files.end()) {
-			*out = it->second;
-			return true;
+	for (int attempt = 0; attempt < 2; attempt++) {
+		int light = -1;
+		MapPackage map;
+		{
+			std::lock_guard<std::recursive_mutex> lock(g_mutex);
+			for (int k = 0; k < 2; k++) {
+				auto it = g_bind[k].files.find(rel);
+				if (it == g_bind[k].files.end()) {
+					continue;
+				}
+				if (!it->second.empty()) {
+					*out = it->second;
+					return true;
+				}
+				light = k;
+				map = g_all[g_bind[k].package];
+			}
+		}
+		if (light < 0 || attempt > 0) {
+			return false;
+		}
+		// a light binding's file (a load outside our lobby: training, or before the sync thread got to it): unpacked now
+		XLS_LOG_INFO("mods: map \"%s\": the game opens %ls; unpacking it now.", map.name.c_str(), rel.c_str());
+		bool ok = Unpacked(map, kSlots[light]);
+		std::lock_guard<std::recursive_mutex> lock(g_mutex);
+		int i = g_bind[light].package;
+		if (i < 0 || g_all[i].hash != map.hash) {
+			continue; // rebound meanwhile: look again
+		}
+		if (!(ok && Bind(light, i, "the game loads it", true))) {
+			XLS_LOG_WARN("mods: map \"%s\" cannot be unpacked; the base map's files are used.", map.name.c_str());
+			g_bind[light].files.clear(); // not again for every file
+			return false;
 		}
 	}
 	return false;

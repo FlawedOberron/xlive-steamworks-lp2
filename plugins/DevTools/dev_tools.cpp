@@ -1,6 +1,6 @@
 // DevTools plugin: testing aids for mod makers (devtools.json next to DevTools.dll).
 //   solo_start: a lobby host can start a Player Match alone and play it (private test box).
-//   game_log: the game's own debug messages go to xlive_steamworks.log (LP2DX11.exe only).
+//   game_log: the game's own debug messages go to xlive_steamworks.log.
 
 #include "../../sdk/lp2mod.h"
 
@@ -8,11 +8,14 @@
 
 #include <windows.h>
 
+#include <math.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
+#include <atomic>
 #include <string>
 
 #define LOG_ERROR(...) g_host->log(LP2MOD_LOG_ERROR, __VA_ARGS__)
@@ -24,6 +27,9 @@ namespace {
 const LP2ModHost* g_host = nullptr;
 bool g_soloStart = true;
 bool g_gameLog = false;
+bool g_moverTest = false;
+bool g_parentTest = false;
+bool g_conveyorTest = false;
 
 // A code patch located by byte pattern (mask 0 = wildcard) once SteamStub has decrypted .text.
 struct CodePatch {
@@ -33,7 +39,7 @@ struct CodePatch {
 	const uint8_t* mask;
 	size_t size;
 	// Where the pattern starts in the known builds (RVA), so waiting for decryption stays cheap.
-	uint32_t knownRvas[2]; // LP2DX11.exe, LP2DX9.exe
+	uint32_t knownRvas[4]; // LP2DX11.exe, LP2DX9.exe, then both 1.1
 	// Bytes to write: offset into the pattern and replacement.
 	struct Write {
 		size_t offset;
@@ -61,11 +67,11 @@ const uint8_t kSoloNetBytes[] = {0x83, 0xb8, 0x08, 0xa2, 0x00, 0x00, 0x01, 0x7f,
 const uint8_t kSoloNetMask[] = {1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1};
 
 CodePatch g_patches[] = {
-	{"solo_start", &g_soloStart, kSoloBytes, kSoloMask, sizeof(kSoloBytes), {0xa96c87, 0xa86bb7},
+	{"solo_start", &g_soloStart, kSoloBytes, kSoloMask, sizeof(kSoloBytes), {0xa96c87, 0xa86bb7, 0xa970d7, 0xa87097},
 	 {{7, {0x00}, 1}, {14, {0x00}, 1}}, 2, false},
-	{"solo_start (slots)", &g_soloStart, kSoloSlotsBytes, kSoloSlotsMask, sizeof(kSoloSlotsBytes), {0xa976c6, 0xa875f6},
+	{"solo_start (slots)", &g_soloStart, kSoloSlotsBytes, kSoloSlotsMask, sizeof(kSoloSlotsBytes), {0xa976c6, 0xa875f6, 0xa97b16, 0xa87ad6},
 	 {{11, {0xeb}, 1}}, 1, false},
-	{"solo_start (members)", &g_soloStart, kSoloNetBytes, kSoloNetMask, sizeof(kSoloNetBytes), {0xa9af70, 0xa8aea0},
+	{"solo_start (members)", &g_soloStart, kSoloNetBytes, kSoloNetMask, sizeof(kSoloNetBytes), {0xa9af70, 0xa8aea0, 0xa9b220, 0xa8b380},
 	 {{7, {0xeb}, 1}}, 1, false},
 };
 
@@ -116,8 +122,12 @@ void Apply(CodePatch& p, uint8_t* site)
 }
 
 // --- game_log: the game's debug logger (a global object whose print methods are empty stubs in
-// the retail build) is pointed at our log. DX11 only for now: logger pointer and vtable slots.
+// the retail build) is pointed at our log: logger pointer (the same in the Steam and disc DX9 exes)
+// and vtable slots.
 const uintptr_t kLoggerPtrDx11 = 0x18de398;
+const uintptr_t kLoggerPtrDx11Disc = 0x18df398; // 1.1; the DX9 builds share theirs
+const uintptr_t kLoggerPtrDx9 = 0x18ce2d8;
+uintptr_t g_loggerPtr = 0;
 const int kLoggerSlots[] = {0x20, 0x24, 0x28};
 uint8_t* g_rdataStart = nullptr;
 uint8_t* g_rdataEnd = nullptr;
@@ -173,7 +183,7 @@ bool HookGameLog(uint8_t* base)
 			g_rdataEnd = g_rdataStart + section->Misc.VirtualSize;
 		}
 	}
-	auto* logger = *(uint8_t**)kLoggerPtrDx11;
+	auto* logger = *(uint8_t**)g_loggerPtr;
 	if (!logger || !g_rdataStart) {
 		return false; // not created yet
 	}
@@ -206,7 +216,7 @@ bool HookGameLog(uint8_t* base)
 const uint8_t kViableBytes[] = {0x38, 0x8b, 0x5f, 0x02, 0x00, 0x00, 0x0f, 0x85, 0, 0, 0, 0, 0x8b, 0xcd, 0xe8, 0, 0, 0, 0, 0x8b, 0xf0, 0x85, 0xf6, 0x0f, 0x84};
 const uint8_t kViableMask[] = {1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1};
 const size_t kViableCall = 14;
-const uint32_t kViableRvas[] = {0xc0e4c0, 0xbfe0e0}; // LP2DX11.exe, LP2DX9.exe
+const uint32_t kViableRvas[] = {0xc0e4c0, 0xbfe0e0, 0xc0e7b0, 0xbfe3f0}; // LP2DX11.exe, LP2DX9.exe, then both 1.1
 using ViableFn = int(__cdecl*)();
 ViableFn g_viableOriginal = nullptr;
 bool g_viableDone = false;
@@ -239,6 +249,203 @@ void HookViable(uint8_t* site)
 	g_viableDone = true;
 }
 
+// mover_test: moving collision experiment. Friction's crushers (uOm8335 / 8336) and uOm8322 objects get their position
+// (+0x30, x y z cm) moved up and down 250 cm over 8 s before their own update (vtable slot 53), which builds their
+// matrices from it: does the collision follow a transform we set? Steam builds only (vtables from the decompile dump).
+struct MoverVtables {
+	uint32_t vtables[3]; // VAs: uOm8335 (two: 8335 and its sibling), uOm8322
+};
+const MoverVtables kMoverVtables[2] = {
+	{{0x1584fb0, 0x1586870, 0x157aa70}}, // LP2DX11.exe
+	{{0x1574e80, 0x1576740, 0x156a940}}, // LP2DX9.exe
+};
+const int kUpdateSlot = 53;
+typedef void(__fastcall* UpdateFn)(uint8_t* self, void* edx);
+UpdateFn g_moverOriginal[3] = {};
+struct Mover {
+	uint8_t* self;
+	float baseY;
+};
+Mover g_movers[64];
+int g_moverCount = 0;
+bool g_moverDone = false;
+
+void MoverMove(uint8_t* self)
+{
+	Mover* m = nullptr;
+	for (int i = 0; i < g_moverCount; i++) {
+		if (g_movers[i].self == self) {
+			m = &g_movers[i];
+		}
+	}
+	if (!m) {
+		if (g_moverCount == 64) {
+			return;
+		}
+		m = &g_movers[g_moverCount++];
+		m->self = self;
+		m->baseY = *(float*)(self + 0x34);
+		LOG_INFO("mover_test: moving object 0x%p at %.0f %.0f %.0f.", self, *(float*)(self + 0x30), m->baseY, *(float*)(self + 0x38));
+	}
+	float t = (float)(GetTickCount() % 8000) / 8000.0f;
+	*(float*)(self + 0x34) = m->baseY + 250.0f * sinf(t * 6.2831853f);
+}
+
+// parent_test: the first uOm8322 is parented to the first crusher's joint 0 (its animated press), 650 cm above it,
+// the way rObjSet parents placed objects (FUN_00f742f0: unit +0x24 parent unit, +0x28 joint number; +0x30 is then
+// local to that joint). Does it ride the press?
+std::atomic<uint8_t*> g_crusher{nullptr};
+std::atomic<bool> g_parented{false};
+
+void ParentStep(int kind, uint8_t* self)
+{
+	if (kind == 0) {
+		uint8_t* none = nullptr;
+		g_crusher.compare_exchange_strong(none, self);
+		// the motion layer (uModel::Motion at +0x290: +4 mMotionNo, +8 mState, +0x20 mFrameMax?, +0x24 mLoopFrame?,
+		// +0x28 mSpeed?; mFrame not placed yet): which value advances?
+		static DWORD last = 0;
+		DWORD now = GetTickCount();
+		if (g_crusher.load() == self && now - last >= 2000) {
+			last = now;
+			const uint8_t* m = self + 0x290;
+			LOG_INFO("parent_test: crusher motion no %04x state %04x, f18 %.2f f1c %.2f f20 %.2f f24 %.2f f28 %.2f f2c %.2f; "
+				"joint list %p.", *(uint16_t*)(m + 4), *(uint16_t*)(m + 8), *(float*)(m + 0x18), *(float*)(m + 0x1c),
+				*(float*)(m + 0x20), *(float*)(m + 0x24), *(float*)(m + 0x28), *(float*)(m + 0x2c), *(void**)(self + 0x284));
+		}
+		return;
+	}
+	uint8_t* crusher = g_crusher.load();
+	bool expected = false;
+	if (!crusher || !g_parented.compare_exchange_strong(expected, true)) {
+		return;
+	}
+	*(uint8_t**)(self + 0x24) = crusher;
+	*(uint32_t*)(self + 0x28) = 0;
+	*(float*)(self + 0x30) = 0.0f;
+	*(float*)(self + 0x34) = 650.0f;
+	*(float*)(self + 0x38) = 0.0f;
+	LOG_INFO("parent_test: object 0x%p parented to crusher 0x%p (at %.0f %.0f %.0f) joint 0.", self, crusher,
+		*(float*)(crusher + 0x30), *(float*)(crusher + 0x34), *(float*)(crusher + 0x38));
+}
+
+template <int I>
+void __fastcall MoverUpdate(uint8_t* self, void* edx)
+{
+	if (g_moverTest) {
+		MoverMove(self);
+	}
+	if (g_parentTest) {
+		ParentStep(I, self);
+	}
+	g_moverOriginal[I](self, edx);
+}
+
+// conveyor_test: Friction's belts are uOmMovementFloor volumes (objset item 0x8321) that push characters inside them.
+// Each one's fields are logged once, then they cycle every 15 s: 5 s stock, 5 s off (mMovementPower 0), 5 s reversed
+// (mMovementVec negated), written before their update (slot 53). Fields (property names, uOmMovementFloor::vf3): DX9
+// +0x2056 mIsSetParent, +0x2060 mMinPos, +0x2070 mMaxPos, +0x2080 mMovementVec, +0x2124 mDamageRatio, +0x2128
+// mMovementPower; DX11 0x10 later. Updates run on several threads, hence the lock.
+const uint32_t kConveyorVtables[2] = {0x15f1e48, 0x15e1d28}; // LP2DX11.exe, LP2DX9.exe
+UpdateFn g_conveyorOriginal = nullptr;
+size_t g_conveyorShift = 0;
+struct Conveyor {
+	uint8_t* self;
+	float vec[4];
+	float power;
+};
+Conveyor g_conveyors[64];
+int g_conveyorCount = 0;
+std::atomic_flag g_conveyorLock = ATOMIC_FLAG_INIT;
+
+void __fastcall ConveyorUpdate(uint8_t* self, void* edx)
+{
+	uint8_t* f = self + g_conveyorShift;
+	while (g_conveyorLock.test_and_set(std::memory_order_acquire)) {
+	}
+	Conveyor* c = nullptr;
+	for (int i = 0; i < g_conveyorCount; i++) {
+		if (g_conveyors[i].self == self) {
+			c = &g_conveyors[i];
+		}
+	}
+	if (!c && g_conveyorCount < 64) {
+		c = &g_conveyors[g_conveyorCount++];
+		c->self = self;
+		memcpy(c->vec, f + 0x2080, sizeof(c->vec));
+		c->power = *(float*)(f + 0x2128);
+		LOG_INFO("conveyor_test: belt %d 0x%p at %.0f %.0f %.0f: min %.0f %.0f %.0f max %.0f %.0f %.0f vec %.3f %.3f %.3f %.3f "
+			"parent %u, damage %.3f (%08x), power %.3f (%08x), kind %u radius %u.", g_conveyorCount - 1, self,
+			*(float*)(self + 0x30), *(float*)(self + 0x34), *(float*)(self + 0x38), *(float*)(f + 0x2060), *(float*)(f + 0x2064),
+			*(float*)(f + 0x2068), *(float*)(f + 0x2070), *(float*)(f + 0x2074), *(float*)(f + 0x2078), c->vec[0], c->vec[1],
+			c->vec[2], c->vec[3], *(uint8_t*)(f + 0x2056), *(float*)(f + 0x2124), *(uint32_t*)(f + 0x2124), c->power,
+			*(uint32_t*)(f + 0x2128), *(uint32_t*)(self + 0xba8), *(uint32_t*)(self + 0xbac));
+	}
+	if (c) {
+		int phase = (int)(GetTickCount() / 5000 % 3);
+		static int logged = -1;
+		if (phase != logged) {
+			logged = phase;
+			LOG_INFO("conveyor_test: %s.", phase == 0 ? "stock" : phase == 1 ? "off (power 0)" : "reversed (vec negated)");
+		}
+		*(float*)(f + 0x2128) = phase == 1 ? 0.0f : c->power;
+		for (int k = 0; k < 3; k++) {
+			*(float*)(f + 0x2080 + 4 * k) = phase == 2 ? -c->vec[k] : c->vec[k];
+		}
+	}
+	g_conveyorLock.clear(std::memory_order_release);
+	g_conveyorOriginal(self, edx);
+}
+
+void ConveyorInstall()
+{
+	int exe = g_host->game_exe == LP2MOD_EXE_DX11 ? 0 : 1;
+	g_conveyorShift = exe == 0 ? 0x10 : 0;
+	void** slot = (void**)(g_host->game_base + (kConveyorVtables[exe] - 0x400000)) + kUpdateSlot;
+	DWORD old = 0;
+	if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &old)) {
+		return;
+	}
+	g_conveyorOriginal = (UpdateFn)*slot;
+	*slot = (void*)&ConveyorUpdate;
+	VirtualProtect(slot, sizeof(void*), old, &old);
+	LOG_INFO("conveyor_test: on (update 0x%p).", (void*)g_conveyorOriginal);
+}
+
+void MoverInstall()
+{
+	g_moverDone = true;
+	bool disc = g_host->size >= offsetof(LP2ModHost, game_version) + sizeof(void*) && g_host->game_version && g_host->game_version() == 110;
+	if (disc || (g_host->game_exe != LP2MOD_EXE_DX11 && g_host->game_exe != LP2MOD_EXE_DX9)) {
+		LOG_WARN("mover_test: Steam LP2DX11.exe / LP2DX9.exe only.");
+		return;
+	}
+	if (g_conveyorTest) {
+		ConveyorInstall();
+	}
+	if (!g_moverTest && !g_parentTest) {
+		return;
+	}
+	const MoverVtables& v = kMoverVtables[g_host->game_exe == LP2MOD_EXE_DX11 ? 0 : 1];
+	void* hooks[3] = {(void*)&MoverUpdate<0>, (void*)&MoverUpdate<0>, (void*)&MoverUpdate<2>};
+	for (int i = 0; i < 3; i++) {
+		void** slot = (void**)(g_host->game_base + (v.vtables[i] - 0x400000)) + kUpdateSlot;
+		void* original = *slot;
+		if (i == 1 && original != (void*)g_moverOriginal[0]) {
+			LOG_WARN("mover_test: the second crusher vtable differs, skipped.");
+			continue;
+		}
+		DWORD old = 0;
+		if (!VirtualProtect(slot, sizeof(void*), PAGE_READWRITE, &old)) {
+			continue;
+		}
+		g_moverOriginal[i] = (UpdateFn)original;
+		*slot = hooks[i];
+		VirtualProtect(slot, sizeof(void*), old, &old);
+	}
+	LOG_INFO("mover_test / parent_test: on (crushers 0x%p, uOm8322 0x%p).", (void*)g_moverOriginal[0], (void*)g_moverOriginal[2]);
+}
+
 uint8_t* g_text = nullptr;
 size_t g_textSize = 0;
 size_t g_pending = 0;
@@ -266,6 +473,9 @@ void LoadSettings()
 	}
 	g_soloStart = root["solo_start"].GetBool(true);
 	g_gameLog = root["game_log"].GetBool(false);
+	g_moverTest = root["mover_test"].GetBool(false);
+	g_parentTest = root["parent_test"].GetBool(false);
+	g_conveyorTest = root["conveyor_test"].GetBool(false);
 }
 
 }
@@ -286,11 +496,15 @@ extern "C" __declspec(dllexport) int lp2mod_load(const LP2ModHost* host)
 		g_pending += p.done ? 0 : 1;
 	}
 	g_viableDone = !g_soloStart;
-	g_gameLogPending = g_gameLog && host->game_exe == LP2MOD_EXE_DX11;
-	if (g_gameLog && host->game_exe != LP2MOD_EXE_DX11) {
-		LOG_WARN("game_log is only mapped for LP2DX11.exe.");
+	bool disc = host->size >= offsetof(LP2ModHost, game_version) + sizeof(void*) && host->game_version && host->game_version() == 110;
+	g_loggerPtr = host->game_exe == LP2MOD_EXE_DX11 ? (disc ? kLoggerPtrDx11Disc : kLoggerPtrDx11) : host->game_exe == LP2MOD_EXE_DX9 ? kLoggerPtrDx9 : 0;
+	g_gameLogPending = g_gameLog && g_loggerPtr;
+	if (g_gameLog && !g_loggerPtr) {
+		LOG_WARN("game_log is not mapped for this game exe.");
 	}
-	LOG_INFO("solo_start %s, game_log %s.", g_soloStart ? "on" : "off", g_gameLog ? "on" : "off");
+	g_moverDone = !g_moverTest && !g_parentTest && !g_conveyorTest;
+	LOG_INFO("solo_start %s, game_log %s, mover_test %s, parent_test %s, conveyor_test %s.", g_soloStart ? "on" : "off",
+		g_gameLog ? "on" : "off", g_moverTest ? "on" : "off", g_parentTest ? "on" : "off", g_conveyorTest ? "on" : "off");
 	return 0;
 }
 
@@ -326,9 +540,12 @@ extern "C" __declspec(dllexport) int lp2mod_poll(void)
 	if (g_gameLogPending && tick++ % 50 == 0 && HookGameLog(base)) {
 		g_gameLogPending = false;
 	}
+	if (!g_moverDone && g_host->title_started()) {
+		MoverInstall();
+	}
 	bool codeWaiting = g_pending || !g_viableDone;
 	if (!codeWaiting) {
-		return !g_gameLogPending;
+		return !g_gameLogPending && g_moverDone;
 	}
 	if (!g_host->title_started()) {
 		return 0;
@@ -366,5 +583,5 @@ extern "C" __declspec(dllexport) int lp2mod_poll(void)
 		}
 	}
 	g_pending = 0;
-	return !g_gameLogPending;
+	return !g_gameLogPending && g_moverDone;
 }

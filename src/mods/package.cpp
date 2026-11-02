@@ -6,6 +6,8 @@
 
 #include <string.h>
 
+#include <algorithm>
+
 namespace xls::mods {
 
 bool ReadWholeFile(const std::wstring& path, Bytes* out)
@@ -66,17 +68,50 @@ char Lower(char c) { return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c; }
 
 }
 
+namespace {
+
+// size bytes of file at offset
+bool ReadAt(HANDLE file, uint64_t offset, size_t size, uint8_t* out)
+{
+	LARGE_INTEGER at;
+	at.QuadPart = (LONGLONG)offset;
+	DWORD got = 0;
+	return SetFilePointerEx(file, at, nullptr, FILE_BEGIN) && (size == 0 || (ReadFile(file, out, (DWORD)size, &got, nullptr) && got == size));
+}
+
+struct File {
+	HANDLE h;
+	explicit File(const std::wstring& path) : h(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr)) {}
+	~File()
+	{
+		if (h != INVALID_HANDLE_VALUE) {
+			CloseHandle(h);
+		}
+	}
+};
+
+}
+
 bool Zip::Open(const std::wstring& path)
 {
 	m_entries.clear();
-	if (!ReadWholeFile(path, &m_data) || m_data.size() < 22) {
+	m_path = path;
+	File file(path);
+	LARGE_INTEGER size{};
+	if (file.h == INVALID_HANDLE_VALUE || !GetFileSizeEx(file.h, &size) || size.QuadPart < 22 || size.QuadPart >= (1LL << 32)) {
 		return false;
 	}
 	// End of central directory: last 'PK\5\6' within the final 64 KB + 22 bytes.
+	uint64_t total = (uint64_t)size.QuadPart;
+	size_t tailSize = (size_t)std::min<uint64_t>(total, 65535 + 22);
+	Bytes tail(tailSize);
+	if (!ReadAt(file.h, total - tailSize, tailSize, tail.data())) {
+		return false;
+	}
 	size_t eocd = 0;
 	bool found = false;
-	for (size_t i = m_data.size() - 22 + 1; i-- > 0 && m_data.size() - i <= 65535 + 22;) {
-		if (U32(&m_data[i]) == 0x06054b50) {
+	for (size_t i = tailSize - 22 + 1; i-- > 0;) {
+		if (U32(&tail[i]) == 0x06054b50) {
 			eocd = i;
 			found = true;
 			break;
@@ -85,20 +120,29 @@ bool Zip::Open(const std::wstring& path)
 	if (!found) {
 		return false;
 	}
-	uint32_t count = U16(&m_data[eocd + 10]);
-	size_t at = U32(&m_data[eocd + 16]);
+	uint32_t count = U16(&tail[eocd + 10]);
+	uint32_t dirSize = U32(&tail[eocd + 12]);
+	uint64_t dirAt = U32(&tail[eocd + 16]);
+	if (dirAt + dirSize > total) {
+		return false;
+	}
+	Bytes dir(dirSize);
+	if (!ReadAt(file.h, dirAt, dirSize, dir.data())) {
+		return false;
+	}
+	size_t at = 0;
 	for (uint32_t i = 0; i < count; i++) {
-		if (at + 46 > m_data.size() || U32(&m_data[at]) != 0x02014b50) {
+		if (at + 46 > dir.size() || U32(&dir[at]) != 0x02014b50) {
 			return false;
 		}
-		const uint8_t* h = &m_data[at];
+		const uint8_t* h = &dir[at];
 		ZipEntry e;
 		e.method = U16(h + 10);
 		e.compressedSize = U32(h + 20);
 		e.size = U32(h + 24);
 		uint16_t nameLength = U16(h + 28), extra = U16(h + 30), comment = U16(h + 32);
 		e.localHeader = U32(h + 42);
-		if (at + 46 + nameLength > m_data.size()) {
+		if (at + 46 + nameLength > dir.size()) {
 			return false;
 		}
 		e.name.assign((const char*)h + 46, nameLength);
@@ -125,19 +169,18 @@ const ZipEntry* Zip::Find(const std::string& name) const
 
 bool Zip::Read(const ZipEntry& e, Bytes* out) const
 {
-	size_t h = e.localHeader;
-	if (h + 30 > m_data.size() || U32(&m_data[h]) != 0x04034b50) {
+	File file(m_path);
+	uint8_t h[30];
+	if (file.h == INVALID_HANDLE_VALUE || !ReadAt(file.h, e.localHeader, sizeof(h), h) || U32(h) != 0x04034b50) {
 		return false;
 	}
-	size_t data = h + 30 + U16(&m_data[h + 26]) + U16(&m_data[h + 28]);
-	if (data + e.compressedSize > m_data.size()) {
-		return false;
-	}
+	uint64_t data = (uint64_t)e.localHeader + 30 + U16(h + 26) + U16(h + 28);
 	if (e.method == 0) {
-		out->assign(m_data.begin() + data, m_data.begin() + data + e.size);
-		return e.compressedSize == e.size;
+		out->resize(e.size);
+		return e.compressedSize == e.size && ReadAt(file.h, data, e.size, out->data());
 	}
-	return e.method == 8 && Inflate(&m_data[data], e.compressedSize, e.size, out);
+	Bytes packed(e.compressedSize);
+	return e.method == 8 && ReadAt(file.h, data, packed.size(), packed.data()) && Inflate(packed.data(), packed.size(), e.size, out);
 }
 
 bool ArcRead(const Bytes& f, std::vector<ArcEntry>* out)

@@ -3,6 +3,8 @@
 
 #include "../../sdk/lp2mod.h"
 
+#include <stddef.h>
+
 #include <string>
 #include <vector>
 
@@ -27,6 +29,15 @@ struct Settings {
 	std::vector<int> flyTypes;  // more VS types (unit id byte 2) that fly, besides the game's flying family (controls.cpp)
 };
 extern Settings g_settings;
+
+// The game build, as the plugin's per-build tables list it: 0 LP2DX11, 1 LP2DX9 (Steam, 1.000), 2 / 3 the same for
+// the disc exes (1.100). Hosts before SDK version 2 run the Steam exes only.
+inline int GameBuild()
+{
+	bool known = g_host->size >= offsetof(LP2ModHost, game_version) + sizeof(void*) && g_host->game_version;
+	int version = known ? g_host->game_version() : 100;
+	return (version == 110 ? 2 : 0) + (g_host->game_exe == LP2MOD_EXE_DX11 ? 0 : 1);
+}
 
 // True when [base+rva, base+rva+size) lies inside the game image (so a known address can be read).
 inline bool InImage(const unsigned char* base, unsigned rva, unsigned size)

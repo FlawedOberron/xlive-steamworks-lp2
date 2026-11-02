@@ -14,7 +14,8 @@ using Bytes = std::vector<uint8_t>;
 bool ReadWholeFile(const std::wstring& path, Bytes* out);
 bool WriteWholeFile(const std::wstring& path, const Bytes& data); // creates parent folders
 
-// Stored and deflated entries of a .zip (no zip64, no encryption).
+// Stored and deflated entries of a .zip (no zip64, no encryption). Open reads the central directory only; Read
+// reads an entry from the file.
 struct ZipEntry {
 	std::string name; // '/' separated, as stored
 	uint32_t method;
@@ -30,7 +31,7 @@ public:
 	const ZipEntry* Find(const std::string& name) const; // case-insensitive
 
 private:
-	Bytes m_data;
+	std::wstring m_path;
 	std::vector<ZipEntry> m_entries;
 };
 

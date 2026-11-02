@@ -44,9 +44,11 @@ struct NetMenuVas {
 	uint32_t callback;  // every Flash screen's ExternalInterface receiver (uPlanetFlash::vf17)
 	uint32_t flashCall;  // a menu's Flash call: thiscall(menu, 0, name, args, count)
 };
-const NetMenuVas kNetMenuVas[] = {
+const NetMenuVas kNetMenuVas[kBuildCount] = {
 	{0xf4b1a0, 0xf4a390}, // DX11
 	{0xf3b470, 0xf3a660}, // DX9
+	{0xf4b600, 0xf4a7f0}, // DX11 1.1
+	{0xf3b540, 0xf3a730}, // DX9 1.1
 };
 // sub esp,0x18; push ebx; push ebp; push esi; mov esi,ecx
 const uint8_t kCallbackPrologue[] = {0x83, 0xec, 0x18, 0x53, 0x55, 0x56, 0x8b, 0xf1};
@@ -289,6 +291,9 @@ bool NetMenuPatchMessages(std::vector<uint8_t>* file)
 void NetMenuInstall(unsigned char* base)
 {
 	for (const NetMenuVas& vas : kNetMenuVas) {
+		if (GameBuild() >= 0 && &vas - kNetMenuVas != GameBuild()) {
+			continue;
+		}
 		uint8_t* call = base + (vas.callback - 0x400000);
 		if (memcmp(call, kCallbackPrologue, sizeof(kCallbackPrologue)) != 0) {
 			continue;

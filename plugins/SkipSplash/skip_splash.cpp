@@ -75,8 +75,26 @@ extern "C" __declspec(dllexport) int lp2mod_load(const LP2ModHost* host)
 	return 0;
 }
 
+uint8_t* Search()
+{
+	for (uint8_t* at = g_text; at + sizeof(kBytes) <= g_text + g_textSize; at++) {
+		if (Matches(at)) {
+			return at;
+		}
+	}
+	return nullptr;
+}
+
 extern "C" __declspec(dllexport) int lp2mod_poll(void)
 {
+	// Unencrypted builds (retail) are searchable straight away, before the logos show.
+	static bool searchedEarly = false;
+	if (!searchedEarly) {
+		searchedEarly = true;
+		if (uint8_t* site = Search()) {
+			return Patch(site);
+		}
+	}
 	for (uint32_t rva : kKnownRvas) {
 		uint8_t* site = g_host->game_base + rva;
 		if (site >= g_text && site + sizeof(kBytes) <= g_text + g_textSize && Matches(site)) {
@@ -86,10 +104,8 @@ extern "C" __declspec(dllexport) int lp2mod_poll(void)
 	if (!g_host->title_started()) {
 		return 0;
 	}
-	for (uint8_t* at = g_text; at + sizeof(kBytes) <= g_text + g_textSize; at++) {
-		if (Matches(at)) {
-			return Patch(at);
-		}
+	if (uint8_t* site = Search()) {
+		return Patch(site);
 	}
 	g_host->log(LP2MOD_LOG_WARN, "boot logo code not found in this game build.");
 	return 1;

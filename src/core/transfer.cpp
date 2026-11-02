@@ -275,8 +275,13 @@ void OnMessage(uint64_t peer, const uint8_t* data, size_t size)
 		uint32_t index;
 		memcpy(&index, body, 4);
 		size_t length = bodySize - 4;
-		if (index != f->chunks || f->received + length > f->size || (length != kChunk && f->received + length != f->size)) {
-			Fail(f, "chunks out of order");
+		if (index < f->chunks) {
+			// a chunk again (Steam resends after restarting a broken session): we have it
+			XLS_LOG_DEBUG("transfer: chunk %u of %u again, ignored.", index, h.id);
+		}
+		else if (index != f->chunks || f->received + length > f->size || (length != kChunk && f->received + length != f->size)) {
+			Fail(f, FormatA("chunks out of order (chunk %u of %zu bytes, expected %u; %llu of %llu bytes in)", index, length, f->chunks,
+				(unsigned long long)f->received, (unsigned long long)f->size));
 			Send(peer, Message(kCancel, h.id));
 		}
 		else if (fwrite(body + 4, 1, length, f->file) != length) {
