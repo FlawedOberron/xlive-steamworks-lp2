@@ -490,7 +490,25 @@ const char* BrowsedName(uint32_t slot)
 	static char name[128];
 	std::string extra;
 	// the game version (bytes 4..11 of the QoS data) is left out: compatible_versions hosts answer with their own
-	if (!g_detailEntry || !(xls::NetQosExtraFor(g_detailEntry, 0x94, &extra, 4, 8) || xls::NetQosExtraFor(g_detailEntry + 8, 0x8c, &extra, 4, 8))) {
+	// where the entry's copy of the QoS data starts varies (DX11 entries begin 4 bytes into it, at the version)
+	bool found = false;
+	if (g_detailEntry) {
+		static const int kShifts[] = {0, -4, 8, 4, -8};
+		static int lastShift = 99;
+		for (int shift : kShifts) {
+			// bytes before the entry aren't the QoS data's: compare from where the entry starts (and skip the version)
+			size_t skipAt = shift < 0 ? 0 : 4, skipSize = shift < 0 ? (size_t)(-shift) + 8 : 8;
+			if (xls::NetQosExtraFor(g_detailEntry + shift, (size_t)(0x94 - (shift > 0 ? shift : 0)), &extra, skipAt, skipSize)) {
+				found = true;
+				if (shift != lastShift) {
+					lastShift = shift;
+					XLS_LOG_INFO("mods: maps: browsed session's QoS data found at entry %+d.", shift);
+				}
+				break;
+			}
+		}
+	}
+	if (!found) {
 		static bool logged = false;
 		if (g_detailEntry && !logged) {
 			logged = true;
