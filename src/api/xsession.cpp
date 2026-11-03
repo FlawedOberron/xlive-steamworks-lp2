@@ -441,6 +441,12 @@ void AddFilter(const std::string& key, const XUSER_DATA& value, ELobbyComparison
 	XLS_LOG_DEBUG("session: filter %s %s \"%s\" (text).", key.c_str(), ComparisonText(compare), stored.ToString().c_str());
 }
 
+const char* DistanceName(int filter)
+{
+	static const char* const kNames[] = {"close", "default (own region)", "far", "worldwide"};
+	return filter >= 0 && filter < 4 ? kNames[filter] : "?";
+}
+
 void AddSearchFilters(DWORD procedureIndex, WORD propertyCount, WORD contextCount, const XUSER_PROPERTY* properties, const XUSER_CONTEXT* contexts, DWORD resultCount)
 {
 	ISteamMatchmaking* matchmaking = xls::SteamMatchmaking();
@@ -1004,6 +1010,7 @@ DWORD WINAPI XSessionCreate(DWORD dwFlags, DWORD dwUserIndex, DWORD dwMaxPublicS
 		session->state = (XSESSION_STATE)strtoul(matchmaking->GetLobbyData(session->lobby, Key("state").c_str()), nullptr, 10);
 		CSteamID host;
 		if (xls::NetSteamIdFromXnaddr(session->info.hostAddress, &host)) {
+			xls::NetResetBrokenSession(host, "joining their lobby");
 			xls::NetSecureAddrFor(host);
 			xls::SteamFriends()->SetPlayedWith(host);
 		}
@@ -1411,7 +1418,8 @@ DWORD WINAPI XSessionSearchEx(DWORD dwProcedureIndex, DWORD dwUserIndex, DWORD d
 	auto call = std::make_shared<xls::SteamCall<LobbyMatchList_t>>();
 	call->Start(xls::SteamMatchmaking()->RequestLobbyList());
 	DWORD bufferSize = *pcbResultsBuffer;
-	XLS_LOG_INFO("session: searching (procedure %u, %u contexts, %u properties).", dwProcedureIndex, wNumContexts, wNumProperties);
+	XLS_LOG_INFO("session: searching (procedure %u, %u contexts, %u properties, lobby distance %s).", dwProcedureIndex, wNumContexts, wNumProperties,
+		DistanceName(xls::Cfg().lobbyDistanceFilter));
 	return xls::RunAsync(pOverlapped, [call, query, dwNumResults, pSearchResults, bufferSize](XOVERLAPPED* overlapped) {
 		if (!call->Poll()) {
 			return false;

@@ -384,7 +384,7 @@ bool ConfigLoad()
 
 			const Json& sessions = root["sessions"];
 			config.lobbyKeyPrefix = sessions["lobby_key_prefix"].GetString("xl_");
-			config.lobbyDistanceFilter = (int)sessions["lobby_distance_filter"].GetInt(1);
+			config.lobbyDistanceFilter = (int)sessions["lobby_distance_filter"].GetInt(3);
 			config.sessionsAcceptAnyPeer = sessions["accept_any_peer"].GetBool(true);
 			config.startWaitSeconds = (uint32_t)sessions["start_wait_seconds"].GetInt(180);
 			config.compatibleVersions.clear();
@@ -460,11 +460,11 @@ bool ConfigLoad()
 	if (loaded) {
 		XLS_LOG_INFO("config: loaded %ls.", g_configPath.c_str());
 	}
-	if (legacyLeaderboards) {
-		XLS_LOG_INFO("config: the old leaderboards map (LB_<view>) is ignored; boards use the game's view names and Score.");
-	}
 	else {
 		XLS_LOG_INFO("config: no xlive_steamworks.json found, defaults are in use.");
+	}
+	if (legacyLeaderboards) {
+		XLS_LOG_INFO("config: the old leaderboards map (LB_<view>) is ignored; boards use the game's view names and Score.");
 	}
 	return true;
 }

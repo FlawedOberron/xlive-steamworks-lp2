@@ -71,7 +71,7 @@
     "map": {}
   },
   "sessions": {
-    "lobby_distance_filter": 2,
+    "lobby_distance_filter": 3,
     "compatible_versions": ["1.000", "1.100"]
   },
   "content": {

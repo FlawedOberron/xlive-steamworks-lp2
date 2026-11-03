@@ -77,7 +77,7 @@ struct Config {
 
 	// Sessions.
 	std::string lobbyKeyPrefix = "xl_";
-	int lobbyDistanceFilter = 1;        // ELobbyDistanceFilter, 1 = default.
+	int lobbyDistanceFilter = 3;        // ELobbyDistanceFilter, 3 = worldwide (1 = Steam default: own region only).
 	bool sessionsAcceptAnyPeer = true;  // Accept SteamNetworkingMessages sessions from anyone.
 	uint32_t asyncTimeoutMs = 15000;
 

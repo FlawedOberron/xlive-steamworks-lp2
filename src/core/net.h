@@ -44,6 +44,8 @@ bool NetSecureAddrToServer(IN_ADDR alias, IN_ADDR* realAddress);
 void NetSecureAddrRelease(IN_ADDR alias);
 DWORD NetConnectStatus(IN_ADDR alias);
 void NetConnectStart(IN_ADDR alias);
+// Clears a Steam session with this peer that the peer closed or that broke (left over from an earlier match), so new traffic opens a fresh one.
+void NetResetBrokenSession(CSteamID steamId, const char* why);
 bool NetIsLocalAlias(IN_ADDR alias);
 
 // --- Keys ----------------------------------------------------------------------------------------

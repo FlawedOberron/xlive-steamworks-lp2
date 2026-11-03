@@ -1083,6 +1083,20 @@ void NetSecureAddrRelease(IN_ADDR alias)
 	g_secure.erase(it);
 }
 
+void NetResetBrokenSession(CSteamID steamId, const char* why)
+{
+	if (!SteamReady() || !SteamNetworkingMessages() || !steamId.IsValid()) {
+		return;
+	}
+	SteamNetConnectionInfo_t info = {};
+	ESteamNetworkingConnectionState state = SteamNetworkingMessages()->GetSessionConnectionInfo(IdentityOf(steamId), &info, nullptr);
+	if (state == k_ESteamNetworkingConnectionState_ClosedByPeer || state == k_ESteamNetworkingConnectionState_ProblemDetectedLocally) {
+		SteamNetworkingMessages()->CloseSessionWithUser(IdentityOf(steamId));
+		XLS_LOG_INFO("net: cleared a %s session with %llu (%s; %d: %s).", state == k_ESteamNetworkingConnectionState_ClosedByPeer ? "peer-closed" : "broken",
+			steamId.ConvertToUint64(), why, (int)info.m_eEndReason, info.m_szEndDebug);
+	}
+}
+
 DWORD NetConnectStatus(IN_ADDR alias)
 {
 	std::lock_guard<std::recursive_mutex> lock(g_mutex);
@@ -1118,6 +1132,7 @@ DWORD NetConnectStatus(IN_ADDR alias)
 			break;
 		default:
 			it->second.connectStatus = XNET_CONNECT_STATUS_LOST;
+			NetResetBrokenSession(it->second.steamId, "status check");
 			break;
 	}
 	return it->second.connectStatus;
@@ -1130,6 +1145,7 @@ void NetConnectStart(IN_ADDR alias)
 	if (it == g_secure.end() || it->second.isServer) {
 		return;
 	}
+	NetResetBrokenSession(it->second.steamId, "connect");
 	if (it->second.connectStatus == XNET_CONNECT_STATUS_IDLE || it->second.connectStatus == XNET_CONNECT_STATUS_LOST) {
 		it->second.connectStatus = XNET_CONNECT_STATUS_PENDING;
 	}

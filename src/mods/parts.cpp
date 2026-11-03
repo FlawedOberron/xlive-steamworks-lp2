@@ -2070,6 +2070,8 @@ uint64_t InfoSteamId(XUID xuid)
 	return xls::SteamIdFromXuid(xuid).ConvertToUint64();
 }
 
+uint64_t MatchSlotMember(int p, const uint8_t* info);
+
 // The member playing slot p, or 0.
 uint64_t SlotMember(int p)
 {
@@ -2078,8 +2080,12 @@ uint64_t SlotMember(int p)
 	}
 	uint8_t* game = g_gameObject ? *g_gameObject : nullptr;
 	uint8_t* info = game && p >= 0 && p < kMaxPlayers ? *(uint8_t**)(game + 0x28 + p * 4) : nullptr;
-	if (!info || g_infoXuidOffset < 0) {
+	if (!info) {
 		return 0;
+	}
+	if (g_infoXuidOffset < 0) {
+		// online the infos hold no XUID or name: slot p is the session member table's entry p
+		return game[0x256] ? MatchSlotMember(p, info) : 0;
 	}
 	uint64_t steamId = InfoSteamId(*(XUID*)(info + g_infoXuidOffset));
 	return steamId == xls::SteamLocalId().ConvertToUint64() ? 0 : steamId; // our own: the menu's choice
@@ -2244,6 +2250,55 @@ uint64_t LobbyMemberId(int i, bool self)
 		XLS_LOG_INFO("mods: parts: lobby entry %d \"%s\" is %llu.", i, name.c_str(), (unsigned long long)it->second);
 	}
 	return !self && it->second == xls::SteamLocalId().ConvertToUint64() ? 0 : it->second;
+}
+
+// The member playing match slot p (online), or 0 (none / our own). The game numbers players by their
+// session member table entry (sGameNetwork's own number, FUN_008029c0, indexes that table in match
+// code too), so slot p is entry p; the part codes the slot loads (info+0xb4) must match that entry's
+// (+0xc). If they don't, the one entry with the slot's codes is taken; failing that, entry p.
+uint64_t MatchSlotMember(int p, const uint8_t* info)
+{
+	uint8_t* table = LobbyTable();
+	if (!table || p < 0 || p >= kLobbyMembers) {
+		return 0;
+	}
+	auto present = [&](int i) { return table[0x148 + i * kLobbyEntry + 0x64] == 1; };
+	auto same = [&](int i) { return memcmp(table + 0x148 + i * kLobbyEntry + 0xc, info + 0xb4, 4 * 4) == 0; };
+	int entry = -1;
+	const char* how = "";
+	if (present(p) && same(p)) {
+		entry = p, how = "same entry, codes match";
+	}
+	else {
+		int found = -1, count = 0;
+		for (int i = 0; i < kLobbyMembers; i++) {
+			if (present(i) && same(i)) {
+				found = i, count++;
+			}
+		}
+		if (count == 1) {
+			entry = found, how = "codes match only this entry";
+		}
+		else if (present(p)) {
+			entry = p, how = count ? "same entry, codes shared by several" : "same entry, codes differ";
+		}
+	}
+	uint64_t member = entry >= 0 ? LobbyMemberId(entry, true) : 0;
+	static std::mutex mutex;
+	static std::map<int, std::pair<int, uint64_t>> logged;
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		auto& last = logged[p];
+		if (last.first != entry + 1 || last.second != member) {
+			last = {entry + 1, member};
+			XLS_LOG_INFO("mods: parts: match slot %d -> member table entry %d (%s) -> %llu%s.", p, entry, entry >= 0 ? how : "no entry",
+				(unsigned long long)member, member == xls::SteamLocalId().ConvertToUint64() ? " (us)" : "");
+		}
+	}
+	if (entry == g_fakeSlot && entry >= 0) {
+		return kFakeMember;
+	}
+	return member == xls::SteamLocalId().ConvertToUint64() ? 0 : member;
 }
 
 uint64_t LobbyMemberIdByXuid(int i, bool self)
@@ -2606,7 +2661,7 @@ void FindInfoXuid(uint8_t* game)
 	static bool logged = false;
 	if (!logged) {
 		logged = true;
-		XLS_LOG_WARN("mods: parts: our xuid 0x%016llx not found in the player infos, online or offline (remote players fall back).", (unsigned long long)ours);
+		XLS_LOG_WARN("mods: parts: our xuid 0x%016llx not found in the player infos, online or offline (online slots map through the member table).", (unsigned long long)ours);
 		for (int p = 0; p < kMaxPlayers; p++) {
 			uint8_t* info = *(uint8_t**)(game + 0x28 + p * 4);
 			MEMORY_BASIC_INFORMATION mbi;
