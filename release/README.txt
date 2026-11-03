@@ -2,9 +2,11 @@ Lost Planet 2 (Recolonised) - test build @DATE@
 
 1. Steam -> Lost Planet 2 -> Manage -> Browse local files.
 2. Rename the existing xlive.dll to xlive.dll.capcom (keeps a backup).
-3. Copy xlive.dll, steam_api.dll and xlive_steamworks.json into that folder (replace if asked).
+3. Copy xlive.dll, xlive_relay.exe, steam_api.dll and xlive_steamworks.json into that folder
+   (replace if asked).
 4. Linux / Steam Deck: set launch option  WINE_LARGE_ADDRESS_AWARE=1 %command%
-5. Play either the DirectX 9 or DirectX 11 version. Online = Steam lobbies (invite through Steam or Discord).
+5. Play either the DirectX 9 or DirectX 11 version. Online = Steam lobbies (invite through Steam or Discord),
+   shared with retail DVD copies: xlive_relay.exe joins them through Spacewar (Steam app 480) for you.
 
 Updates: from this build on, the game checks for a newer test build when it starts, downloads it and
 says "Update downloaded ... restart the game to install it". Turn off with "update": {"auto": false}
@@ -24,5 +26,5 @@ If the game crashes (report it at https://github.com/FlawedOberron/xlive-steamwo
    map or custom part set was downloading.
 4. Everyone in a match should be on the same test build; say which one you have.
 
-Undo: delete the three files and rename xlive.dll.capcom back to xlive.dll.
+Undo: delete the four files and rename xlive.dll.capcom back to xlive.dll.
 (Steam "Verify integrity of game files" also restores Capcom's xlive.dll.)

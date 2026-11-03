@@ -121,11 +121,45 @@ bool Newer(const std::string& latest, const std::string& ours)
 	return latest > ours;
 }
 
+// A file next to xlive.dll from the release zip (the relay helper): written beside it, then swapped in; a running copy
+// is renamed aside first (Windows allows renaming a running exe) and removed at the next start.
+void InstallBeside(const std::wstring& self, mods::Zip& zip, const char* name)
+{
+	const mods::ZipEntry* entry = zip.Find(name);
+	mods::Bytes bytes;
+	if (!entry || !zip.Read(*entry, &bytes) || bytes.size() < 0x1000 || bytes[0] != 'M' || bytes[1] != 'Z') {
+		return;
+	}
+	std::wstring target = self.substr(0, self.find_last_of(L'\\') + 1) + Utf8ToWide(name);
+	std::wstring staged = target + L".new", old = target + L".old";
+	DeleteFileW(old.c_str());
+	if (!WriteFileBytes(staged, bytes.data(), bytes.size())) {
+		XLS_LOG_WARN("update: couldn't write %ls.", staged.c_str());
+		return;
+	}
+	bool had = GetFileAttributesW(target.c_str()) != INVALID_FILE_ATTRIBUTES;
+	if (had && !MoveFileExW(target.c_str(), old.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+		XLS_LOG_WARN("update: couldn't move %s aside (error %lu).", name, GetLastError());
+		DeleteFileW(staged.c_str());
+		return;
+	}
+	if (!MoveFileExW(staged.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+		XLS_LOG_WARN("update: couldn't put the new %s in place (error %lu).", name, GetLastError());
+		if (had) {
+			MoveFileExW(old.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING);
+		}
+		return;
+	}
+	XLS_LOG_INFO("update: installed %s (%zu bytes).", name, bytes.size());
+}
+
 void Check()
 {
 	std::wstring self = OwnPath();
 	if (!self.empty()) {
 		DeleteFileW((self + L".old").c_str()); // the one an earlier update replaced
+		std::wstring dir = self.substr(0, self.find_last_of(L'\\') + 1);
+		DeleteFileW((dir + L"xlive_relay.exe.old").c_str());
 	}
 	std::string ours = XLS_RELEASE_TAG;
 	if (!ours.empty()) {
@@ -160,7 +194,11 @@ void Check()
 		XLS_LOG_INFO("update: development build; the latest release is %s (not installed).", latest.c_str());
 		return;
 	}
-	if (!Newer(latest, ours)) {
+	// builds before test-2026-11-03 updated only xlive.dll: fetch the relay helper their update left out
+	bool relayMissing = !self.empty() && Cfg().networkAppId != 0
+		&& GetFileAttributesW((self.substr(0, self.find_last_of(L'\\') + 1) + L"xlive_relay.exe").c_str()) == INVALID_FILE_ATTRIBUTES;
+	bool newer = Newer(latest, ours);
+	if (!newer && !(relayMissing && latest == ours)) {
 		XLS_LOG_INFO("update: %s is up to date (latest release %s).", ours.c_str(), latest.c_str());
 		return;
 	}
@@ -177,7 +215,12 @@ void Check()
 		XLS_LOG_WARN("update: release %s has no zip to download.", latest.c_str());
 		return;
 	}
-	XLS_LOG_INFO("update: %s -> %s, downloading %s.", ours.c_str(), latest.c_str(), url.c_str());
+	if (newer) {
+		XLS_LOG_INFO("update: %s -> %s, downloading %s.", ours.c_str(), latest.c_str(), url.c_str());
+	}
+	else {
+		XLS_LOG_INFO("update: xlive_relay.exe is missing, downloading %s for it.", url.c_str());
+	}
 	std::vector<uint8_t> zipBytes;
 	if (!HttpsGet(host, path, &zipBytes)) {
 		XLS_LOG_WARN("update: the download failed; trying again next start.");
@@ -197,6 +240,10 @@ void Check()
 		XLS_LOG_WARN("update: can't find our own file to replace.");
 		return;
 	}
+	if (!newer) {
+		InstallBeside(self, zip, "xlive_relay.exe");
+		return;
+	}
 	// a loaded DLL can be renamed (not overwritten): the new one takes its name, the game loads it next start
 	std::wstring staged = self + L".new", old = self + L".old";
 	DeleteFileW(old.c_str());
@@ -214,6 +261,7 @@ void Check()
 		MoveFileExW(old.c_str(), self.c_str(), MOVEFILE_REPLACE_EXISTING);
 		return;
 	}
+	InstallBeside(self, zip, "xlive_relay.exe");
 	XLS_LOG_INFO("update: installed %s (%zu bytes); it runs from the next start.", latest.c_str(), dll.size());
 	g_installed = latest;
 }

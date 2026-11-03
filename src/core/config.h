@@ -51,8 +51,8 @@ struct Config {
 	bool restartAppIfNecessary = false; // SteamAPI_RestartAppIfNecessary(appId) before init.
 	bool requireSteam = true;           // false = keep running signed-out when Steam is absent.
 	bool steamShutdownApi = true;       // SteamAPI_Shutdown on XLiveUninitialize when no peer was ever addressed.
-	uint32_t networkAppId = 0;          // lobbies and peers as this app (480: with disc copies) through xlive_relay.exe;
-	                                    // 0 or the process's own app = directly
+	uint32_t networkAppId = 480;        // lobbies and peers as this app (480 Spacewar, shared with disc copies) through
+	                                    // xlive_relay.exe; 0 or the process's own app = directly
 
 	// Title identity.
 	uint32_t titleId = 0;               // 0 = from the SPA.

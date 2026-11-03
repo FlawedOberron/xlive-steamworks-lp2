@@ -4,6 +4,7 @@
   },
   "steam": {
     "app_id": 45750,
+    "network_app_id": 480,
     "required": true
   },
   "title": {

@@ -36,10 +36,10 @@ grep -aq "xls-release-tag:$TAG" "$REPO/bin/xlive.dll" || { echo "xlive.dll doesn
 OUT=$REPO/dist
 STAGE=$OUT/stage
 rm -rf "$STAGE" && mkdir -p "$STAGE"
-cp "$REPO/bin/xlive.dll" "$REPO/bin/steam_api.dll" "$REPO/release/xlive_steamworks.json" "$STAGE/"
+cp "$REPO/bin/xlive.dll" "$REPO/bin/xlive_relay.exe" "$REPO/bin/steam_api.dll" "$REPO/release/xlive_steamworks.json" "$STAGE/"
 sed "s/@DATE@/${TAG#test-}/" "$REPO/release/README.txt" > "$STAGE/README.txt"
 rm -f "$OUT/lp2-recolonised-test.zip"
-(cd "$STAGE" && zip -q9 "$OUT/lp2-recolonised-test.zip" README.txt steam_api.dll xlive.dll xlive_steamworks.json)
+(cd "$STAGE" && zip -q9 "$OUT/lp2-recolonised-test.zip" README.txt steam_api.dll xlive.dll xlive_relay.exe xlive_steamworks.json)
 rm -rf "$STAGE"
 echo "$TAG -> $OUT/lp2-recolonised-test.zip"
 

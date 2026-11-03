@@ -342,59 +342,51 @@ void __fastcall MoverUpdate(uint8_t* self, void* edx)
 }
 
 // conveyor_test: Friction's belts are uOmMovementFloor volumes (objset item 0x8321) that push characters inside them.
-// Each one's fields are logged once, then they cycle every 15 s: 5 s stock, 5 s off (mMovementPower 0), 5 s reversed
-// (mMovementVec negated), written before their update (slot 53). Fields (property names, uOmMovementFloor::vf3): DX9
-// +0x2056 mIsSetParent, +0x2060 mMinPos, +0x2070 mMaxPos, +0x2080 mMovementVec, +0x2124 mDamageRatio, +0x2128
-// mMovementPower; DX11 0x10 later. Updates run on several threads, hence the lock.
+// Their update (slot 53, DX9 0xdb0290) rebuilds mMinPos / mMaxPos from mUserWork (+0xb78: half x, half z, y below,
+// y above) and mMovementVec = the belt's turn x (0, 0, power), power = mMovementPower if > 0 else mUserWork[5]
+// (+0xb8c); the push reads the vector later (FUN_00db0c90). So the test writes the vector AFTER the update: each
+// belt is logged once, then they cycle every 15 s: 5 s stock, 5 s off (vector 0), 5 s reversed (vector negated).
+// Fields (property names, uOmMovementFloor::vf3): DX9 +0x2056 mIsSetParent, +0x2060 mMinPos, +0x2070 mMaxPos,
+// +0x2080 mMovementVec, +0x2124 mDamageRatio, +0x2128 mMovementPower, +0xba8 kind; DX11 all 0x10 later.
+// Updates run on several threads, hence the lock.
 const uint32_t kConveyorVtables[2] = {0x15f1e48, 0x15e1d28}; // LP2DX11.exe, LP2DX9.exe
 UpdateFn g_conveyorOriginal = nullptr;
 size_t g_conveyorShift = 0;
-struct Conveyor {
-	uint8_t* self;
-	float vec[4];
-	float power;
-};
-Conveyor g_conveyors[64];
+uint8_t* g_conveyors[64];
 int g_conveyorCount = 0;
 std::atomic_flag g_conveyorLock = ATOMIC_FLAG_INIT;
 
 void __fastcall ConveyorUpdate(uint8_t* self, void* edx)
 {
+	g_conveyorOriginal(self, edx);
 	uint8_t* f = self + g_conveyorShift;
+	float* vec = (float*)(f + 0x2080);
 	while (g_conveyorLock.test_and_set(std::memory_order_acquire)) {
 	}
-	Conveyor* c = nullptr;
-	for (int i = 0; i < g_conveyorCount; i++) {
-		if (g_conveyors[i].self == self) {
-			c = &g_conveyors[i];
-		}
+	bool known = false;
+	for (int i = 0; i < g_conveyorCount && !known; i++) {
+		known = g_conveyors[i] == self;
 	}
-	if (!c && g_conveyorCount < 64) {
-		c = &g_conveyors[g_conveyorCount++];
-		c->self = self;
-		memcpy(c->vec, f + 0x2080, sizeof(c->vec));
-		c->power = *(float*)(f + 0x2128);
-		LOG_INFO("conveyor_test: belt %d 0x%p at %.0f %.0f %.0f: min %.0f %.0f %.0f max %.0f %.0f %.0f vec %.3f %.3f %.3f %.3f "
-			"parent %u, damage %.3f (%08x), power %.3f (%08x), kind %u radius %u.", g_conveyorCount - 1, self,
+	if (!known && g_conveyorCount < 64) {
+		g_conveyors[g_conveyorCount++] = self;
+		const int32_t* work = (const int32_t*)(f + 0xb78);
+		LOG_INFO("conveyor_test: belt %d 0x%p at %.0f %.0f %.0f: min %.0f %.0f %.0f max %.0f %.0f %.0f vec %.3f %.3f %.3f "
+			"parent %u, damage %.3f, power %.3f, kind %u; user work %d %d %d %d %d %d %d %d %d.", g_conveyorCount - 1, self,
 			*(float*)(self + 0x30), *(float*)(self + 0x34), *(float*)(self + 0x38), *(float*)(f + 0x2060), *(float*)(f + 0x2064),
-			*(float*)(f + 0x2068), *(float*)(f + 0x2070), *(float*)(f + 0x2074), *(float*)(f + 0x2078), c->vec[0], c->vec[1],
-			c->vec[2], c->vec[3], *(uint8_t*)(f + 0x2056), *(float*)(f + 0x2124), *(uint32_t*)(f + 0x2124), c->power,
-			*(uint32_t*)(f + 0x2128), *(uint32_t*)(self + 0xba8), *(uint32_t*)(self + 0xbac));
+			*(float*)(f + 0x2068), *(float*)(f + 0x2070), *(float*)(f + 0x2074), *(float*)(f + 0x2078), vec[0], vec[1], vec[2],
+			*(uint8_t*)(f + 0x2056), *(float*)(f + 0x2124), *(float*)(f + 0x2128), *(uint32_t*)(f + 0xba8), work[0], work[1],
+			work[2], work[3], work[4], work[5], work[6], work[7], work[8]);
 	}
-	if (c) {
-		int phase = (int)(GetTickCount() / 5000 % 3);
-		static int logged = -1;
-		if (phase != logged) {
-			logged = phase;
-			LOG_INFO("conveyor_test: %s.", phase == 0 ? "stock" : phase == 1 ? "off (power 0)" : "reversed (vec negated)");
-		}
-		*(float*)(f + 0x2128) = phase == 1 ? 0.0f : c->power;
-		for (int k = 0; k < 3; k++) {
-			*(float*)(f + 0x2080 + 4 * k) = phase == 2 ? -c->vec[k] : c->vec[k];
-		}
+	int phase = (int)(GetTickCount() / 5000 % 3);
+	static int logged = -1;
+	if (phase != logged) {
+		logged = phase;
+		LOG_INFO("conveyor_test: %s.", phase == 0 ? "stock" : phase == 1 ? "off (vector 0)" : "reversed (vector negated)");
 	}
 	g_conveyorLock.clear(std::memory_order_release);
-	g_conveyorOriginal(self, edx);
+	for (int k = 0; k < 3; k++) {
+		vec[k] = phase == 1 ? 0.0f : phase == 2 ? -vec[k] : vec[k];
+	}
 }
 
 void ConveyorInstall()

@@ -44,13 +44,14 @@ Windows. If the game crashes loading a custom map on Windows and not on Linux, t
 
 1. Steam → Lost Planet 2 → Manage → **Browse local files**.
 2. Rename the existing `xlive.dll` to `xlive.dll.capcom` (keeps a backup).
-3. Copy `xlive.dll`, `steam_api.dll` and `xlive_steamworks.json` from the zip into that folder.
+3. Copy `xlive.dll`, `xlive_relay.exe`, `steam_api.dll` and `xlive_steamworks.json` from the zip into
+   that folder.
 4. Linux / Steam Deck: set the launch option `WINE_LARGE_ADDRESS_AWARE=1 %command%`
    (Windows: see [Memory](docs/LP2-MODS.md#memory-large-address-aware-recommended)).
-5. Play either the DirectX 9 or the DirectX 11 version. Online play uses Steam lobbies: invite through
-   Steam or Discord.
+5. Play either the DirectX 9 or the DirectX 11 version. Online play uses Steam lobbies, shared with retail DVD
+   copies (see [Spacewar](#steam-and-disc-copies-together-spacewar)): invite through Steam or Discord.
 
-**Undo:** delete the three files and rename `xlive.dll.capcom` back. Steam's "Verify integrity of game
+**Undo:** delete the four files and rename `xlive.dll.capcom` back. Steam's "Verify integrity of game
 files" (or a game update) also puts Capcom's `xlive.dll` back; copy ours again afterwards.
 
 **Problems:** [open an issue](https://github.com/FlawedOberron/xlive-steamworks-lp2/issues) and attach `xlive_steamworks.log` from the game folder.
@@ -95,6 +96,30 @@ it in your Steam-name folder as `Lostplanet2.Lostplanet2Save-capcom` (chat apps 
 In progress: Survival and Team Survival (limited respawns, last player / team standing, spectator
 camera, also for training's AI Enemy Battle), custom character parts, sharing maps and parts with the
 lobby. The full guide, folder layout and settings are in [docs/LP2-MODS.md](docs/LP2-MODS.md).
+
+## Steam and disc copies together (Spacewar)
+
+We want one Lost Planet 2 community, not two: players with the Steam release and players with the
+retail DVD should find and join each other's matches.
+
+Disc copies aren't Steam products, so they run under **Spacewar** (Steam app 480), Valve's public
+test app that any Steam account can use, and their lobbies live there. Steam copies join them by
+default:
+
+- `xlive.dll` starts `xlive_relay.exe` (in the release zip, and installed by the auto-updater), a
+  small helper that signs into Steam as Spacewar. The helper handles only lobbies and in-match
+  messages.
+- Everything else stays on your own Lost Planet 2 Steam app: ownership, your Steam profile and
+  Discord status.
+- `"network_app_id"` in the `steam` section of `xlive_steamworks.json` picks the app for lobbies.
+  It is 480 by default; set it to 0 to use Lost Planet 2's own app instead (Steam players only).
+- If the helper is missing or can't start, lobbies fall back to Lost Planet 2's own app.
+- The two builds' version numbers differ (Steam 1.000, disc 1.100). `xlive.dll` matches them so
+  they accept each other.
+
+Keeping cross-play on Spacewar is deliberate. We don't want to interfere with the networking of
+vanilla Lost Planet 2, so cross-play lobbies and traffic stay off the game's own Steam app. Our
+lobby keys also carry their own `xl_` prefix.
 
 ## No game files
 
