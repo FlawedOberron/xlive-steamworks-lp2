@@ -1,3 +1,4 @@
+#include <ctime>
 #include "mods/lp2.h"
 
 #include "core/config.h"
@@ -147,9 +148,23 @@ int GameBuild()
 			}
 		}
 	}
+	char linked[32] = "?";
+	time_t stamp = (time_t)nt->FileHeader.TimeDateStamp;
+	if (tm* t = gmtime(&stamp)) {
+		strftime(linked, sizeof linked, "%Y-%m-%d", t);
+	}
 	if (dx >= 0 && version >= 0) {
 		build = version * 2 + dx;
-		XLS_LOG_INFO("mods: game build %s.", BuildName(build));
+		XLS_LOG_INFO("game: %ls version %s (%s build, exe linked %s) -> %s.", name, version ? "1.100" : "1.000",
+			version ? "retail/disc" : "Steam", linked, BuildName(build));
+	}
+	else if (TitleStarted()) {
+		static bool warned = false;
+		if (!warned) {
+			warned = true;
+			XLS_LOG_WARN("game: unrecognised build: %ls, version string %s (exe linked %s); build-specific mods are off.", name,
+				version < 0 ? "not found" : "found", linked);
+		}
 	}
 	return build;
 }
