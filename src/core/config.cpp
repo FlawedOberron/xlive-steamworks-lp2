@@ -531,12 +531,13 @@ const std::string* StatNameFor(uint32_t viewId, uint16_t columnId)
 	return nullptr;
 }
 
-void ConfigSetNetwork(bool share, bool receive, uint32_t sendRateKBytes, bool updateAuto)
+void ConfigSetNetwork(bool share, bool receive, uint32_t sendRateKBytes, bool updateAuto, int lobbyDistanceFilter)
 {
 	g_config.partsShare = share;
 	g_config.partsReceive = receive;
 	g_config.sendRateKBytes = sendRateKBytes;
 	g_config.updateAuto = updateAuto;
+	g_config.lobbyDistanceFilter = lobbyDistanceFilter;
 	std::vector<uint8_t> bytes;
 	std::string text = "{\n}\n";
 	if (ReadFileBytes(g_configPath, bytes)) {
@@ -544,7 +545,8 @@ void ConfigSetNetwork(bool share, bool receive, uint32_t sendRateKBytes, bool up
 	}
 	if (!SetSetting(&text, "mods", "share_parts", share ? "true" : "false") || !SetSetting(&text, "mods", "receive_parts", receive ? "true" : "false") ||
 	    !SetSetting(&text, "network", "send_rate_kbytes", std::to_string(sendRateKBytes)) ||
-	    !SetSetting(&text, "update", "auto", updateAuto ? "true" : "false")) {
+	    !SetSetting(&text, "update", "auto", updateAuto ? "true" : "false") ||
+	    !SetSetting(&text, "sessions", "lobby_distance_filter", std::to_string(lobbyDistanceFilter))) {
 		XLS_LOG_WARN("config: couldn't place the network settings in %ls; not saved.", g_configPath.c_str());
 		return;
 	}
@@ -558,8 +560,8 @@ void ConfigSetNetwork(bool share, bool receive, uint32_t sendRateKBytes, bool up
 		XLS_LOG_WARN("config: couldn't write %ls.", g_configPath.c_str());
 		return;
 	}
-	XLS_LOG_INFO("config: network settings saved (share parts %d, receive parts %d, send rate %u KB/s (0 = auto), auto update %d).", share, receive,
-	             sendRateKBytes, updateAuto);
+	XLS_LOG_INFO("config: network settings saved (share parts %d, receive parts %d, send rate %u KB/s (0 = auto), auto update %d, lobby distance %d).", share,
+	             receive, sendRateKBytes, updateAuto, lobbyDistanceFilter);
 }
 
 }

@@ -701,8 +701,8 @@ void LoadMaps()
 	std::wstring remote = Cfg().modCacheDir + L"maps\\remote\\";
 	for (const std::wstring& file : ListFiles(remote, L"*.zip")) {
 		MapPackage map;
-		map.hash = WideToUtf8(file.substr(0, file.size() - 4).c_str());
-		map.package = L"remote-" + file.substr(0, file.size() - 4);
+		map.hash = CacheNameHash(file.substr(0, file.size() - 4)); // Map_<name>_<hash>.zip (older builds: <hash>.zip)
+		map.package = L"remote-" + Utf8ToWide(map.hash.c_str());
 		map.zip = remote + file;
 		map.remote = true;
 		Zip zip;
@@ -793,6 +793,13 @@ DWORD WINAPI DownloadThread(LPVOID param)
 	ok = ok && zip.Open(path) && ReadManifest(zip, map.package, &map);
 	if (!ok) {
 		DeleteFileW(path.c_str());
+	}
+	else {
+		// kept as Map_<name>_<hash>.zip, so the cache folder says what each one is
+		std::wstring named = Cfg().modCacheDir + L"maps\\remote\\" + CacheName("Map", map.name, d->hash) + L".zip";
+		if (MoveFileExW(path.c_str(), named.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+			map.zip = named;
+		}
 	}
 	std::lock_guard<std::recursive_mutex> lock(g_mutex);
 	if (ok && FindHash(d->hash) < 0) {

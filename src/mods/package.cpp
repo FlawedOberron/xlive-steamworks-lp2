@@ -1,5 +1,7 @@
 #include "mods/package.h"
 
+#include "core/utils.h"
+
 #include "third-party/puff.h"
 
 #include <windows.h>
@@ -44,6 +46,30 @@ bool WriteWholeFile(const std::wstring& path, const Bytes& data)
 	bool ok = data.empty() || (WriteFile(file, data.data(), (DWORD)data.size(), &wrote, nullptr) && wrote == data.size());
 	CloseHandle(file);
 	return ok && MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
+}
+
+std::wstring CacheName(const char* type, const std::string& name, const std::string& hash)
+{
+	std::wstring safe;
+	for (wchar_t c : Utf8ToWide(name.c_str())) {
+		if (safe.size() >= 40) {
+			break;
+		}
+		safe += c < 32 || wcschr(L"<>:\"/\\|?*", c) ? L'-' : c;
+	}
+	while (!safe.empty() && (safe.back() == L' ' || safe.back() == L'.')) {
+		safe.pop_back();
+	}
+	while (!safe.empty() && safe[0] == L' ') {
+		safe.erase(0, 1);
+	}
+	return Utf8ToWide(type) + L"_" + (safe.empty() ? L"Unnamed" : safe) + L"_" + Utf8ToWide(hash.c_str());
+}
+
+std::string CacheNameHash(const std::wstring& name)
+{
+	size_t at = name.find_last_of(L'_');
+	return WideToUtf8((at == std::wstring::npos ? name : name.substr(at + 1)).c_str());
 }
 
 namespace {

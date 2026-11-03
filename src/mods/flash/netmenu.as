@@ -1,5 +1,5 @@
 // LP2 mods: a sixth Options entry, Network, below the game's five (flash\option\id500_PC). Its
-// panel is a copy of the Controls panel (mc_subMenu1) showing four rows. The ring menu's own
+// panel is a copy of the Controls panel (mc_subMenu1) showing five rows. The ring menu's own
 // script (mc_main, frame 15) drives the game's entries; ours wraps its main phase and focus and
 // runs its own panel phase. Values live in the DLL (netmenu.cpp): ExternalInterface "evnt" 990
 // asks for them, 991 (row, step) changes one; the DLL answers through _root.lp2NetSet.
@@ -8,12 +8,12 @@ var lp2NetWasOver = false; // the mouse was over our entry last frame (select on
 var lp2NetMain;
 var lp2NetFocus;
 var lp2NetAngle = -48; // the game's entries sit at 32, 16, 0, -16, -32
-var lp2NetTexts = new Array("NETWORK","","","","","","","","");
-var lp2NetRows = 4;
-// Our texts are MsgOption messages 401-411 (the DLL adds them to every language of the message
+var lp2NetTexts = new Array("NETWORK","","","","","","","","","","");
+var lp2NetRows = 5;
+// Our texts are MsgOption messages 401-417 (the DLL adds them to every language of the message
 // file); English when they are missing.
 var lp2NetBase = 401;
-var lp2NetEnglish = new Array("NETWORK","Share Custom Parts","Receive Custom Parts","Upload Speed","Auto","Custom parts sharing and upload speed for online play.","Let other players download and see your custom parts.","Download and show other players\' custom parts.","Upload speed to each player for custom parts and maps. Lower it on a slow connection.","Update Automatically","Download and install new versions of the mod when the game starts.");
+var lp2NetEnglish = new Array("NETWORK","Share Custom Parts","Receive Custom Parts","Upload Speed","Auto","Custom parts sharing and upload speed for online play.","Let other players download and see your custom parts.","Download and show other players\' custom parts.","Upload speed to each player for custom parts and maps. Lower it on a slow connection.","Update Automatically","Download and install new versions of the mod when the game starts.","Matchmaking Distance","Close","Region","Far","Worldwide","How far away to look for online games. Nearer games usually connect better; Worldwide finds the most.");
 function lp2NetMsg(i)
 {
    var s = Message["get"]("MsgOption",lp2NetBase + i);
@@ -28,12 +28,13 @@ function lp2NetOnOff(on)
    var s = Message["get"]("MsgOption",91 + (on ? 1 : 0));
    return s == undefined || s == "" ? (on ? "On" : "Off") : s;
 }
-// The DLL's values: share, receive and update "0" / "1", the upload speed's text ("" = Auto). The texts are kept
+// The DLL's values: share, receive and update "0" / "1", the upload speed's text ("" = Auto), the matchmaking
+// distance "0"-"3" (Close, Region, Far, Worldwide). The texts are kept
 // and put back every frame: the copied panel's text fields come back with their authored text when
 // the rows change frames.
-function lp2NetSet(share, receive, rate, update)
+function lp2NetSet(share, receive, rate, update, distance)
 {
-   lp2NetTexts = new Array(lp2NetMsg(0),lp2NetMsg(1),lp2NetOnOff(share == "1"),lp2NetMsg(2),lp2NetOnOff(receive == "1"),lp2NetMsg(3),rate == "" ? lp2NetMsg(4) : rate,lp2NetMsg(9),lp2NetOnOff(update == "1"));
+   lp2NetTexts = new Array(lp2NetMsg(0),lp2NetMsg(1),lp2NetOnOff(share == "1"),lp2NetMsg(2),lp2NetOnOff(receive == "1"),lp2NetMsg(3),rate == "" ? lp2NetMsg(4) : rate,lp2NetMsg(9),lp2NetOnOff(update == "1"),lp2NetMsg(11),lp2NetMsg(12 + Number(distance)));
    lp2NetApply(_root.mc_main);
    return true;
 }
@@ -57,10 +58,10 @@ function lp2NetApply(m)
       i++;
    }
 }
-// The help line at the bottom: 0 the entry, 1-4 a row.
+// The help line at the bottom: 0 the entry, 1-5 a row.
 function lp2NetHint(n)
 {
-   _root.mc_CINESCO.cinescoMsg(lp2NetMsg(n == 4 ? 10 : 5 + n));
+   _root.mc_CINESCO.cinescoMsg(lp2NetMsg(n == 5 ? 16 : n == 4 ? 10 : 5 + n));
 }
 function lp2NetMouseOn(mc)
 {
@@ -263,13 +264,13 @@ function lp2NetInstall(m)
       p["mc_txtSubMenu" + i]._visible = false;
       i++;
    }
-   m.lp2NetItem = new MenuItem(p,new Array("SUB1_1","SUB1_2","SUB1_3","SUB1_4"),true,0,3,true);
+   m.lp2NetItem = new MenuItem(p,new Array("SUB1_1","SUB1_2","SUB1_3","SUB1_4","SUB1_5"),true,0,5,true);
    lp2NetMain = m.phaseMainMenu;
    lp2NetFocus = m.focusMainMenu;
    m.phaseMainMenu = lp2NetMainPhase;
    m.focusMainMenu = lp2NetFocusAll;
    m.onEnterFrame = lp2NetMainPhase;
-   lp2NetTexts = new Array(lp2NetMsg(0),lp2NetMsg(1),"",lp2NetMsg(2),"",lp2NetMsg(3),"",lp2NetMsg(9),""); // values come from the DLL
+   lp2NetTexts = new Array(lp2NetMsg(0),lp2NetMsg(1),"",lp2NetMsg(2),"",lp2NetMsg(3),"",lp2NetMsg(9),"",lp2NetMsg(11),""); // values come from the DLL
    t6.txt_Menu.text = lp2NetTexts[0];
    flash.external.ExternalInterface.call("evnt",990,0);
 }

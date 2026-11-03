@@ -13,6 +13,10 @@ using Bytes = std::vector<uint8_t>;
 
 bool ReadWholeFile(const std::wstring& path, Bytes* out);
 bool WriteWholeFile(const std::wstring& path, const Bytes& data); // creates parent folders
+// ModCache names of downloads: <type>_<name>_<hash>, the name made safe for a file name (40 characters at most).
+std::wstring CacheName(const char* type, const std::string& name, const std::string& hash);
+// The hash of a cache name (its last "_" part), or the whole name (older builds named them by the hash alone).
+std::string CacheNameHash(const std::wstring& name);
 
 // Stored and deflated entries of a .zip (no zip64, no encryption). Open reads the central directory only; Read
 // reads an entry from the file.

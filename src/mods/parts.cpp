@@ -414,11 +414,33 @@ void LoadFolder(const std::wstring& dir, const std::wstring& label, std::vector<
 		return;
 	}
 	std::vector<PartSet>* target = into ? into : &g_sets;
-	for (const PartSet& other : *target) {
-		if (_stricmp(other.id.c_str(), set.id.c_str()) == 0) {
-			XLS_LOG_WARN("mods: parts %ls: id \"%s\" already used by %ls, skipped.", label.c_str(), set.id.c_str(), other.source.c_str());
+	// Parts received from other players are one part each, under their set's id: copied into Parts, a set's
+	// head, body, back and legs come as separate folders with the same id. One that adds parts the other
+	// lacks gets its own id (<id>-<part>); the same part twice is a real clash.
+	for (bool renamed = false;;) {
+		const PartSet* clash = nullptr;
+		for (const PartSet& other : *target) {
+			if (_stricmp(other.id.c_str(), set.id.c_str()) == 0) {
+				clash = &other;
+			}
+		}
+		if (!clash) {
+			break;
+		}
+		int first = -1;
+		bool overlap = false;
+		for (int s = 0; s < kPartSlotCount; s++) {
+			overlap = overlap || (!set.models[s].empty() && !clash->models[s].empty());
+			first = first < 0 && !set.models[s].empty() ? s : first;
+		}
+		if (overlap || renamed || first < 0) {
+			XLS_LOG_WARN("mods: parts %ls: id \"%s\" already used by %ls, skipped.", label.c_str(), set.id.c_str(), clash->source.c_str());
 			return;
 		}
+		XLS_LOG_INFO("mods: parts %ls: id \"%s\" is also %ls's (other parts): loaded as \"%s-%s\".", label.c_str(), set.id.c_str(), clash->source.c_str(),
+		             set.id.c_str(), kSlotNames[first]);
+		set.id += std::string("-") + kSlotNames[first];
+		renamed = true;
 	}
 	std::string slots;
 	for (int s = 0; s < kPartSlotCount; s++) {
@@ -1794,11 +1816,59 @@ struct RemoteJob {
 	std::string hash;
 };
 
+// A downloaded set's folder in parts\remote: <Head|Chest|Back|Legs>_<name>_<hash> for a part, Set_<name>_<hash> for a
+// whole set (what older builds send), or just <hash> (older builds' cache, and until the download is in).
+std::wstring RemotePartDir(const std::string& hash)
+{
+	std::wstring root = Cfg().modCacheDir + L"parts\\remote\\";
+	WIN32_FIND_DATAW fd;
+	HANDLE find = FindFirstFileW((root + L"*_" + Utf8ToWide(hash.c_str())).c_str(), &fd);
+	if (find != INVALID_HANDLE_VALUE) {
+		std::wstring found;
+		do {
+			if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && CacheNameHash(fd.cFileName) == hash) {
+				found = fd.cFileName;
+			}
+		} while (found.empty() && FindNextFileW(find, &fd));
+		FindClose(find);
+		if (!found.empty()) {
+			return root + found + L"\\";
+		}
+	}
+	return root + Utf8ToWide(hash.c_str()) + L"\\";
+}
+
+// A set just downloaded (or found under its hash alone) goes to its named folder, before anything points into it.
+std::wstring NameRemotePartDir(const std::string& hash, const std::wstring& dir)
+{
+	std::wstring root = Cfg().modCacheDir + L"parts\\remote\\";
+	if (dir != root + Utf8ToWide(hash.c_str()) + L"\\") {
+		return dir; // named already
+	}
+	std::vector<PartSet> sets;
+	LoadFolder(dir, L"remote " + Utf8ToWide(hash.c_str()), &sets);
+	if (sets.size() != 1) {
+		return dir;
+	}
+	static const char* const kTypes[kPartSlotCount] = {"Head", "Chest", "Back", "Legs"};
+	const char* type = "Set";
+	for (int s = 0; s < kPartSlotCount; s++) {
+		if (sets[0].partHash[s] == hash && sets[0].hash != hash) {
+			type = kTypes[s];
+		}
+	}
+	std::wstring named = root + CacheName(type, sets[0].name, hash);
+	if (!MoveFileExW(dir.substr(0, dir.size() - 1).c_str(), named.c_str(), 0)) {
+		return dir;
+	}
+	return named + L"\\";
+}
+
 DWORD WINAPI RemoteSetThread(LPVOID param)
 {
 	std::unique_ptr<RemoteJob> job((RemoteJob*)param);
 	const std::string& hash = job->hash;
-	std::wstring dir = Cfg().modCacheDir + L"parts\\remote\\" + Utf8ToWide(hash.c_str()) + L"\\";
+	std::wstring dir = RemotePartDir(hash);
 	bool ok = GetFileAttributesW((dir + L"verified").c_str()) != INVALID_FILE_ATTRIBUTES;
 	if (!ok) {
 		if (job->member == kFakeMember && g_fakeDelayMs > 0) {
@@ -1825,6 +1895,7 @@ DWORD WINAPI RemoteSetThread(LPVOID param)
 	}
 	std::vector<PartSet> sets;
 	if (ok) {
+		dir = NameRemotePartDir(hash, dir);
 		LoadFolder(dir, L"remote " + Utf8ToWide(hash.c_str()), &sets);
 	}
 	int built = 0;
@@ -2036,7 +2107,7 @@ void LoadFakeMember()
 	for (const PartSet& set : g_fakeSets) {
 		for (int s = 0; s < kPartSlotCount; s++) {
 			if (!set.partHash[s].empty()) {
-				RemoveTree(Cfg().modCacheDir + L"parts\\remote\\" + Utf8ToWide(set.partHash[s].c_str()) + L"\\");
+				RemoveTree(RemotePartDir(set.partHash[s]));
 			}
 		}
 	}
@@ -2084,8 +2155,9 @@ uint64_t SlotMember(int p)
 		return 0;
 	}
 	if (g_infoXuidOffset < 0) {
-		// online the infos hold no XUID or name: slot p is the session member table's entry p
-		return game[0x256] ? MatchSlotMember(p, info) : 0;
+		// online the infos hold no XUID or name: slot p is the session member table's entry p. Online is the VS
+		// flag (+0x256) or a lobby: an online Campaign keeps the flag clear
+		return game[0x256] || xls::SessionPresenceLobby().IsValid() ? MatchSlotMember(p, info) : 0;
 	}
 	uint64_t steamId = InfoSteamId(*(XUID*)(info + g_infoXuidOffset));
 	return steamId == xls::SteamLocalId().ConvertToUint64() ? 0 : steamId; // our own: the menu's choice
@@ -3251,7 +3323,7 @@ void __attribute__((thiscall)) StageRequest(void* loader, uint32_t character, ui
 	}
 	static std::atomic<int> logged{0};
 	if (logged++ < 16) {
-		XLS_LOG_INFO("mods: parts: stage parts request (character %u, %d player(s), %s).", character, t_stagePlayerCount, game && game[0x256] ? "online" : "offline");
+		XLS_LOG_INFO("mods: parts: stage parts request (character %u, %d player(s), %s).", character, t_stagePlayerCount, game && game[0x256] ? "online" : xls::SessionPresenceLobby().IsValid() ? "lobby, 4 slots" : "offline");
 	}
 	g_stageRequestOriginal(loader, character, a, b);
 	t_stagePlayerCount = -1;

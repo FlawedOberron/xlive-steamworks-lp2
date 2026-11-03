@@ -138,7 +138,7 @@ const std::wstring& ConfigPath();
 // The Options menu's Network page (mods/netmenu.cpp): sets these in the running configuration and
 // writes them to xlive_steamworks.json ("mods": share_parts / receive_parts, "network":
 // send_rate_kbytes), keeping the file's other text and comments.
-void ConfigSetNetwork(bool share, bool receive, uint32_t sendRateKBytes, bool updateAuto);
+void ConfigSetNetwork(bool share, bool receive, uint32_t sendRateKBytes, bool updateAuto, int lobbyDistanceFilter);
 
 // Run-time overrides from the extension API, consulted before the file.
 bool ExtAchievementName(uint32_t achievementId, std::string* out);
