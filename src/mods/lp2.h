@@ -67,6 +67,14 @@ void VersionsInstall(unsigned char* base);
 
 // Bot brains per game type and the "other weapon" FilterWeapon mode (bots.cpp).
 void BotsInstall(unsigned char* base);
+// The AI Enemy Battle screen's bot rows (rules.cpp), read by bots.cpp as each bot is set up
+struct BotOptions {
+	int difficulty;  // 0 easy, 1 normal, 2 hard, 3 veteran
+	bool improved;   // our per-mode brains (else the stock HumanBotBt)
+	int personality; // 0 mixed, else archetype 1..5 for every bot
+	int taunts;      // 0 off, 1 rare, 2 normal, 3 lots
+};
+BotOptions BotMenuOptions();
 // The overlay mod file that replaces a game file (overlay.cpp), or nullptr.
 const std::wstring* OverlayRedirect(const std::wstring& path);
 void OnewaySetMap(const MapPhysics* physics);

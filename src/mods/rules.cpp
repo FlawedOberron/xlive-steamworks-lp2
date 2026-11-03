@@ -237,6 +237,11 @@ std::atomic<bool> g_offline{true}; // not in a lobby (training): the bots run on
 std::atomic<bool> g_botArmed{false}, g_botSurvival{false};
 std::atomic<int> g_botLives{3}, g_botRule{0}; // index into kLives; the screen's rule (0 Elimination, 1 Team Elimination)
 std::atomic<int> g_botCount{15};
+std::atomic<int> g_botDifficulty{1}, g_botBrain{1}, g_botPersona{0}, g_botTaunts{2};
+const char* const kDifficultyNames[] = {"Easy", "Normal", "Hard", "Veteran"};
+const char* const kBrainNames[] = {"Stock", "Improved"};
+const char* const kPersonaNames[] = {"Mixed", "Aggressor", "Tactician", "Cautious", "Show-off", "Grenadier"};
+const char* const kTauntNames[] = {"Off", "Rare", "Normal", "Lots"};
 std::atomic<bool> g_menuSurvival{false};
 std::atomic<int> g_lives{0};
 std::atomic<int> g_menuLives{0};
@@ -1365,9 +1370,10 @@ bool BotScreen(uint8_t* menu)
 }
 
 // The rows by their item number (the game's Map 0 and Game Type 1, our Survival 2, Respawns 3,
-// Bots 4) in screen order, the shown ones only: Survival for the elimination rules, Respawns with
-// Survival on.
-const int kRowBots = 4;
+// Bots 4, Difficulty 5, Brain 6, Personality 7, Taunts 8) in screen order, the shown ones only: Survival
+// for the elimination rules, Respawns with Survival on.
+const int kRowBots = 4, kRowDifficulty = 5, kRowBrain = 6, kRowPersona = 7, kRowTaunts = 8, kRowLast = 8;
+const int kRowsMax = kRowLast + 1;
 int BotRowsShown(uint8_t* menu, int* rows)
 {
 	int n = 0;
@@ -1380,21 +1386,38 @@ int BotRowsShown(uint8_t* menu, int* rows)
 			rows[n++] = 3;
 		}
 	}
+	for (int r = kRowDifficulty; r <= kRowLast; r++) {
+		rows[n++] = r;
+	}
 	return n;
 }
 
 void BotRowsDraw(uint8_t* menu)
 {
 	g_botRule = *(int32_t*)(menu + kMenuRule);
-	int rows[5], shown = BotRowsShown(menu, rows);
+	int rows[kRowsMax], shown = BotRowsShown(menu, rows);
 	std::string bots = std::to_string(g_botCount.load());
-	FlashArg args[8] = {{0, 4, "SURVIVAL"}, {0, 4, g_botSurvival ? "On" : "Off"}, {0, 4, "RESPAWNS"}, {0, 4, kLivesNames[g_botLives % kLivesValues]},
-	                    {0, 4, shown > 3 ? "1" : "0"}, {0, 4, shown > 4 ? "1" : "0"}, {0, 4, "BOTS"}, {0, 4, bots.c_str()}};
-	if (!g_flashCall || !g_flashCall(menu, 0, "lp2BotRows", args, 8)) {
+	struct { int n; const char* label; const char* value; } ours[] = {
+		{2, "SURVIVAL", g_botSurvival ? "On" : "Off"}, {3, "RESPAWNS", kLivesNames[g_botLives % kLivesValues]},
+		{kRowBots, "BOTS", bots.c_str()}, {kRowDifficulty, "DIFFICULTY", kDifficultyNames[g_botDifficulty & 3]},
+		{kRowBrain, "BRAIN", kBrainNames[g_botBrain & 1]}, {kRowPersona, "PERSONALITY", kPersonaNames[g_botPersona % 6]},
+		{kRowTaunts, "TAUNTS", kTauntNames[g_botTaunts & 3]}};
+	bool ok = g_flashCall != nullptr;
+	for (auto& r : ours) {
+		std::string n = std::to_string(r.n);
+		FlashArg args[3] = {{0, 4, n.c_str()}, {0, 4, r.label}, {0, 4, r.value}};
+		ok = ok && g_flashCall(menu, 0, "lp2BotRow", args, 3);
+	}
+	std::string order;
+	for (int i = 0; i < shown; i++) {
+		order += (i ? "," : "") + std::to_string(rows[i]);
+	}
+	FlashArg arg = {0, 4, order.c_str()};
+	if (!ok || !g_flashCall(menu, 0, "lp2BotOrder", &arg, 1)) {
 		static bool warned = false;
 		if (!warned) {
 			warned = true;
-			XLS_LOG_WARN("mods: rules: training: the menu Flash has no lp2BotRows (rows not added).");
+			XLS_LOG_WARN("mods: rules: training: the menu Flash has no lp2BotRow / lp2BotOrder (rows not added).");
 		}
 	}
 }
@@ -1425,7 +1448,7 @@ void __attribute__((fastcall)) BotCursorBody(uint8_t* menu)
 		BotRowsDraw(menu);
 	}
 	uint32_t pressed = *(uint32_t*)(*g_input + kInputPressed);
-	int rows[5], shown = BotRowsShown(menu, rows), at = shown - 1; // a hidden row: the last shown
+	int rows[kRowsMax], shown = BotRowsShown(menu, rows), at = shown - 1; // a hidden row: the last shown
 	for (int i = 0; i < shown; i++) {
 		if (rows[i] == row) {
 			at = i;
@@ -1469,12 +1492,28 @@ void __attribute__((fastcall)) BotStep(uint8_t* menu)
 	if (!dir) {
 		return;
 	}
-	if (*(int32_t*)(menu + kMenuRow) == kRowBots) {
+	// a list row: one step, stopping at its ends
+	auto step = [dir](std::atomic<int>& v, int count) {
+		int at = v + dir;
+		if (at < 0 || at >= count) {
+			return false;
+		}
+		v = at;
+		return true;
+	};
+	int row = *(int32_t*)(menu + kMenuRow);
+	if (row == kRowBots) {
 		int at = g_botCount + dir;
 		if (at < 1 || at > 15) {
 			return;
 		}
 		g_botCount = at;
+	} else if (row == kRowDifficulty || row == kRowBrain || row == kRowPersona || row == kRowTaunts) {
+		bool changed = row == kRowDifficulty ? step(g_botDifficulty, 4) : row == kRowBrain ? step(g_botBrain, 2)
+		             : row == kRowPersona ? step(g_botPersona, 6) : step(g_botTaunts, 4);
+		if (!changed) {
+			return;
+		}
 	} else if (*(int32_t*)(menu + kMenuRow) == 2) {
 		if (*(int32_t*)(menu + kMenuRule) > 1) {
 			return; // Survival only for the elimination rules
@@ -1488,7 +1527,9 @@ void __attribute__((fastcall)) BotStep(uint8_t* menu)
 		g_botLives = at;
 	}
 	BotRowsDraw(menu);
-	XLS_LOG_INFO("mods: rules: training: %d bots, survival %s, %s respawns.", g_botCount.load(), g_botSurvival ? "on" : "off", kLivesNames[g_botLives % kLivesValues]);
+	XLS_LOG_INFO("mods: rules: training: %d bots, survival %s, %s respawns, %s, %s brain, %s, taunts %s.", g_botCount.load(),
+	             g_botSurvival ? "on" : "off", kLivesNames[g_botLives % kLivesValues], kDifficultyNames[g_botDifficulty & 3],
+	             kBrainNames[g_botBrain & 1], kPersonaNames[g_botPersona % 6], kTauntNames[g_botTaunts & 3]);
 }
 
 // The bottom bar text: AI Enemy Battle asks for MsgCinesco 0x106 + row, so our rows get ours
@@ -1500,9 +1541,13 @@ const int kHelpBotRow = 0x106;
 extern "C" void __attribute__((thiscall)) MenuHelpBody(uint8_t* menu, int id)
 {
 	static const char* const kHelp[] = {"Limit respawns: the last player or team standing wins.", "How many times each player can respawn.",
-	                                    "How many AI enemies join the battle (1 to 15)."};
+	                                    "How many AI enemies join the battle (1 to 15).",
+	                                    "How hard the bots fight: how aggressive, quick to dodge and keen on grenades they are.",
+	                                    "Improved: weapon-aware bots with a brain per game type. Stock: the game's own.",
+	                                    "Mixed gives each bot its own style; or make every bot one kind.",
+	                                    "How often bots taunt after a kill."};
 	int row = id - kHelpBotRow;
-	if (!BotScreen(menu) || row < 2 || row > kRowBots) {
+	if (!BotScreen(menu) || row < 2 || row > kRowLast) {
 		g_menuHelpOriginal(menu, id);
 		return;
 	}
@@ -1513,6 +1558,15 @@ extern "C" void __attribute__((thiscall)) MenuHelpBody(uint8_t* menu, int id)
 }
 
 // Its callers keep the menu in ecx across the call, so the replacement keeps ecx and edx.
+}
+
+BotOptions BotMenuOptions()
+{
+	return {g_botDifficulty & 3, g_botBrain != 0, g_botPersona % 6, g_botTaunts & 3};
+}
+
+namespace {
+
 extern "C" void __attribute__((naked)) MenuHelp()
 {
 	asm volatile("push %%ecx\n\tpush %%edx\n\tpushl 12(%%esp)\n\tcall %P0\n\tpop %%edx\n\tpop %%ecx\n\tret $4" ::"i"(MenuHelpBody));

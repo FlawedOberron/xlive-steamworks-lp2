@@ -21,7 +21,9 @@
 // goals), 9 follow (FriendFollow), 10 granade (ThrowG), 11 appeal (Appeal1: the taunt after a kill, pad
 // action 26). The first time a bot is evaluated it gets an archetype (scales on its stock values + jitter),
 // kept by unit pointer. Taunts are gated so they're occasional: per bot and 4 s window, a roll against the
-// archetype's taunt chance; a failed roll scores appeal 0.
+// archetype's taunt chance; a failed roll scores appeal 0. The AI Enemy Battle screen's rows (BotMenuOptions) pick
+// the brain (Improved = ours, Stock), one archetype for every bot or a mix, a difficulty that scales the traits
+// (attacker, quickness, grenade, impatient up; calm down) and how often taunts may come.
 #include "mods/lp2.h"
 #include "mods/parts.h"
 
@@ -127,7 +129,7 @@ int GameKind()
 
 uint32_t __attribute__((thiscall)) ThinkSet(void* spec, const char* path)
 {
-	if (g_brains && path && strcmp(path, kStockBrain) == 0) {
+	if (g_brains && BotMenuOptions().improved && path && strcmp(path, kStockBrain) == 0) {
 		int kind = GameKind();
 		std::string mine = std::string(kStockBrain) + "_" + ModeName(kind);
 		uint32_t ok = g_thinkOriginal(spec, mine.c_str());
@@ -195,20 +197,24 @@ int Personality(uint8_t* unit)
 	if (g_personality.size() > 256) {
 		g_personality.clear(); // stale units from earlier matches
 	}
-	int a = (int)(Rand() % kArchetypeCount);
+	BotOptions o = BotMenuOptions();
+	int a = o.personality > 0 ? (o.personality - 1) % kArchetypeCount : (int)(Rand() % kArchetypeCount);
 	g_personality[unit] = a;
 	uint8_t* p = unit + g_vas->param;
 	const Archetype& k = kArchetypes[a];
+	// difficulty on top of the archetype: fight, dodge, grenades and urgency up, waiting down (and the reverse)
+	const float kDifficulty[] = {0.6f, 1.0f, 1.3f, 1.6f};
+	float d = kDifficulty[o.difficulty & 3];
 	uint8_t before[3] = {p[kAttacker], p[kQuickness], p[kAppeal]};
-	Scale(p, kAttacker, k.attacker);
-	Scale(p, kCalm, k.calm);
-	Scale(p, kQuickness, k.quickness);
+	Scale(p, kAttacker, k.attacker * d);
+	Scale(p, kCalm, k.calm / d);
+	Scale(p, kQuickness, k.quickness * d);
 	Scale(p, kHold, k.hold);
-	Scale(p, kImpatient, k.impatient);
-	Scale(p, kGrenade, k.grenade);
+	Scale(p, kImpatient, k.impatient * d);
+	Scale(p, kGrenade, k.grenade * d);
 	Scale(p, kAppeal, k.appeal);
-	XLS_LOG_INFO("mods: bots: %p is a %s (attacker %u -> %u, quickness %u -> %u, appeal %u -> %u).", unit, k.name,
-	             before[0], p[kAttacker], before[1], p[kQuickness], before[2], p[kAppeal]);
+	XLS_LOG_INFO("mods: bots: %p is a %s, difficulty x%.1f (attacker %u -> %u, quickness %u -> %u, appeal %u -> %u).", unit,
+	             k.name, d, before[0], p[kAttacker], before[1], p[kQuickness], before[2], p[kAppeal]);
 	return a;
 }
 
@@ -221,7 +227,8 @@ float __attribute__((thiscall)) EvalParam(uint8_t* eval, uint8_t* unit)
 	int a = Personality(unit);
 	if (*(uint32_t*)(eval + kEvalMode) == kModeAppeal) {
 		uint32_t roll = Mix((uint32_t)(uintptr_t)unit ^ (GetTickCount() / 4000) * 0x9e3779b9u) % 100;
-		if ((int)roll >= kArchetypes[a].taunt) {
+		const float kTauntScale[] = {0.0f, 0.4f, 1.0f, 2.0f};
+		if ((float)roll >= kArchetypes[a].taunt * kTauntScale[BotMenuOptions().taunts & 3]) {
 			return 0.0f;
 		}
 	}
