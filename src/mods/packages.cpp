@@ -1,3 +1,4 @@
+#include <new>
 #include "mods/packages.h"
 
 #include "core/config.h"
@@ -231,11 +232,17 @@ bool Unpack(const Zip& zip, const MapPackage& map, int slot, const std::wstring&
 				entry.name = RenumberName(entry.name, map.number, slot);
 				refs += Renumber(entry.data.data(), entry.data.size(), map.number, slot);
 			}
-			data = ArcWrite(entries);
+			Bytes().swap(data); // the packed archive, before the rewritten one is written (address space)
+			std::wstring out = dir + Utf8ToWide(rel.c_str());
+			std::replace(out.begin(), out.end(), L'/', L'\\');
+			if (!ArcWriteFile(out, entries)) {
+				XLS_LOG_WARN("mods: map %ls: cannot write %ls.", map.package.c_str(), out.c_str());
+				return false;
+			}
+			files++;
+			continue;
 		}
-		else {
-			refs += Renumber(data.data(), data.size(), map.number, slot);
-		}
+		refs += Renumber(data.data(), data.size(), map.number, slot);
 		std::wstring out = dir + Utf8ToWide(rel.c_str());
 		std::replace(out.begin(), out.end(), L'/', L'\\');
 		if (!WriteWholeFile(out, data)) {
@@ -548,7 +555,15 @@ bool Unpacked(const MapPackage& map, int slot)
 	Bytes old;
 	if (!(ReadWholeFile(dir + L"stamp.txt", &old) && std::string(old.begin(), old.end()) == stamp)) {
 		Zip zip;
-		if (!zip.Open(map.zip) || !Unpack(zip, map, slot, dir)) {
+		bool ok = false;
+		try {
+			ok = zip.Open(map.zip) && Unpack(zip, map, slot, dir);
+		}
+		catch (const std::bad_alloc&) {
+			// a 32-bit game on Windows has 2 GB: a big map can find no room while another is loaded
+			XLS_LOG_ERROR("mods: map %ls: out of memory unpacking it for slot %d (restarting the game frees it up).", map.package.c_str(), slot);
+		}
+		if (!ok) {
 			return false;
 		}
 		WriteWholeFile(dir + L"stamp.txt", Bytes(stamp.begin(), stamp.end()));

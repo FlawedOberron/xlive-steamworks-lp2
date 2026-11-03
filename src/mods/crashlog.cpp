@@ -5,6 +5,8 @@
 #include <windows.h>
 
 #include <stdint.h>
+#include <exception>
+#include <typeinfo>
 
 // Crash log: a vectored handler that writes faults (access violations and the like) to the log with
 // the module + offset of the faulting instruction, the registers and the return addresses on the
@@ -105,9 +107,33 @@ LONG CALLBACK Handler(EXCEPTION_POINTERS* info)
 
 }
 
+// An uncaught C++ exception (out of memory, a bad container access) ends the game through std::terminate, which
+// the exception handler doesn't see: say what it was before the process goes.
+void Terminate()
+{
+	const char* what = "unknown";
+	std::string type = "?";
+	try {
+		if (std::exception_ptr e = std::current_exception()) {
+			std::rethrow_exception(e);
+		}
+		what = "no exception (std::terminate called directly)";
+	}
+	catch (const std::exception& e) {
+		type = typeid(e).name();
+		XLS_LOG_ERROR("crash: uncaught C++ exception %s (%s), thread %u.", type.c_str(), e.what(), (unsigned)GetCurrentThreadId());
+		abort();
+	}
+	catch (...) {
+	}
+	XLS_LOG_ERROR("crash: std::terminate: %s, thread %u.", what, (unsigned)GetCurrentThreadId());
+	abort();
+}
+
 void CrashLogInstall()
 {
 	AddVectoredExceptionHandler(0, Handler);
+	std::set_terminate(Terminate);
 }
 
 }

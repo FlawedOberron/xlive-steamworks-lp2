@@ -46,6 +46,7 @@ struct ArcEntry {
 bool ArcRead(const Bytes& file, std::vector<ArcEntry>* out);
 // Writes every entry as a zlib stream of stored blocks, which the game's inflate reads like any other.
 Bytes ArcWrite(const std::vector<ArcEntry>& entries);
+bool ArcWriteFile(const std::wstring& path, const std::vector<ArcEntry>& entries); // the same, written as it goes (creates parent folders)
 uint32_t ClassHash(const char* className); // crc32 ^ ~0, low 31 bits
 
 // rFlashMessage: 'MES\0' u32 12 u32 nameLength name\0, then blocks to the end of the file:

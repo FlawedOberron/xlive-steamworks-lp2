@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include <algorithm>
+#include <functional>
 
 namespace xls::mods {
 
@@ -220,21 +221,50 @@ bool ArcRead(const Bytes& f, std::vector<ArcEntry>* out)
 	return true;
 }
 
-Bytes ArcWrite(const std::vector<ArcEntry>& entries)
+namespace {
+
+size_t ArcStreamSize(const ArcEntry& e)
 {
-	std::vector<Bytes> streams;
+	return 2 + 5 * (e.data.empty() ? 1 : (e.data.size() + 65534) / 65535) + e.data.size() + 4;
+}
+
+size_t ArcStart(const std::vector<ArcEntry>& entries)
+{
+	size_t head = 8 + 80 * entries.size();
+	return entries.empty() ? head : (head + 0x7fff) / 0x8000 * 0x8000;
+}
+
+// The archive in order, piece by piece: each entry as a zlib stream of stored blocks (no compression).
+bool ArcEmit(const std::vector<ArcEntry>& entries, const std::function<bool(const uint8_t*, size_t)>& put)
+{
+	Bytes head = {'A', 'R', 'C', 0, 8, 0, (uint8_t)entries.size(), (uint8_t)(entries.size() >> 8)};
+	size_t offset = ArcStart(entries);
 	for (const ArcEntry& e : entries) {
-		Bytes z = {0x78, 0x01};
+		char name[64] = {};
+		strncpy(name, e.name.c_str(), 63);
+		head.insert(head.end(), name, name + 64);
+		Put32(head, e.classHash);
+		Put32(head, (uint32_t)ArcStreamSize(e));
+		Put32(head, (uint32_t)e.data.size() | e.flags << 29);
+		Put32(head, (uint32_t)offset);
+		offset += ArcStreamSize(e);
+	}
+	head.resize(ArcStart(entries));
+	if (!put(head.data(), head.size())) {
+		return false;
+	}
+	for (const ArcEntry& e : entries) {
+		const uint8_t zlib[2] = {0x78, 0x01};
+		if (!put(zlib, 2)) {
+			return false;
+		}
 		size_t at = 0;
 		do {
 			size_t n = e.data.size() - at < 65535 ? e.data.size() - at : 65535;
-			bool last = at + n == e.data.size();
-			z.push_back(last ? 1 : 0);
-			z.push_back((uint8_t)n);
-			z.push_back((uint8_t)(n >> 8));
-			z.push_back((uint8_t)~n);
-			z.push_back((uint8_t)(~n >> 8));
-			z.insert(z.end(), e.data.begin() + at, e.data.begin() + at + n);
+			const uint8_t block[5] = {(uint8_t)(at + n == e.data.size()), (uint8_t)n, (uint8_t)(n >> 8), (uint8_t)~n, (uint8_t)(~n >> 8)};
+			if (!put(block, 5) || (n && !put(e.data.data() + at, n))) {
+				return false;
+			}
 			at += n;
 		} while (at < e.data.size());
 		uint32_t a = 1, b = 0;
@@ -242,30 +272,66 @@ Bytes ArcWrite(const std::vector<ArcEntry>& entries)
 			a = (a + c) % 65521;
 			b = (b + a) % 65521;
 		}
-		uint32_t adler = b << 16 | a;
-		for (int i = 3; i >= 0; i--) {
-			z.push_back((uint8_t)(adler >> (8 * i)));
+		const uint8_t adler[4] = {(uint8_t)(b >> 8), (uint8_t)b, (uint8_t)(a >> 8), (uint8_t)a};
+		if (!put(adler, 4)) {
+			return false;
 		}
-		streams.push_back(std::move(z));
 	}
-	size_t head = 8 + 80 * entries.size();
-	size_t offset = entries.empty() ? head : (head + 0x7fff) / 0x8000 * 0x8000;
-	Bytes out = {'A', 'R', 'C', 0, 8, 0, (uint8_t)entries.size(), (uint8_t)(entries.size() >> 8)};
-	for (size_t i = 0; i < entries.size(); i++) {
-		char name[64] = {};
-		strncpy(name, entries[i].name.c_str(), 63);
-		out.insert(out.end(), name, name + 64);
-		Put32(out, entries[i].classHash);
-		Put32(out, (uint32_t)streams[i].size());
-		Put32(out, (uint32_t)entries[i].data.size() | entries[i].flags << 29);
-		Put32(out, (uint32_t)offset);
-		offset += streams[i].size();
+	return true;
+}
+
+}
+
+Bytes ArcWrite(const std::vector<ArcEntry>& entries)
+{
+	size_t total = ArcStart(entries);
+	for (const ArcEntry& e : entries) {
+		total += ArcStreamSize(e);
 	}
-	out.resize(entries.empty() ? head : (head + 0x7fff) / 0x8000 * 0x8000);
-	for (const Bytes& z : streams) {
-		out.insert(out.end(), z.begin(), z.end());
-	}
+	Bytes out;
+	out.reserve(total);
+	ArcEmit(entries, [&](const uint8_t* p, size_t n) {
+		out.insert(out.end(), p, p + n);
+		return true;
+	});
 	return out;
+}
+
+// As WriteWholeFile(path, ArcWrite(entries)), without the whole archive in memory: a map's scenery archive is 60+ MB,
+// and a 32-bit game on Windows may have no free block that big.
+bool ArcWriteFile(const std::wstring& path, const std::vector<ArcEntry>& entries)
+{
+	for (size_t i = 3; i < path.size(); i++) {
+		if (path[i] == L'\\' || path[i] == L'/') {
+			CreateDirectoryW(path.substr(0, i).c_str(), nullptr);
+		}
+	}
+	std::wstring temp = path + L".tmp";
+	HANDLE file = CreateFileW(temp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+	if (file == INVALID_HANDLE_VALUE) {
+		return false;
+	}
+	Bytes buffer;
+	buffer.reserve(1 << 20);
+	auto flush = [&]() {
+		DWORD wrote = 0;
+		bool ok = buffer.empty() || (WriteFile(file, buffer.data(), (DWORD)buffer.size(), &wrote, nullptr) && wrote == buffer.size());
+		buffer.clear();
+		return ok;
+	};
+	bool ok = ArcEmit(entries, [&](const uint8_t* p, size_t n) {
+		while (n) {
+			size_t take = std::min(n, buffer.capacity() - buffer.size());
+			buffer.insert(buffer.end(), p, p + take);
+			p += take, n -= take;
+			if (buffer.size() == buffer.capacity() && !flush()) {
+				return false;
+			}
+		}
+		return true;
+	}) && flush();
+	CloseHandle(file);
+	return ok && MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING);
 }
 
 uint32_t ClassHash(const char* name)
