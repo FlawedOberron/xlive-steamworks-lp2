@@ -781,6 +781,7 @@ const uint32_t kResultsTeamKills = 0x197c, kColourRed = 0xff3c3cff, kColourBlue 
 std::atomic<int> g_teamRowsX{58}, g_teamRowsY{180}, g_teamRowsGap{13}; // team-hud.txt: x y gap (where the FFA list is)
 
 bool InPlay(int slot);
+bool CountersOurs();
 
 // The list's text style (from its template), left aligned, small.
 void ListTextStyle(uint32_t* style)
@@ -908,7 +909,9 @@ int CockpitShow(uint8_t* hud, bool show)
 void __attribute__((thiscall)) ListDraw(uint8_t* list)
 {
 	g_listDrawOriginal(list);
-	TeamRows(list);
+	if (!CountersOurs()) { // the team counters show the respawns when hooked
+		TeamRows(list);
+	}
 	SpectateHint(list);
 	static bool hidden = false;
 	static DWORD applied = 0;
@@ -1358,6 +1361,73 @@ struct FlashArg {
 };
 using FlashCallFn = bool(__attribute__((thiscall)) *)(uint8_t*, int, const char*, FlashArg*, int);
 FlashCallFn g_flashCall = nullptr;
+
+// Team Survival: the team kill counters (flash\cockpit\id762 mc_Kill, top left, "kills/target") show each
+// team's respawns left over the respawns it started with. The cockpit's setters (thiscall(cockpit),
+// setKillRed / setKillBlue(3 digits, 2 target digits, infinity flag) on the movie at cockpit +0x58) are
+// detoured, and so is its per-frame update (which calls them only when the kills change), to show a new
+// count as soon as a team loses a respawn.
+struct CounterVas {
+	uint32_t red, blue, update;
+};
+const CounterVas kCounterVas[kBuildCount] = {
+	{0xecf520, 0xecf660, 0xedbb80}, // DX11
+	{0xebf710, 0xebf850, 0xecbd70}, // DX9
+	{0xecf8f0, 0xecfa30, 0xedbf50}, // DX11 1.1
+	{0xebf7b0, 0xebf8f0, 0xecbe10}, // DX9 1.1
+};
+const uint32_t kCockpitMovie = 0x58;
+ListDrawFn g_killRedOriginal = nullptr, g_killBlueOriginal = nullptr, g_cockpitUpdateOriginal = nullptr;
+uint8_t* g_counterCockpit = nullptr;
+int g_counterShown[2] = {-1, -1};
+
+bool CountersOurs()
+{
+	return g_survival && g_team && g_lives > 0 && g_killRedOriginal && g_killBlueOriginal && g_cockpitUpdateOriginal && g_flashCall;
+}
+
+void SetCounter(uint8_t* cockpit, int team)
+{
+	uint8_t* movie = *(uint8_t**)(cockpit + kCockpitMovie);
+	if (!movie) {
+		return;
+	}
+	int total = std::min(g_lives - 1, 99), left = std::min(std::max(total - TeamDeaths(team), 0), 999);
+	struct { uint8_t flag; uint32_t type; float number; } args[6] = {
+		{0, 3, float(left / 100)}, {0, 3, float(left / 10 % 10)}, {0, 3, float(left % 10)},
+		{0, 3, float(total / 10)}, {0, 3, float(total % 10)}, {0, 2, 0.0f}}; // 2: bool (false: no infinity)
+	g_flashCall(movie, 0, team ? "_level0.mc_Kill.setKillBlue" : "_level0.mc_Kill.setKillRed", (FlashArg*)args, 6);
+	g_counterShown[team] = left * 100 + total;
+	g_counterCockpit = cockpit;
+}
+
+void __attribute__((thiscall)) KillRed(uint8_t* cockpit)
+{
+	CountersOurs() ? SetCounter(cockpit, 0) : g_killRedOriginal(cockpit);
+}
+
+void __attribute__((thiscall)) KillBlue(uint8_t* cockpit)
+{
+	CountersOurs() ? SetCounter(cockpit, 1) : g_killBlueOriginal(cockpit);
+}
+
+void __attribute__((thiscall)) CockpitUpdate(uint8_t* cockpit)
+{
+	g_cockpitUpdateOriginal(cockpit);
+	if (!CountersOurs() || !*(uint8_t**)(cockpit + kCockpitMovie)) {
+		g_counterShown[0] = g_counterShown[1] = -1;
+		return;
+	}
+	if (cockpit != g_counterCockpit) {
+		g_counterShown[0] = g_counterShown[1] = -1;
+	}
+	for (int team = 0; team < 2; team++) {
+		int total = std::min(g_lives - 1, 99), left = std::min(std::max(total - TeamDeaths(team), 0), 999);
+		if (g_counterShown[team] != left * 100 + total) {
+			SetCounter(cockpit, team);
+		}
+	}
+}
 uint8_t** g_input = nullptr;
 const uint32_t kMenuState = 0x190, kMenuPhase = 0x194, kMenuRule = 0x198, kMenuMode = 0x1a0, kMenuRow = 0x1b0, kMenuFlags = 0x1d4;
 const uint32_t kMenuMouseOn = 0x168, kMenuMouse = 0x154, kMenuClick = 0x15c, kInputPressed = 0x330;
@@ -2142,6 +2212,15 @@ void RulesInstall(unsigned char* base)
 	g_teamBarOriginal = (ListDrawFn)Detour(base + (kRulesVas[build].teamBar - 0x400000), kTeamBarPrologue, sizeof(kTeamBarPrologue), (void*)&TeamBar);
 	if (!g_teamBarOriginal) {
 		XLS_LOG_WARN("mods: rules: team gauge bar update not found, Team Survival shows it.");
+	}
+	const uint8_t kKillSetPrologue[] = {0x83, 0xec, 0x4c, 0x8b, 0xd1, 0x8b, 0x42, 0x58};       // sub esp,0x4c; mov edx,ecx; mov eax,[edx+0x58]
+	const uint8_t kCockpitUpdatePrologue[] = {0x83, 0xec, 0x14, 0x56, 0x8b, 0xf1}; // sub esp,0x14; push esi; mov esi,ecx
+	g_killRedOriginal = (ListDrawFn)Detour(base + (kCounterVas[build].red - 0x400000), kKillSetPrologue, sizeof(kKillSetPrologue), (void*)&KillRed);
+	g_killBlueOriginal = (ListDrawFn)Detour(base + (kCounterVas[build].blue - 0x400000), kKillSetPrologue, sizeof(kKillSetPrologue), (void*)&KillBlue);
+	g_cockpitUpdateOriginal = (ListDrawFn)Detour(base + (kCounterVas[build].update - 0x400000), kCockpitUpdatePrologue, sizeof(kCockpitUpdatePrologue), (void*)&CockpitUpdate);
+	if (!g_killRedOriginal || !g_killBlueOriginal || !g_cockpitUpdateOriginal) {
+		XLS_LOG_WARN("mods: rules: team kill counters not hooked (red %d, blue %d, update %d), Team Survival shows its respawns as text rows.",
+		             g_killRedOriginal != nullptr, g_killBlueOriginal != nullptr, g_cockpitUpdateOriginal != nullptr);
 	}
 	if (!g_listDrawOriginal) {
 		g_text = nullptr;

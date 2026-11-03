@@ -42,6 +42,10 @@ Windows. If the game crashes loading a custom map on Windows and not on Linux, t
 
 ## Install
 
+Steam copy or retail disc (DVD): both play online together. The two versions install differently.
+
+### Steam copy
+
 1. Steam → Lost Planet 2 → Manage → **Browse local files**.
 2. Rename the existing `xlive.dll` to `xlive.dll.capcom` (keeps a backup).
 3. Copy `xlive.dll`, `xlive_relay.exe`, `steam_api.dll` and `xlive_steamworks.json` from the zip into
@@ -53,6 +57,27 @@ Windows. If the game crashes loading a custom map on Windows and not on Linux, t
 
 **Undo:** delete the four files and rename `xlive.dll.capcom` back. Steam's "Verify integrity of game
 files" (or a game update) also puts Capcom's `xlive.dll` back; copy ours again afterwards.
+
+### Retail disc (DVD)
+
+You need Steam installed and signed in (any account; you don't need to own Lost Planet 2 on Steam).
+
+1. Install the game from the disc as normal. On Linux, run the disc's `setup.exe` through Wine,
+   or add it to Steam as a non-Steam game and run it under Proton.
+2. Open the install folder (by default `C:\Program Files (x86)\Capcom\Lost Planet 2`). There is no
+   `xlive.dll` to rename: the disc version uses the GFWL one installed in Windows.
+3. Copy `xlive.dll`, `xlive_relay.exe`, `steam_api.dll` and `xlive_steamworks.json` from the zip into
+   that folder.
+4. Open `xlive_steamworks.json` in a text editor and change `"app_id": 45750` to `"app_id": 480`.
+   Then make a text file `steam_appid.txt` in the same folder that contains just `480`.
+5. Steam → **Add a Game** → **Add a Non-Steam Game** → browse to `LP2DX9.exe` or `LP2DX11.exe` in
+   that folder.
+6. Linux / Steam Deck: in the shortcut's Properties, under Compatibility, pick Proton Experimental,
+   and set the launch option `WINE_LARGE_ADDRESS_AWARE=1 %command%`.
+7. Start the game from Steam. Steam shows you as playing Spacewar; that's expected (see
+   [Spacewar](#steam-and-disc-copies-together-spacewar)).
+
+**Undo:** delete the five files. The GFWL `xlive.dll` in Windows is used again.
 
 **Problems:** [open an issue](https://github.com/FlawedOberron/xlive-steamworks-lp2/issues) and attach `xlive_steamworks.log` from the game folder.
 

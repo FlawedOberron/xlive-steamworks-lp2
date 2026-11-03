@@ -1,5 +1,6 @@
 Lost Planet 2 (Recolonised) - test build @DATE@
 
+STEAM COPY
 1. Steam -> Lost Planet 2 -> Manage -> Browse local files.
 2. Rename the existing xlive.dll to xlive.dll.capcom (keeps a backup).
 3. Copy xlive.dll, xlive_relay.exe, steam_api.dll and xlive_steamworks.json into that folder
@@ -7,6 +8,18 @@ Lost Planet 2 (Recolonised) - test build @DATE@
 4. Linux / Steam Deck: set launch option  WINE_LARGE_ADDRESS_AWARE=1 %command%
 5. Play either the DirectX 9 or DirectX 11 version. Online = Steam lobbies (invite through Steam or Discord),
    shared with retail DVD copies: xlive_relay.exe joins them through Spacewar (Steam app 480) for you.
+
+RETAIL DISC (DVD)  (needs Steam installed and signed in; you don't need to own LP2 on Steam)
+1. Install the game from the disc (Linux: run setup.exe through Wine or Proton).
+2. Open the install folder (default C:\Program Files (x86)\Capcom\Lost Planet 2). There is no
+   xlive.dll to rename there.
+3. Copy xlive.dll, xlive_relay.exe, steam_api.dll and xlive_steamworks.json into that folder.
+4. In xlive_steamworks.json change  "app_id": 45750  to  "app_id": 480, and make a text file
+   steam_appid.txt in the same folder containing just  480
+5. Steam -> Add a Game -> Add a Non-Steam Game -> LP2DX9.exe or LP2DX11.exe from that folder.
+6. Linux / Steam Deck: shortcut Properties -> Compatibility -> Proton Experimental, and launch option
+   WINE_LARGE_ADDRESS_AWARE=1 %command%
+7. Start it from Steam (Steam shows "Spacewar": that's expected). Plays online with Steam copies.
 
 Updates: from this build on, the game checks for a newer test build when it starts, downloads it and
 says "Update downloaded ... restart the game to install it". Turn off with "update": {"auto": false}
@@ -26,5 +39,6 @@ If the game crashes (report it at https://github.com/FlawedOberron/xlive-steamwo
    map or custom part set was downloading.
 4. Everyone in a match should be on the same test build; say which one you have.
 
-Undo: delete the four files and rename xlive.dll.capcom back to xlive.dll.
+Undo (Steam): delete the four files and rename xlive.dll.capcom back to xlive.dll.
+Undo (disc): delete the five files.
 (Steam "Verify integrity of game files" also restores Capcom's xlive.dll.)
