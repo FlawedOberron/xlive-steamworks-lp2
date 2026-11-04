@@ -469,6 +469,36 @@ int __attribute__((thiscall)) RuleStep(void* screen, int key, uint8_t* value, in
 	return 0;
 }
 
+// The lobby's Game Options (uIdBattlePlayerMatch, shown after a match; DX11 FUN_00e9c250) steps the map with its own
+// thiscall(screen, key, value, max, min, check) -> the new value (keys 10 / 9 up, 11 / 8 down; with check, maps the
+// player can't use are skipped, 13 / 14 among them before the case table patch). Like RuleStep: on slot 13 the steps go
+// through our packages first, a step onto 13 starts at the first (or last) of them, and 13 / 14 with nothing to show
+// are stepped over. The pick rebinds slot 13 and republishes the lobby's maps, so players without it download it and
+// the match start waits for them (Reconcile, the content hold).
+using MatchStepFn = uint32_t(__attribute__((thiscall)) *)(void*, int, uint32_t, int, uint32_t, char);
+MatchStepFn g_matchStepOriginal = nullptr;
+const uint32_t kMatchStep[kBuildCount] = {0xe9c250, 0xe8c180, 0xe9c500, 0xe8c660};
+const uint8_t kMatchStepPrologue[] = {0x51, 0x53, 0x8b, 0x5c, 0x24, 0x10, 0x55}; // push ecx; push ebx; mov ebx,[esp+0x10]; push ebp
+
+uint32_t __attribute__((thiscall)) MatchStep(void* screen, int key, uint32_t value, int max, uint32_t min, char check)
+{
+	int step = key == 10 || key == 9 ? 1 : key == 11 || key == 8 ? -1 : 0;
+	if (step && (value & 0xff) == 13 && PackagesPick(step, false)) {
+		StepSound(screen);
+		return 13;
+	}
+	uint32_t at = value;
+	for (int tries = 0; tries < 4; tries++) {
+		at = g_matchStepOriginal(screen, key, at, max, min, check);
+		uint8_t v = at & 0xff;
+		bool usable = v == 13 ? PackagesPick(step, true) : v == 14 ? PackagesSlotBound(14) : true;
+		if (usable || !step || v == (value & 0xff)) {
+			return at;
+		}
+	}
+	return at;
+}
+
 // The session browser's detail panel (DX9 FUN_00e82360, DX11 0xe92430; thiscall(screen, entry)):
 // shows one search result's settings from the host's QoS data (screen+0x5c8 -> +0x288 + entry *
 // 0x94; the panel reads its fields from +0x290). The map is MsgOnline 126 + map, so on 13 / 14 every
@@ -573,6 +603,10 @@ void InstallPicker(uint8_t* base)
 	auto at = [&](uint32_t v) { return base + (v - (uintptr_t)exe); };
 	g_stepOriginal = (StepFn)Detour(at(va.step), kStepPrologue, sizeof(kStepPrologue), (void*)&RuleStep);
 	g_messageOriginal = (MessageFn)Detour(at(va.message), kMessagePrologue, sizeof(kMessagePrologue), (void*)&Message);
+	g_matchStepOriginal = (MatchStepFn)Detour(at(kMatchStep[g_build]), kMatchStepPrologue, sizeof(kMatchStepPrologue), (void*)&MatchStep);
+	if (!g_matchStepOriginal) {
+		XLS_LOG_WARN("mods: maps: the lobby's Game Options map row not hooked (only the create screen picks map packages).");
+	}
 	const DetailVa& dv = kDetailVas[g_build];
 	g_detailOriginal = (DetailFn)Detour(at(dv.fn), dv.prologue, sizeof(dv.prologue), (void*)&Detail);
 	XLS_LOG_INFO("mods: maps: session browser map names %s.", g_detailOriginal ? "hooked" : "NOT hooked (unknown code)");

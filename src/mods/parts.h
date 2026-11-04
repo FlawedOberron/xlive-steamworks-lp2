@@ -43,6 +43,8 @@ struct PartSet {
 	std::wstring chains[kPartSlotCount]; // the part's own .rChain (bone physics), empty = the template's
 	std::string templates[kPartSlotCount]; // original part each was built on ("bd2900")
 	bool noEffects[kPartSlotCount] = {}; // lpc.json part "effects": "none": drop the template's effects (lamps)
+	bool weaponOffset = false; // lpc.json parts.back "weapon_offset": [x, y, z]: moves the back weapon mount (joint 100)
+	float weaponOffsetXyz[3] = {};
 	int colour = 0;           // default colour (0-3 = A-D): the first of colours
 	std::vector<int> colours; // colours the menu offers (lpc.json "colours"; one = locked swatch)
 	// Custom textures per slot ("BM_A".."BM_D", "NM", "MM" -> .rTexture file), replacing the template's.

@@ -40,6 +40,7 @@ namespace xls::mods {
 namespace {
 
 const char* const kSlotNames[kPartSlotCount] = {"head", "body", "back", "legs"};
+const int kSlotBack = 2;
 const char* const kFactions[] = {"RND", "FJ", "SPE", "NEV", "FF"}; // index = the game's faction byte
 const char* const kCacheVersion = "lp2-parts 1";
 const size_t kNameMaxBytes = 43;
@@ -318,6 +319,18 @@ void LoadFolder(const std::wstring& dir, const std::wstring& label, std::vector<
 		set.models[s] = path;
 		set.templates[s] = part["template"].GetString(std::string());
 		set.noEffects[s] = _stricmp(part["effects"].GetString(std::string()).c_str(), "none") == 0;
+		if (s == kSlotBack && part["weapon_offset"].IsArray()) {
+			const auto& xyz = part["weapon_offset"].Elements();
+			if (xyz.size() == 3) {
+				for (int k = 0; k < 3; k++) {
+					set.weaponOffsetXyz[k] = (float)xyz[k].GetNumber(0.0);
+				}
+				set.weaponOffset = true;
+			}
+			else {
+				XLS_LOG_WARN("mods: parts %ls: back: weapon_offset must be [x, y, z].", label.c_str());
+			}
+		}
 		std::string chain = part["chain"].GetString(std::string());
 		if (!chain.empty()) {
 			Bytes head;
@@ -804,6 +817,32 @@ std::string FileStamp(const std::wstring& path)
 }
 
 
+// The weapon carried on the back hangs from the back part's joint 100 (every stock back model has it, each at its
+// own place: bk2002 (0, 20, -36.6), bk2100 (-4.5, 6.6, -39.2) in its parent's space, model units = cm). The rModel
+// keeps n bone records (24 bytes: u8 joint, u8 parent, ...) at header +0x24, then n local matrices (16 floats, the
+// translation at 12-14). Moving that translation moves the weapon; the mount has no skinned vertices.
+bool MoveWeaponMount(Bytes* model, const float xyz[3])
+{
+	if (model->size() < 0x80 || memcmp(model->data(), "MOD\0", 4) != 0) {
+		return false;
+	}
+	uint16_t n = *(uint16_t*)(model->data() + 6);
+	uint32_t bones = *(uint32_t*)(model->data() + 0x24);
+	if ((uint64_t)bones + n * (24 + 64) > model->size()) {
+		return false;
+	}
+	for (uint16_t i = 0; i < n; i++) {
+		if (model->data()[bones + i * 24] == 100) {
+			float* local = (float*)(model->data() + bones + n * 24 + i * 64);
+			for (int k = 0; k < 3; k++) {
+				local[12 + k] += xyz[k];
+			}
+			return true;
+		}
+	}
+	return false;
+}
+
 // The carrier route: the part's model and every texture it names under a path of our own
 // (model\hm\lpc\<hash>\<pfx><hash>...), added to the slot's DLC archives (the part lookup only
 // searches loaded archives). Texture names in the model sit in fixed 64-byte records, so they can
@@ -928,6 +967,11 @@ bool BuildPackage(const PartSet& set, int slot, int item, PartPackage* out, cons
 	char stampBuf[256];
 	snprintf(stampBuf, sizeof(stampBuf), "%s item %d colour %d template %s model %s", kGenVersion, item, set.colour, tmpl.c_str(), FileStamp(set.models[slot]).c_str());
 	std::string stamp = std::string(stampBuf) + (carrierBuild ? " token " + carrierTok : "") + (set.noEffects[slot] ? " noeffects" : "");
+	if (slot == kSlotBack && set.weaponOffset) {
+		char ob[96];
+		snprintf(ob, sizeof(ob), " weapon %g,%g,%g", set.weaponOffsetXyz[0], set.weaponOffsetXyz[1], set.weaponOffsetXyz[2]);
+		stamp += ob;
+	}
 	for (const auto& t : set.textures[slot]) {
 		stamp += " " + t.first + "=" + FileStamp(t.second);
 	}
@@ -947,6 +991,9 @@ bool BuildPackage(const PartSet& set, int slot, int item, PartPackage* out, cons
 		Bytes model;
 		if (!ReadWholeFile(set.models[slot], &model)) {
 			return false;
+		}
+		if (slot == kSlotBack && set.weaponOffset && !MoveWeaponMount(&model, set.weaponOffsetXyz)) {
+			XLS_LOG_WARN("mods: parts %s: back: the model has no weapon mount (joint 100); weapon_offset ignored.", set.id.c_str());
 		}
 		std::string modelName = "model\\hm\\hm" + sset + "\\" + tmpl + "\\" + tmpl;
 		static const char kColours[] = "ABCD";

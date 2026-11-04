@@ -185,6 +185,10 @@ A part's `"effects": "none"` drops the template part's effects (e.g. the 29xx la
 glow where the template's own model had them): its rEffectProvider is swapped for an empty one.
 The Blender exporter writes it unless the part / set collection has `lp2_effects = "template"`.
 
+A back part's `"weapon_offset": [x, y, z]` moves where the carried (second) weapon hangs: it is added
+to the back model's weapon mount (joint 100) in its parent joint's space, in centimetres. Every back
+model has that joint; a part whose model lacks it logs a warning and the offset is ignored.
+
 **How they appear:** at start, each part of each set is built into a small DLC content package in
 `ModCache\parts\pkg\` (the template part's archives with the custom model in place; rebuilt only
 when something changes) and listed in each category's part list under the set's name, after the
