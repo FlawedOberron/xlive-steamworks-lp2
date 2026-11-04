@@ -22,6 +22,9 @@
 __attribute__((used)) static const char kReleaseTagMarker[] = "xls-release-tag:" XLS_RELEASE_TAG;
 
 namespace xls {
+
+const char* ReleaseTag() { return XLS_RELEASE_TAG; }
+
 namespace {
 
 const wchar_t kHost[] = L"api.github.com";
@@ -202,12 +205,12 @@ void Check()
 		XLS_LOG_INFO("update: %s is up to date (latest release %s).", ours.c_str(), latest.c_str());
 		return;
 	}
+	// the Steam zip by name (releases also carry a retail one; both hold the same xlive.dll and relay), else any zip
 	std::string url;
 	for (const Json& asset : root["assets"].Elements()) {
 		std::string name = asset["name"].GetString(std::string());
-		if (name.size() > 4 && _stricmp(name.c_str() + name.size() - 4, ".zip") == 0) {
+		if (name.size() > 4 && _stricmp(name.c_str() + name.size() - 4, ".zip") == 0 && (url.empty() || name == "lp2-recolonised-test.zip")) {
 			url = asset["browser_download_url"].GetString(std::string());
-			break;
 		}
 	}
 	std::wstring host, path;

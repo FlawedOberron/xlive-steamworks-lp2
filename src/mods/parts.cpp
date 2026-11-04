@@ -1708,6 +1708,9 @@ bool ParseMemberParts(const std::string& value, MemberParts* out)
 std::mutex g_remoteMutex;
 std::deque<PartPackage> g_remoteSets[kPartSlotCount]; // deque: pointers stay valid as sets arrive
 std::atomic<uint32_t> g_lobbyGen{1};                  // bumped when members' sets or data change: lobby previews reload
+std::atomic<uint32_t> g_lobbyForceGen{0};             // a gen whose reload ignores "already wearing it"
+std::atomic<DWORD> g_lobbyAgainAt{0};                 // tick of that forced reload (after a set arrived), 0 none
+const DWORD kLobbyAgainMs = 2000;
 std::map<std::string, int> g_remoteState;             // hash -> 0 fetching, 1 ready, -1 failed
 int g_fakeRateKb = 0;                                 // fake_member.txt "rate <KB/s>": its downloads' loopback speed
 int g_fakeDelayMs = 0;                                // fake_member.txt "delay <s>": its downloads wait first (a slow connection)
@@ -1926,13 +1929,20 @@ DWORD WINAPI RemoteSetThread(LPVOID param)
 			}
 		}
 		XLS_LOG_INFO("mods: parts: player set %s (%s) ready, %d part(s); worn from the next load.", shown.c_str(), hash.c_str(), built);
-		g_lobbyGen++;
 	}
 	else if (ok) {
 		XLS_LOG_WARN("mods: parts: set %s didn't load (%zu set(s), hash %s).", hash.c_str(), sets.size(), sets.empty() ? "-" : sets[0].hash.c_str());
 	}
-	std::lock_guard<std::mutex> lock(g_remoteMutex);
-	g_remoteState[hash] = built ? 1 : -1;
+	{
+		std::lock_guard<std::mutex> lock(g_remoteMutex);
+		g_remoteState[hash] = built ? 1 : -1;
+	}
+	if (built) {
+		// previews reload now that it's ready (not before: a preview checked while the set was still pending stayed
+		// hidden / undressed), and once more, forced, a moment later (see PreviewTick)
+		g_lobbyGen++;
+		g_lobbyAgainAt = (GetTickCount() + kLobbyAgainMs) | 1;
+	}
 	return 0;
 }
 
@@ -2229,6 +2239,17 @@ const LobbyVas kLobbyVas[kBuildCount] = {
 	{0x1853850, 0xc3dba0, 0xc3dc70, 0xc3b770, 0xc3a130, 0xf4a7b0, {{0xe97de0, 0xe98f30, 0}, {0xea4270, 0xea5300, 1}}, 0},      // DX11 1.1
 	{0x18427b0, 0xc2da90, 0xc2db60, 0xc2b660, 0xc2a020, 0xf3a6f0, {{0xe87f40, 0xe89090, 0}, {0xe941c0, 0xe95250, 1}}, -0x10}, // DX9 1.1
 };
+// Screens that show members' characters without one in a register at the preview call: the Campaign lobby
+// (DX11 ec03c0: "MsgCampaign", _level0.updateMember; it walks the member table as table + i * 0x7c, names
+// at +0x174) and the results screen (DX11 ebd350, the time and members after a mission; entry pointers in a
+// local). [begin, end) per build; DX11 1.1 from its call sites (no dump of that exe).
+const uint32_t kPreviewScanScreens[kBuildCount][2][2] = {
+	{{0xec03c0, 0xec03c0 + 1477}, {0xebd350, 0xebd350 + 2613}}, // DX11
+	{{0xeb0590, 0xeb0590 + 1477}, {0xead520, 0xead520 + 2613}}, // DX9
+	{{0xec0900, 0xec0980}, {0xebdbc0, 0xebdc10}},               // DX11 1.1
+	{{0xeb0650, 0xeb0650 + 1477}, {0xead5b0, 0xead5b0 + 2613}}, // DX9 1.1
+};
+const uint32_t (*g_previewScan)[2] = nullptr;
 const LobbyVas* g_lobbyVas = nullptr;
 uintptr_t g_lobbyRebase = 0; // module base - 0x400000
 const int kLobbyMembers = 16;
@@ -2540,6 +2561,7 @@ void __attribute__((thiscall)) SetText(uint8_t* screen, int field, const char* t
 	for (const auto& range : g_lobbyVas->screens) {
 		lobbyScreen = lobbyScreen || (va >= range[0] && va < range[1]);
 	}
+	lobbyScreen = lobbyScreen || (g_previewScan && va >= g_previewScan[0][0] && va < g_previewScan[0][1]); // the Campaign lobby
 	intptr_t at = table && text ? (const uint8_t*)text - (table + 0x148 + 0x2c) : -1;
 	if (!lobbyScreen || at < 0 || at >= kLobbyMembers * (intptr_t)kLobbyEntry || at % kLobbyEntry) {
 		g_setTextOriginal(screen, field, text);
@@ -2577,29 +2599,80 @@ void __attribute__((thiscall)) SetText(uint8_t* screen, int field, const char* t
 }
 
 // Preview apply c3db30, before the game: from a lobby screen, which member the preview is for.
-extern "C" __attribute__((used)) void __stdcall PreviewApplied(uint8_t* preview, uint8_t* ebx, uint8_t* edi, uintptr_t ret)
+// The member table entry a value points at (the entry, or table + i * 0x7c as the Campaign lobby walks it), or -1.
+int EntryOf(uint8_t* table, uintptr_t v)
+{
+	for (intptr_t base : {(intptr_t)0x148, (intptr_t)0}) {
+		intptr_t at = (intptr_t)v - (intptr_t)(table + base);
+		if (at >= 0 && at < kLobbyMembers * (intptr_t)kLobbyEntry && at % kLobbyEntry == 0 && table[0x148 + at + 0x64] == 1) {
+			return (int)(at / kLobbyEntry);
+		}
+	}
+	return -1;
+}
+
+// regs: the pushal block at the call (edi, esi, ebp, esp, ebx, edx, ecx, eax), then the return address and the
+// caller's frame.
+extern "C" __attribute__((used)) void __stdcall PreviewApplied(uint8_t* preview, uint8_t* ebx, uint8_t* edi, uintptr_t ret, const uintptr_t* regs)
 {
 	uint8_t* table = LobbyTable();
 	if (!table || !preview) {
 		return;
 	}
 	uint32_t va = (uint32_t)(ret - g_lobbyRebase);
-	for (const auto& screen : g_lobbyVas->screens) {
-		if (va < screen[0] || va >= screen[1]) {
+	int scanned = -1;
+	const char* found = "";
+	for (int k = 0; g_previewScan && k < 2 && scanned < 0; k++) {
+		if (va < g_previewScan[k][0] || va >= g_previewScan[k][1]) {
 			continue;
 		}
-		intptr_t at = (screen[2] ? edi : ebx) - (table + 0x148);
-		if (at < 0 || at >= kLobbyMembers * (intptr_t)kLobbyEntry || at % kLobbyEntry) {
+		const int order[] = {0, 1, 2, 4, 5, 6, 7}; // the registers, then the frame
+		for (int r : order) {
+			if ((scanned = EntryOf(table, regs[r])) >= 0) {
+				found = "register";
+				break;
+			}
+		}
+		for (int w = 0; scanned < 0 && w < 0xc0; w++) {
+			MEMORY_BASIC_INFORMATION mbi;
+			const uintptr_t* at = regs + 9 + w;
+			if (w % 256 == 0 && (!VirtualQuery(at, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT)) {
+				break;
+			}
+			if ((scanned = EntryOf(table, *at)) >= 0) {
+				found = "frame";
+			}
+		}
+		if (scanned < 0) {
+			static int misses = 0;
+			if (misses++ < 8) {
+				XLS_LOG_INFO("mods: parts: %s preview 0x%p: no member entry found at the call (0x%08x).", k ? "results" : "campaign lobby", preview, va);
+			}
 			return;
 		}
-		int member = (int)(at / kLobbyEntry);
+	}
+	const uint32_t none[3] = {0, 0, 0};
+	auto screens = g_lobbyVas->screens;
+	for (int k = -1; k < 2; k++) {
+		const uint32_t* screen = k < 0 ? none : screens[k];
+		if (k < 0 ? scanned < 0 : va < screen[0] || va >= screen[1]) {
+			continue;
+		}
+		int member = scanned;
+		if (k >= 0) {
+			intptr_t at = (screen[2] ? edi : ebx) - (table + 0x148);
+			if (at < 0 || at >= kLobbyMembers * (intptr_t)kLobbyEntry || at % kLobbyEntry) {
+				return;
+			}
+			member = (int)(at / kLobbyEntry);
+		}
 		uint32_t character = PvCharacter(preview);
 		std::lock_guard<std::mutex> lock(g_lobbyMutex);
 		auto it = g_lobbyPreviews.find(preview);
 		if (it != g_lobbyPreviews.end() && it->second.member == member && it->second.character == character) {
 			return;
 		}
-		XLS_LOG_INFO("mods: parts: lobby preview 0x%p (character %u) shows member %d.", preview, character, member);
+		XLS_LOG_INFO("mods: parts: lobby preview 0x%p (character %u) shows member %d%s%s.", preview, character, member, *found ? ", found in the " : "", found);
 		static bool probed = false;
 		if (!probed) {
 			probed = true;
@@ -2616,6 +2689,12 @@ extern "C" __attribute__((used)) void __stdcall PreviewApplied(uint8_t* preview,
 // was dressed reloads its carrier parts (once none is mid-load).
 extern "C" __attribute__((used)) void __stdcall PreviewTick(uint8_t* preview)
 {
+	// A set that arrived fast could be taken up by a preview mid-load and still show it invisible (the part's load
+	// started before the archives were there): a second, forced reload a moment after each arrival.
+	DWORD again = g_lobbyAgainAt;
+	if (again && (int32_t)(GetTickCount() - again) >= 0 && g_lobbyAgainAt.compare_exchange_strong(again, 0)) {
+		g_lobbyForceGen = ++g_lobbyGen;
+	}
 	uint32_t gen = g_lobbyGen;
 	int member;
 	{
@@ -2653,7 +2732,7 @@ extern "C" __attribute__((used)) void __stdcall PreviewTick(uint8_t* preview)
 		{
 			std::lock_guard<std::mutex> lock(g_loadedMutex);
 			auto was = g_loaded.find(character << 8 | cat);
-			if (was != g_loaded.end() && was->second.code == code && was->second.set == want) {
+			if (gen != g_lobbyForceGen && was != g_loaded.end() && was->second.code == code && was->second.set == want) {
 				continue; // already wearing it
 			}
 		}
@@ -2674,11 +2753,12 @@ extern "C" void PreviewTickStub();
 asm(".text\n"
     "_PreviewApplyStub:\n"
     "  pushal\n"
-    "  pushl 32(%esp)\n" // the return address
+    "  push %esp\n"      // the pushal block (registers, then the return address and the caller's frame)
+    "  pushl 36(%esp)\n" // the return address
     "  push %edi\n"
     "  push %ebx\n"
     "  push %ecx\n"
-    "  call _PreviewApplied@16\n"
+    "  call _PreviewApplied@20\n"
     "  popal\n"
     "  jmp *_g_previewApplyTramp\n"
     "_PreviewTickStub:\n"
@@ -3300,6 +3380,7 @@ extern "C" int __cdecl RequestNameSprintf(char* out, const char* format, ...)
 // present player (game+0x28[p] != 0): offline players 0-3 twice (f8c6a0 codes, then the infos'),
 // online 0-15 once.
 using StageRequestFn = void(__attribute__((thiscall)) *)(void*, uint32_t, uint32_t, uint32_t);
+const DWORD kStageWaitMs = 20000;
 StageRequestFn g_stageRequestOriginal = nullptr;
 
 void __attribute__((thiscall)) StageRequest(void* loader, uint32_t character, uint32_t a, uint32_t b)
@@ -3322,8 +3403,20 @@ void __attribute__((thiscall)) StageRequest(void* loader, uint32_t character, ui
 		g_lobbyPreviews.clear(); // the lobby's previews go away under the match; met again after it
 	}
 	static std::atomic<int> logged{0};
+	bool lobby = xls::SessionPresenceLobby().IsValid();
 	if (logged++ < 16) {
-		XLS_LOG_INFO("mods: parts: stage parts request (character %u, %d player(s), %s).", character, t_stagePlayerCount, game && game[0x256] ? "online" : xls::SessionPresenceLobby().IsValid() ? "lobby, 4 slots" : "offline");
+		XLS_LOG_INFO("mods: parts: stage parts request (character %u, %d player(s), %s).", character, t_stagePlayerCount, game && game[0x256] ? "online" : lobby ? "lobby, 4 slots" : "offline");
+	}
+	// A stage loading while a player's set is still downloading would show them without it (invisible, the part
+	// missing) until the next load. Match starts wait for downloads, but a Campaign loads its next mission (or one
+	// after a join) in the same session: the loading screen waits here instead, with Steam kept running.
+	if (lobby && !xls::ContentLocalReady()) {
+		DWORD begin = GetTickCount();
+		while (!xls::ContentLocalReady() && GetTickCount() - begin < kStageWaitMs) {
+			xls::SteamPumpForce();
+			Sleep(50);
+		}
+		XLS_LOG_INFO("mods: parts: stage load waited %lu ms for downloads (%s).", GetTickCount() - begin, xls::ContentLocalReady() ? "all in" : "gave up");
 	}
 	g_stageRequestOriginal(loader, character, a, b);
 	t_stagePlayerCount = -1;
@@ -3430,6 +3523,7 @@ void InstallLobbyPreviews(uint8_t* base, const LobbyVas& va)
 		XLS_LOG_WARN("mods: parts: preview update not as expected; lobby previews show our choices.");
 		return;
 	}
+	g_previewScan = kPreviewScanScreens[&va - kLobbyVas];
 	g_lobbyVas = &va; // before the apply hook can run
 	g_previewApplyTramp = Detour(at(va.previewApply), kPreviewApplyPrologue, sizeof(kPreviewApplyPrologue), (void*)&PreviewApplyStub);
 	g_previewVisibleOriginal = (PreviewVisibleFn)Detour(at(va.previewVisible), kPreviewVisiblePrologue, sizeof(kPreviewVisiblePrologue), (void*)&PreviewVisible);

@@ -9,5 +9,6 @@
 namespace xls {
 
 void UpdateStart();
+const char* ReleaseTag(); // "" for a development build
 
 }

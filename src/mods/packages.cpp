@@ -1201,6 +1201,8 @@ bool GenerateMenus(const std::wstring& source, const std::wstring& out)
 			changed |= RulesPatchTrainingFlash(&e.data);
 		} else if (_stricmp(name, "id500_PC") == 0) {
 			changed |= NetMenuPatchFlash(&e.data);
+		} else if (_stricmp(name, "id010_360") == 0) {
+			changed |= TitlePatchFlash(&e.data);
 		}
 	}
 	if (pictures) {

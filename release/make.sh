@@ -2,7 +2,7 @@
 # Make a test release, so the tag baked into xlive.dll (XLS_RELEASE_TAG, what the self-updater compares with
 # GitHub's latest release) always matches the release it ships in.
 #
-#   release/make.sh                      build dist/lp2-recolonised-test.zip with the next tag
+#   release/make.sh                      build dist/lp2-recolonised-test.zip (Steam) and -retail.zip with the next tag
 #   release/make.sh --publish NOTES.md   ...and create the GitHub release (clean, pushed tree only)
 #
 # Next tag: test-YYYY-MM-DD, then test-YYYY-MM-DDb, c, ... for more releases the same day.
@@ -36,14 +36,23 @@ grep -aq "xls-release-tag:$TAG" "$REPO/bin/xlive.dll" || { echo "xlive.dll doesn
 OUT=$REPO/dist
 STAGE=$OUT/stage
 rm -rf "$STAGE" && mkdir -p "$STAGE"
+# Two zips that install by unzipping into the game folder: the Steam copy (app 45750) and the retail DVD
+# (Spacewar 480: steam_appid.txt and the json's app_id). The updater takes lp2-recolonised-test.zip.
+STEAM_ZIP=lp2-recolonised-test.zip
+RETAIL_ZIP=lp2-recolonised-test-retail.zip
 cp "$REPO/bin/xlive.dll" "$REPO/bin/xlive_relay.exe" "$REPO/bin/steam_api.dll" "$REPO/release/xlive_steamworks.json" "$STAGE/"
-sed "s/@DATE@/${TAG#test-}/" "$REPO/release/README.txt" > "$STAGE/README.txt"
-rm -f "$OUT/lp2-recolonised-test.zip"
-(cd "$STAGE" && zip -q9 "$OUT/lp2-recolonised-test.zip" README.txt steam_api.dll xlive.dll xlive_relay.exe xlive_steamworks.json)
+sed "s/@DATE@/${TAG#test-}/" "$REPO/release/README-steam.txt" > "$STAGE/README.txt"
+rm -f "$OUT/$STEAM_ZIP" "$OUT/$RETAIL_ZIP"
+(cd "$STAGE" && zip -q9 "$OUT/$STEAM_ZIP" README.txt steam_api.dll xlive.dll xlive_relay.exe xlive_steamworks.json)
+sed "s/@DATE@/${TAG#test-}/" "$REPO/release/README-retail.txt" > "$STAGE/README.txt"
+sed 's/"app_id": 45750/"app_id": 480/' "$REPO/release/xlive_steamworks.json" > "$STAGE/xlive_steamworks.json"
+grep -q '"app_id": 480' "$STAGE/xlive_steamworks.json" || { echo "retail json: app_id not set"; exit 1; }
+printf '480' > "$STAGE/steam_appid.txt"
+(cd "$STAGE" && zip -q9 "$OUT/$RETAIL_ZIP" README.txt steam_api.dll steam_appid.txt xlive.dll xlive_relay.exe xlive_steamworks.json)
 rm -rf "$STAGE"
-echo "$TAG -> $OUT/lp2-recolonised-test.zip"
+echo "$TAG -> $OUT/$STEAM_ZIP, $OUT/$RETAIL_ZIP"
 
 if [ -n "$PUBLISH" ]; then
-	gh release create "$TAG" "$OUT/lp2-recolonised-test.zip" -R "$GH_REPO" --target "$(git -C "$REPO" rev-parse HEAD)" \
+	gh release create "$TAG" "$OUT/$STEAM_ZIP" "$OUT/$RETAIL_ZIP" -R "$GH_REPO" --target "$(git -C "$REPO" rev-parse HEAD)" \
 		--title "Lost Planet 2 (Recolonised) test build ${TAG#test-}" --notes-file "$PUBLISH" --latest
 fi

@@ -323,6 +323,22 @@ void Handle(const Frame& f, In& in)
 		break;
 	}
 	case kInitRelayNetwork: SteamNetworkingUtils()->InitRelayNetworkAccess(); break;
+	case kCloudWrite: {
+		std::string name = in.str(), data = in.str();
+		ISteamRemoteStorage* rs = SteamRemoteStorage();
+		o.put<uint8_t>(rs && !name.empty() && rs->FileWrite(name.c_str(), data.data(), (int32)data.size()));
+		break;
+	}
+	case kCloudRead: {
+		std::string name = in.str();
+		ISteamRemoteStorage* rs = SteamRemoteStorage();
+		int32 size = rs && !name.empty() && rs->FileExists(name.c_str()) ? rs->GetFileSize(name.c_str()) : 0;
+		std::string data(size > 0 ? (size_t)size : 0, '\0');
+		bool ok = size > 0 && rs->FileRead(name.c_str(), &data[0], size) == size;
+		o.put<uint8_t>(ok);
+		o.bytes(data.data(), ok ? data.size() : 0);
+		break;
+	}
 	default: Log("unknown op %u", f.op); break;
 	}
 	if (f.seq) {

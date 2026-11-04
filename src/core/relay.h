@@ -6,6 +6,8 @@
 
 #include <stdint.h>
 
+#include <vector>
+
 class ISteamMatchmaking;
 class ISteamNetworkingMessages;
 
@@ -22,6 +24,9 @@ uint64_t LobbyOwner(uint64_t lobby);
 uint64_t LobbyMember(uint64_t lobby, int i);
 uint64_t LobbyByIndex(int i);
 bool SetConfigInt32(int value, int32_t v); // a networking setting, in the helper (where the traffic is)
+// The helper app's Steam Cloud (Spacewar's: shared by everything that runs as it, so names are ours alone).
+bool CloudWrite(const char* name, const std::vector<uint8_t>& data);
+bool CloudRead(const char* name, std::vector<uint8_t>* data);
 
 // One of the helper's async calls: -1 not the helper's, 0 pending, 1 done (out filled unless failed).
 int CallPoll(uint64_t call, void* out, int size, int callback, bool* failed);

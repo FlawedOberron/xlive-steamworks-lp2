@@ -14,6 +14,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -53,8 +54,9 @@
 // count and 10 rules offsets) which offset each row edits; the Settings 1 page (page 1, 7 rows in 14
 // categories) gets ours as rows 7-8. The Flash (id221) has its own rows: OnlineRule.sub1ItemArray
 // [category] lists item ids, offsetArray[item] = [MsgOnline value base, DataNo]; the label is
-// MsgOnline 38 + item. Ours are items 500, 501, 503 (labels 538 + n, served by RulesMessage), values
-// pushed as DataNo 75, 76, 78 next to the game's rules.
+// MsgOnline 38 + item. Ours are items 500, 501, 503, 504 (labels 538 + n, served by RulesMessage), values
+// pushed as DataNo 75, 76, 78, 81-83 next to the game's rules. 0x34 Harmonizer (Off / On), 0x35 Grappling (range),
+// 0x36 Hit Stagger (items 504-506).
 
 namespace xls::mods {
 
@@ -154,6 +156,17 @@ const int kMsgOffOn = 362;   // MsgOnline MSG_COMMON_OFF (Off, On)
 const int kMsgSecondary = 600;
 const int kMsgSupply = 610;
 const int kMsgInfinite = 620;
+// Grappling: the anchor's range (stock 1100 = 11 m) times the scale, 0 = no grappling. One row for on / off and the
+// distance: a page holds 10 rows at most (the row table), and the team categories' Settings 3 has 8 with Ammo Supply.
+// Value 0 is the game's own (settings saved before the row).
+const int kMsgGrapple = 700, kMsgStagger = 710;
+const char* const kGrappleNames[] = {"Default", "Off", "Short", "Long", "Very Long", "Extreme"};
+const float kGrappleScales[] = {1.0f, 0.0f, 0.5f, 1.5f, 2.0f, 3.0f};
+const int kGrappleValues = (int)(sizeof(kGrappleScales) / sizeof(kGrappleScales[0]));
+// Hit Stagger: the stagger (shrink) points a hit takes off a character, times the scale (see StaggerAdd).
+const char* const kStaggerNames[] = {"Default", "Reduced", "Low", "Off"};
+const float kStaggerScales[] = {1.0f, 0.66f, 0.33f, 0.0f};
+const int kStaggerValues = (int)(sizeof(kStaggerScales) / sizeof(kStaggerScales[0]));
 // Infinite Ammo: one row for both rules, bit 0 ammo, bit 1 grenades. Rules byte 0x30 held Unlimited
 // Grenades before (moved into bit 1 when a saved match is loaded) and is free now.
 const char* const kInfiniteNames[] = {"Off", "Weapons", "Grenades", "All"};
@@ -207,9 +220,12 @@ const Row kRowDefs[] = {
 	{kPageSettings2, 0x2e, kSecondaryValues, 500, 75, kMsgSecondary, "Default Secondary"},
 	{kPageSettings2, 0x2f, kInfiniteValues, 501, 76, kMsgInfinite, "Infinite Ammo"},
 	{kPageSettings3, 0x31, kSupplyValues, 503, 78, kMsgSupply, "Ammo Supply"},
+	{kPageSettings3, 0x34, 2, 504, 81, kMsgOffOn, "Harmonizer"},
+	{kPageSettings3, 0x35, kGrappleValues, 505, 82, kMsgGrapple, "Grappling"},
+	{kPageSettings2, 0x36, kStaggerValues, 506, 83, kMsgStagger, "Hit Stagger"},
 };
 const int kRows = (int)(sizeof(kRowDefs) / sizeof(kRowDefs[0]));
-enum { kRowSecondary, kRowInfinite, kRowSupply };
+enum { kRowSecondary, kRowInfinite, kRowSupply, kRowHarmonizer, kRowGrapple, kRowStagger };
 // Categories 0-13 have the full pages (14 / 15, numbered battle and random, have one row there).
 const int kRowCategories = 14;
 
@@ -221,6 +237,9 @@ struct Rules {
 	bool survival = false;
 	int lives = 0; // Survival lives per player (Elimination) or team (Team Elimination)
 	bool team = false;
+	bool harmonizer = false; // the Campaign's Harmonizer (auto heal when low) in VS matches too
+	int grapple = 0; // kGrappleScales index
+	int stagger = 0; // kStaggerScales index
 };
 const int kSlotSecond = 7;
 const DWORD kContextRichMode = 0; // the SPA presence context naming the mode (Campaign, Online...)
@@ -231,6 +250,9 @@ std::atomic<bool> g_ammo{false};
 std::atomic<bool> g_grenades{false};
 std::atomic<int> g_secondary{0};
 std::atomic<int> g_supply{0};
+std::atomic<bool> g_harmonizer{false};
+std::atomic<int> g_grapple{0};
+std::atomic<int> g_stagger{0};
 std::atomic<bool> g_survival{false};
 std::atomic<bool> g_offline{true}; // not in a lobby (training): the bots run on this PC
 // Training's AI Enemy Battle rows (see BotCursor): armed while that screen was the last one used
@@ -251,7 +273,7 @@ uint32_t g_magazine = 0;
 
 std::string Format(const Rules& r)
 {
-	return FormatA("ammo=%d;grenades=%d;secondary=%d;magazines=%d;survival=%d;lives=%d;team=%d", r.ammo, r.grenades, r.secondary, r.supply, r.survival, r.lives, r.team);
+	return FormatA("ammo=%d;grenades=%d;secondary=%d;magazines=%d;survival=%d;lives=%d;team=%d;harmonizer=%d;grapple=%d;stagger=%d", r.ammo, r.grenades, r.secondary, r.supply, r.survival, r.lives, r.team, r.harmonizer, r.grapple, r.stagger);
 }
 
 Rules Parse(const std::string& s)
@@ -263,6 +285,12 @@ Rules Parse(const std::string& s)
 	r.secondary = at == std::string::npos ? 0 : atoi(s.c_str() + at + 10) & 0xff;
 	r.survival = s.find("survival=1") != std::string::npos;
 	r.team = s.find("team=1") != std::string::npos;
+	r.harmonizer = s.find("harmonizer=1") != std::string::npos;
+	size_t grappleAt = s.find("grapple="), staggerAt = s.find("stagger=");
+	r.grapple = grappleAt == std::string::npos ? 0 : atoi(s.c_str() + grappleAt + 8);
+	r.grapple = r.grapple >= 0 && r.grapple < kGrappleValues ? r.grapple : 0;
+	r.stagger = staggerAt == std::string::npos ? 0 : atoi(s.c_str() + staggerAt + 8);
+	r.stagger = r.stagger >= 0 && r.stagger < kStaggerValues ? r.stagger : 0;
 	size_t livesAt = s.find("lives=");
 	r.lives = livesAt == std::string::npos ? 0 : atoi(s.c_str() + livesAt + 6);
 	at = s.find("magazines=");
@@ -287,6 +315,9 @@ Rules Own()
 		r.survival = g_menuSurvival;
 		r.lives = r.survival ? g_menuLives.load() : 0;
 		r.team = r.survival && g_menuTeam;
+		r.harmonizer = g_menu[kRowHarmonizer] != 0;
+		r.grapple = g_menu[kRowGrapple] % kGrappleValues;
+		r.stagger = g_menu[kRowStagger] % kStaggerValues;
 		return r;
 	}
 	r.ammo = Cfg().rulesUnlimitedAmmo;
@@ -324,6 +355,91 @@ uint8_t** g_players = nullptr;
 // players +0x8174: what the match scores by (the battle HUD's player list shows it): 1 Battle Gauge, 2 kills, 3 points
 const uint32_t kPlayersListMode = 0x8174;
 const int32_t kListGauge = 1, kListKills = 2, kListPoints = 3;
+
+// Harmonizer: a human's auto heal (low health -> boot, then heals; uHuman +0x21cc state) starts from DX11
+// FUN_00c54e50 (fastcall(human) -> bool, also asked by the bots' brains), which refuses in matches with the
+// 16-slot flag (game +0x256: VS, Online, AI Enemy Battle) by `cmp byte [eax+0x256],0; jne <false>`. On, that jne
+// becomes two nops, so the Campaign's Harmonizer runs in VS matches too.
+const uint32_t kHarmonizerStart[kBuildCount] = {0xc54e50, 0xc45250, 0xc54e90, 0xc44e60};
+const uint8_t kHarmonizerCheck[] = {0x80, 0xb8, 0x56, 0x02, 0x00, 0x00, 0x00, 0x75, 0xeb}; // at +0x19
+uint8_t* g_harmonizerJump = nullptr; // the jne, at +0x20
+
+void HarmonizerSet(bool on)
+{
+	if (!g_harmonizerJump || g_harmonizer == on) {
+		return;
+	}
+	g_harmonizer = on;
+	const uint8_t bytes[2] = {(uint8_t)(on ? 0x90 : 0x75), (uint8_t)(on ? 0x90 : 0xeb)};
+	DWORD old;
+	if (VirtualProtect(g_harmonizerJump, 2, PAGE_EXECUTE_READWRITE, &old)) {
+		memcpy(g_harmonizerJump, bytes, 2);
+		VirtualProtect(g_harmonizerJump, 2, old, &old);
+		FlushInstructionCache(GetCurrentProcess(), g_harmonizerJump, 2);
+	}
+}
+
+// Grapple range: the anchor (uWp00) keeps it at +0x225c (DX11) / +0x224c (DX9), set to 1100 when made, and everything
+// (the aim ray, the green crosshair, the bots) reads it through its vf379 (fld dword [ecx+range]; ret). That getter is
+// replaced by a jump to ours: the range times the Grappling row's scale (Off: a centimetre, nothing in reach).
+const uint32_t kGrappleRangeGet[kBuildCount] = {0xc86600, 0xc769f0, 0xc86620, 0xc765f0};
+uint32_t g_grappleRangeAt = 0;
+
+extern "C" float __attribute__((thiscall)) GrappleRange(uint8_t* anchor)
+{
+	float range = *(float*)(anchor + g_grappleRangeAt);
+	float scaled = range * kGrappleScales[g_grapple % kGrappleValues];
+	return scaled < 1.0f ? 1.0f : scaled;
+}
+
+void GrappleInstall(uint8_t* base, int build)
+{
+	uint8_t* get = base + (kGrappleRangeGet[build] - 0x400000);
+	if (get[0] != 0xd9 || get[1] != 0x81 || get[4] != 0x00 || get[5] != 0x00 || get[6] != 0xc3) {
+		XLS_LOG_WARN("mods: rules: grapple range getter not found, the Grappling rows have no effect.");
+		return;
+	}
+	g_grappleRangeAt = *(uint32_t*)(get + 2);
+	DWORD old;
+	if (VirtualProtect(get, 5, PAGE_EXECUTE_READWRITE, &old)) {
+		get[0] = 0xe9;
+		*(int32_t*)(get + 1) = (int32_t)((uint8_t*)&GrappleRange - (get + 5));
+		VirtualProtect(get, 5, old, &old);
+		FlushInstructionCache(GetCurrentProcess(), get, 5);
+	}
+}
+
+// Hit Stagger: a character's stagger (shrink) points count down from their max (cCharParam +0xc, s16); a hit takes
+// its points off through the character's add (DX11 FUN_009b72a0, thiscall(character, delta, ?) -> bool still
+// standing; called by the hit handlers with a negative delta), and at 0 the character flinches and refills. Ours
+// scales the negative deltas; refills (positive) pass as they are. VS rules only, so the Campaign's Akrid keep theirs.
+using StaggerAddFn = bool(__attribute__((thiscall)) *)(void*, uint32_t, uint32_t);
+StaggerAddFn g_staggerAddOriginal = nullptr;
+const uint32_t kStaggerAdd[kBuildCount] = {0x9b72a0, 0x9a7a20, 0x9b75c0, 0x9a7b70};
+
+bool __attribute__((thiscall)) StaggerAdd(void* character, uint32_t delta, uint32_t b)
+{
+	int16_t points = (int16_t)delta;
+	float scale = kStaggerScales[g_stagger % kStaggerValues];
+	if (points < 0 && scale != 1.0f) {
+		points = (int16_t)(points * scale);
+		delta = (uint16_t)points;
+		if (points == 0) {
+			return true; // nothing taken off: still standing
+		}
+	}
+	return g_staggerAddOriginal(character, delta, b);
+}
+
+void StaggerInstall(uint8_t* base, int build)
+{
+	bool dx9 = build == 1 || build == 3;
+	const uint8_t prologue[] = {0x56, 0x8b, 0xf1, 0x8b, 0x8e, (uint8_t)(dx9 ? 0xb4 : 0xc4), 0x0c, 0x00, 0x00}; // push esi; mov esi,ecx; mov ecx,[esi+0xcc4]
+	g_staggerAddOriginal = (StaggerAddFn)Detour(base + (kStaggerAdd[build] - 0x400000), prologue, sizeof(prologue), (void*)&StaggerAdd);
+	if (!g_staggerAddOriginal) {
+		XLS_LOG_WARN("mods: rules: stagger add not hooked, the Hit Stagger row has no effect.");
+	}
+}
 
 // Once a second: the lobby owner's rules (ours outside lobbies or until the owner's arrive).
 DWORD WINAPI SyncThread(LPVOID)
@@ -393,11 +509,14 @@ DWORD WINAPI SyncThread(LPVOID)
 		g_supply = r.supply;
 		g_survival = r.survival;
 		g_lives = r.lives;
+		HarmonizerSet(r.harmonizer);
+		g_grapple = r.grapple;
+		g_stagger = r.stagger;
 		g_team = r.team;
 		std::string now = Format(r);
 		if (now != logged) {
 			logged = now;
-			XLS_LOG_INFO("mods: rules: unlimited ammo %s, unlimited grenades %s, secondary kind 0x%02x, ammo supply %d magazines (0 = default), survival %s (%d lives).", r.ammo ? "on" : "off", r.grenades ? "on" : "off", r.secondary, r.supply, r.survival ? "on" : "off", r.lives);
+			XLS_LOG_INFO("mods: rules: unlimited ammo %s, unlimited grenades %s, secondary kind 0x%02x, ammo supply %d magazines (0 = default), survival %s (%d lives), harmonizer %s, grappling %s, hit stagger %s.", r.ammo ? "on" : "off", r.grenades ? "on" : "off", r.secondary, r.supply, r.survival ? "on" : "off", r.lives, r.harmonizer ? "on" : "off", kGrappleNames[r.grapple % kGrappleValues], kStaggerNames[r.stagger % kStaggerValues]);
 		}
 	}
 }
@@ -1444,6 +1563,10 @@ bool BotScreen(uint8_t* menu)
 // for the elimination rules, Respawns with Survival on.
 const int kRowBots = 4, kRowDifficulty = 5, kRowBrain = 6, kRowPersona = 7, kRowTaunts = 8, kRowLast = 8;
 const int kRowsMax = kRowLast + 1;
+// Up to 9 rows: the screen shows a window of kRowsVisible of them that scrolls with the cursor (g_botScroll = the
+// first shown row's index in screen order).
+const int kRowsVisible = 6;
+int g_botScroll = 0;
 int BotRowsShown(uint8_t* menu, int* rows)
 {
 	int n = 0;
@@ -1478,9 +1601,10 @@ void BotRowsDraw(uint8_t* menu)
 		FlashArg args[3] = {{0, 4, n.c_str()}, {0, 4, r.label}, {0, 4, r.value}};
 		ok = ok && g_flashCall(menu, 0, "lp2BotRow", args, 3);
 	}
+	g_botScroll = std::max(0, std::min(g_botScroll, shown - kRowsVisible));
 	std::string order;
-	for (int i = 0; i < shown; i++) {
-		order += (i ? "," : "") + std::to_string(rows[i]);
+	for (int i = g_botScroll; i < shown && i < g_botScroll + kRowsVisible; i++) {
+		order += (i > g_botScroll ? "," : "") + std::to_string(rows[i]);
 	}
 	FlashArg arg = {0, 4, order.c_str()};
 	if (!ok || !g_flashCall(menu, 0, "lp2BotOrder", &arg, 1)) {
@@ -1510,6 +1634,7 @@ void __attribute__((fastcall)) BotCursorBody(uint8_t* menu)
 	int32_t& row = *(int32_t*)(menu + kMenuRow);
 	if (drawn != menu) { // shown: the cursor starts on the top row
 		row = kRowBots;
+		g_botScroll = 0;
 		*(uint32_t*)(menu + kMenuFlags) |= kFlagRow;
 	}
 	if (drawn != menu || drawnRule != *(int32_t*)(menu + kMenuRule)) { // shown, or the rule changed
@@ -1539,6 +1664,12 @@ void __attribute__((fastcall)) BotCursorBody(uint8_t* menu)
 	}
 	if (row != was || (pressed & (kKeyUp | kKeyDown))) {
 		*(uint32_t*)(menu + kMenuFlags) |= kFlagRow;
+	}
+	for (int i = 0; i < shown; i++) { // keep the cursor's row in the window
+		if (rows[i] == row && (i < g_botScroll || i >= g_botScroll + kRowsVisible)) {
+			g_botScroll = i < g_botScroll ? i : i - kRowsVisible + 1;
+			BotRowsDraw(menu);
+		}
 	}
 }
 
@@ -2115,6 +2246,14 @@ void RulesInstall(unsigned char* base)
 		XLS_LOG_WARN("mods: rules: grenade counter not hooked, no infinity sign for unlimited grenades.");
 	}
 	g_setNumber = (SetNumberFn)(uintptr_t)kRulesVas[build].setNumber;
+	if (uint8_t* check = base + (kHarmonizerStart[build] - 0x400000) + 0x19; memcmp(check, kHarmonizerCheck, sizeof(kHarmonizerCheck)) == 0) {
+		g_harmonizerJump = check + 7;
+	}
+	else {
+		XLS_LOG_WARN("mods: rules: Harmonizer start check not found, the Harmonizer row has no effect.");
+	}
+	GrappleInstall(base, build);
+	StaggerInstall(base, build);
 	g_pushRulesOriginal = (PushRulesFn)Detour(base + (kRulesVas[build].pushRules - 0x400000), kPushRulesPrologue, sizeof(kPushRulesPrologue), (void*)&PushRules);
 	if (g_pushRulesOriginal) {
 		PatchRowTable(base + (kRulesVas[build].rowTable - 0x400000));
@@ -2156,6 +2295,9 @@ void RulesInstall(unsigned char* base)
 			g_menu[kRowSupply] = kSupplyMagazines[i] == r.supply ? i : (int)g_menu[kRowSupply];
 		}
 		g_menu[kRowInfinite] = (r.ammo ? kInfiniteAmmo : 0) | (r.grenades ? kInfiniteGrenades : 0);
+		g_menu[kRowHarmonizer] = r.harmonizer ? 1 : 0;
+		g_menu[kRowGrapple] = r.grapple;
+		g_menu[kRowStagger] = r.stagger;
 		g_menuSeen = true;
 	}
 	MemberDataSet("rules", Format(Own()));
@@ -2394,6 +2536,12 @@ const char* RulesMessage(uint32_t id)
 	}
 	if (id >= (uint32_t)kMsgSupply && id < (uint32_t)(kMsgSupply + kSupplyValues)) {
 		return kSupplyNames[id - kMsgSupply];
+	}
+	if (id >= (uint32_t)kMsgGrapple && id < (uint32_t)(kMsgGrapple + kGrappleValues)) {
+		return kGrappleNames[id - kMsgGrapple];
+	}
+	if (id >= (uint32_t)kMsgStagger && id < (uint32_t)(kMsgStagger + kStaggerValues)) {
+		return kStaggerNames[id - kMsgStagger];
 	}
 	if (id == (uint32_t)(kMsgItemName + kItemKillRow) && g_menuSurvival) {
 		return "Respawns"; // the Kills row's label while Survival is picked

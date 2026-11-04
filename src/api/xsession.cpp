@@ -1011,6 +1011,7 @@ DWORD WINAPI XSessionCreate(DWORD dwFlags, DWORD dwUserIndex, DWORD dwMaxPublicS
 		CSteamID host;
 		if (xls::NetSteamIdFromXnaddr(session->info.hostAddress, &host)) {
 			xls::NetResetBrokenSession(host, "joining their lobby");
+			xls::NetFreshSession(host);
 			xls::NetSecureAddrFor(host);
 			xls::SteamFriends()->SetPlayedWith(host);
 		}

@@ -106,6 +106,7 @@ bool FlashAddRootScript(std::vector<uint8_t>* gfx, const std::vector<uint8_t>& s
 // Options > Network (netmenu.cpp): the entry's script for the Options Flash (flash\option\id500_PC),
 // and the hook that answers it.
 bool NetMenuPatchFlash(std::vector<uint8_t>* gfx);
+bool TitlePatchFlash(std::vector<uint8_t>* gfx);
 // Adds the Network entry's texts to message\msgPC\MsgOption, every language (netmenu.cpp).
 bool NetMenuPatchMessages(std::vector<uint8_t>* file);
 void NetMenuInstall(unsigned char* base);

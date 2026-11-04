@@ -28,10 +28,10 @@ uint32_t g_titleVersion = 0;
 XLIVE_DEBUG_LEVEL g_debugLevel = XLIVE_DEBUG_LEVEL_DEFAULT;
 
 // The link time from the PE header, since __DATE__ only changes when this file recompiles.
-std::string LinkStamp()
+std::string LinkStampText()
 {
 	HMODULE module = nullptr;
-	GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)&LinkStamp, &module);
+	GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)&LinkStampText, &module);
 	if (!module) {
 		return "unknown";
 	}
@@ -50,6 +50,7 @@ std::string LinkStamp()
 namespace xls {
 
 bool Initialised() { return g_initialised; }
+std::string LinkStamp() { return LinkStampText(); }
 uint32_t TitleId() { return g_titleId; }
 uint32_t TitleVersion() { return g_titleVersion; }
 
@@ -69,7 +70,7 @@ HRESULT WINAPI XLiveInitializeEx(XLIVE_INITIALIZE_INFO* pXii, DWORD dwTitleXLive
 	}
 	xls::mods::NotifyTitleStarted();
 	xls::ConfigEnsureLoaded();
-	XLS_LOG_INFO("xlive-steamworks %u.%u.%u (linked %s) initialising (title xlive version 0x%08x, flags 0x%08x).", XLS_VERSION_MAJOR, XLS_VERSION_MINOR, XLS_VERSION_PATCH, LinkStamp().c_str(), dwTitleXLiveVersion, pXii ? pXii->dwFlags : 0);
+	XLS_LOG_INFO("xlive-steamworks %u.%u.%u (linked %s) initialising (title xlive version 0x%08x, flags 0x%08x).", XLS_VERSION_MAJOR, XLS_VERSION_MINOR, XLS_VERSION_PATCH, LinkStampText().c_str(), dwTitleXLiveVersion, pXii ? pXii->dwFlags : 0);
 
 	xls::SteamStart();
 

@@ -16,14 +16,18 @@
 
 #include "mods/lp2.h"
 #include "mods/flash/netmenu.h"
+#include "mods/flash/titlever.h"
 #include "mods/parts.h"
 
+#include "api/xlive.h"
 #include "core/config.h"
 #include "core/log.h"
 #include "core/net.h"
+#include "core/update.h"
 
 #include <windows.h>
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -256,6 +260,24 @@ void __attribute__((thiscall)) FlashCallback(uint8_t* screen, void* movie, void*
 bool NetMenuPatchFlash(std::vector<uint8_t>* gfx)
 {
 	return FlashAddRootScript(gfx, std::vector<uint8_t>(std::begin(kNetMenuScript), std::end(kNetMenuScript)), "Network entry");
+}
+
+// The main menu (flash\mainmenu\id010_360) shows the mod build: flash/titlever.as, its placeholder string
+// overwritten in place (same length, space padded).
+bool TitlePatchFlash(std::vector<uint8_t>* gfx)
+{
+	std::vector<uint8_t> script(std::begin(kTitleVerScript), std::end(kTitleVerScript));
+	static const char kMark[] = "@@LP2BUILD@@";
+	auto at = std::search(script.begin(), script.end(), kMark, kMark + sizeof(kMark) - 1);
+	if (at == script.end()) {
+		return false;
+	}
+	size_t room = std::find(at, script.end(), 0) - at;
+	std::string tag = ReleaseTag();
+	std::string text = "Recolonised " + (tag.empty() ? std::string("dev build") : tag) + ", built " + LinkStamp();
+	text.resize(room, ' ');
+	std::copy(text.begin(), text.end(), at);
+	return FlashAddRootScript(gfx, script, "build stamp");
 }
 
 // rFlashMessage: 'MES\0', u32 version, u32 name length, name + '\0', then per language: u32 language,

@@ -46,6 +46,7 @@ DWORD NetConnectStatus(IN_ADDR alias);
 void NetConnectStart(IN_ADDR alias);
 // Clears a Steam session with this peer that the peer closed or that broke (left over from an earlier match), so new traffic opens a fresh one.
 void NetResetBrokenSession(CSteamID steamId, const char* why);
+void NetFreshSession(CSteamID steamId); // joining their lobby: a connection lost in an earlier session starts afresh
 bool NetIsLocalAlias(IN_ADDR alias);
 
 // --- Keys ----------------------------------------------------------------------------------------

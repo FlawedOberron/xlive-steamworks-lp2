@@ -1097,6 +1097,26 @@ void NetResetBrokenSession(CSteamID steamId, const char* why)
 	}
 }
 
+// Joining someone's lobby starts our connection to them afresh: one they ended with the last session (a
+// campaign's end closes it) leaves its secure entry LOST, and the game, reading that, gave up on the new
+// session ("no relay") until a second try.
+void NetFreshSession(CSteamID steamId)
+{
+	std::lock_guard<std::recursive_mutex> lock(g_mutex);
+	auto alias = g_aliasBySteamId.find(steamId.ConvertToUint64());
+	if (alias == g_aliasBySteamId.end()) {
+		return;
+	}
+	auto it = g_secure.find(alias->second);
+	if (it != g_secure.end() && it->second.connectStatus == XNET_CONNECT_STATUS_LOST) {
+		it->second.connectStatus = XNET_CONNECT_STATUS_IDLE;
+		if (SteamReady() && SteamNetworkingMessages()) {
+			SteamNetworkingMessages()->CloseSessionWithUser(IdentityOf(steamId));
+		}
+		XLS_LOG_INFO("net: connection to %llu was lost in an earlier session; starting it afresh.", steamId.ConvertToUint64());
+	}
+}
+
 DWORD NetConnectStatus(IN_ADDR alias)
 {
 	std::lock_guard<std::recursive_mutex> lock(g_mutex);

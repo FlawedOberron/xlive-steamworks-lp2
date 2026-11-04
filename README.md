@@ -17,10 +17,13 @@ which the build fetches.
 
 ## Download
 
-Take `lp2-recolonised-test.zip` from the
-[latest release](https://github.com/FlawedOberron/xlive-steamworks-lp2/releases/latest) (also in the
-Releases box on the repo page). Older test builds are on the
-[Releases page](https://github.com/FlawedOberron/xlive-steamworks-lp2/releases).
+From the [latest release](https://github.com/FlawedOberron/xlive-steamworks-lp2/releases/latest) (also in the
+Releases box on the repo page), take the zip for your copy of the game:
+
+- `lp2-recolonised-test.zip`: the **Steam** copy.
+- `lp2-recolonised-test-retail.zip`: the **retail disc (DVD)**, already set up for Spacewar (app 480).
+
+Older test builds are on the [Releases page](https://github.com/FlawedOberron/xlive-steamworks-lp2/releases).
 
 > **Experimental.** Expect bugs. Everyone in a match needs the same build for the match rules to apply
 > to them.
@@ -44,40 +47,37 @@ Windows. If the game crashes loading a custom map on Windows and not on Linux, t
 
 Steam copy or retail disc (DVD): both play online together. The two versions install differently.
 
-### Steam copy
+### Steam copy (`lp2-recolonised-test.zip`)
 
 1. Steam → Lost Planet 2 → Manage → **Browse local files**.
-2. Rename the existing `xlive.dll` to `xlive.dll.capcom` (keeps a backup).
-3. Copy `xlive.dll`, `xlive_relay.exe`, `steam_api.dll` and `xlive_steamworks.json` from the zip into
-   that folder.
-4. Linux / Steam Deck: set the launch option `WINE_LARGE_ADDRESS_AWARE=1 %command%`
+2. Unzip everything in the zip into that folder, and replace `xlive.dll` when asked.
+3. Linux / Steam Deck: set the launch option `WINE_LARGE_ADDRESS_AWARE=1 %command%`
    (Windows: see [Memory](docs/LP2-MODS.md#memory-large-address-aware-recommended)).
-5. Play either the DirectX 9 or the DirectX 11 version. Online play uses Steam lobbies, shared with retail DVD
+4. Play either the DirectX 9 or the DirectX 11 version. Online play uses Steam lobbies, shared with retail DVD
    copies (see [Spacewar](#steam-and-disc-copies-together-spacewar)): invite through Steam or Discord.
 
-**Undo:** delete the four files and rename `xlive.dll.capcom` back. Steam's "Verify integrity of game
-files" (or a game update) also puts Capcom's `xlive.dll` back; copy ours again afterwards.
+**Undo:** delete `xlive_relay.exe`, `steam_api.dll` and `xlive_steamworks.json`, then use Steam's "Verify
+integrity of game files" to put Capcom's `xlive.dll` back. (A game update does that too; unzip ours again
+afterwards.)
 
-### Retail disc (DVD)
+### Retail disc (DVD) (`lp2-recolonised-test-retail.zip`)
 
 You need Steam installed and signed in (any account; you don't need to own Lost Planet 2 on Steam).
 
 1. Install the game from the disc as normal. On Linux, run the disc's `setup.exe` through Wine,
    or add it to Steam as a non-Steam game and run it under Proton.
-2. Open the install folder (by default `C:\Program Files (x86)\Capcom\Lost Planet 2`). There is no
-   `xlive.dll` to rename: the disc version uses the GFWL one installed in Windows.
-3. Copy `xlive.dll`, `xlive_relay.exe`, `steam_api.dll` and `xlive_steamworks.json` from the zip into
+2. Unzip everything in the zip into the install folder (by default
+   `C:\Program Files (x86)\Capcom\Lost Planet 2`). It is already set up for the disc version:
+   `steam_appid.txt` and `xlive_steamworks.json` point at Spacewar (app 480). There is no `xlive.dll` to
+   replace there; the disc version uses the GFWL one installed in Windows.
+3. Steam → **Add a Game** → **Add a Non-Steam Game** → browse to `LP2DX9.exe` or `LP2DX11.exe` in
    that folder.
-4. Open `xlive_steamworks.json` in a text editor and change `"app_id": 45750` to `"app_id": 480`.
-   Then make a text file `steam_appid.txt` in the same folder that contains just `480`.
-5. Steam → **Add a Game** → **Add a Non-Steam Game** → browse to `LP2DX9.exe` or `LP2DX11.exe` in
-   that folder.
-6. Linux / Steam Deck: in the shortcut's Properties, under Compatibility, pick Proton Experimental,
+4. Linux / Steam Deck: in the shortcut's Properties, under Compatibility, pick Proton Experimental,
    and set the launch option `WINE_LARGE_ADDRESS_AWARE=1 %command%`.
-7. Start the game from Steam. Steam shows you as playing Spacewar; that's expected (see
+5. Start the game from Steam. Steam shows you as playing Spacewar; that's expected (see
    [Spacewar](#steam-and-disc-copies-together-spacewar)).
 
-**Undo:** delete the five files. The GFWL `xlive.dll` in Windows is used again.
+**Undo:** delete the six files from the zip. The GFWL `xlive.dll` in Windows is used again.
 
 **Problems:** [open an issue](https://github.com/FlawedOberron/xlive-steamworks-lp2/issues) and attach `xlive_steamworks.log` from the game folder.
 

@@ -13,6 +13,8 @@
 #include <stdint.h>
 #include <string.h>
 
+#include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -418,6 +420,16 @@ int __attribute__((thiscall)) RuleStep(void* screen, int key, uint8_t* value, in
 	}
 	int step = key == 10 ? 1 : -1;
 	uint8_t was = *value;
+	{
+		// which screens step the map through here, and with what range (the post-game lobby's Options: custom maps?)
+		static std::mutex mutex;
+		static std::set<uintptr_t> seen;
+		std::lock_guard<std::mutex> lock(mutex);
+		uintptr_t from = (uintptr_t)__builtin_return_address(0);
+		if (seen.size() < 16 && seen.insert(from).second) {
+			XLS_LOG_INFO("mods: maps: map row stepped from 0x%p (screen 0x%p, map %u, range %d-%d, wrap %d).", (void*)from, screen, was, min, max, wrap);
+		}
+	}
 	*((uint8_t*)screen + 0x3ce) = 1; // as the stepper does first thing
 	if (was == 13 && PackagesPick(step, false)) {
 		StepSound(screen);

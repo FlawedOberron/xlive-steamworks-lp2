@@ -1,14 +1,18 @@
 #include "mods/lp2.h"
 #include "mods/package.h"
 
+#include "core/config.h"
 #include "core/log.h"
+#include "core/relay.h"
 #include "core/utils.h"
 
 #include <windows.h>
 #include <shlobj.h>
 
+#include <algorithm>
 #include <string>
 #include <string.h>
+#include <vector>
 
 namespace xls::mods {
 
@@ -180,6 +184,119 @@ static void ConvertFile(const std::wstring& path)
 	}
 }
 
+// A save in this version's format whose checksum holds (the game reports anything else as damaged).
+static bool SaveValid(const Bytes& data)
+{
+	if (data.size() != kHeader + kBody || U32(data.data() + 0x14) != kMagic) {
+		return false;
+	}
+	std::vector<uint8_t> plain(data.end() - kBody, data.end());
+	for (uint8_t& b : plain) {
+		b ^= kKey;
+	}
+	uint32_t h[5];
+	Sha1(plain.data(), kBody, h);
+	return memcmp(data.data(), h, 20) == 0;
+}
+
+// Backups: every time the save changes (checked each minute), a copy in ModCache\saves\<profile>\ (the last
+// kKeep, named by time) and one in the Steam Cloud of the relay's app (Spacewar, when cross-play runs: the game's
+// own app has no Cloud). On start, a missing or damaged save comes back from the newest good copy: local first,
+// then the Cloud (a new PC).
+const int kKeep = 10;
+
+static std::string CloudName(const std::string& gamertag)
+{
+	std::string safe;
+	for (char c : gamertag) {
+		safe += isalnum((unsigned char)c) ? c : '_';
+	}
+	return "LP2Recolonised_" + safe + ".sav"; // Spacewar's Cloud is everyone's who runs as it: our prefix
+}
+
+static std::vector<std::wstring> LocalBackups(const std::wstring& dir) // newest first
+{
+	std::vector<std::wstring> files;
+	WIN32_FIND_DATAW find;
+	HANDLE it = FindFirstFileW((dir + L"*.sav").c_str(), &find);
+	if (it != INVALID_HANDLE_VALUE) {
+		do {
+			files.push_back(find.cFileName);
+		} while (FindNextFileW(it, &find));
+		FindClose(it);
+	}
+	std::sort(files.rbegin(), files.rend()); // yyyymmdd-hhmmss names sort by time
+	return files;
+}
+
+static void Restore(const std::wstring& path, const std::wstring& backups, const std::string& gamertag, bool missing)
+{
+	Bytes data;
+	std::string from;
+	for (const std::wstring& f : LocalBackups(backups)) {
+		if (ReadWholeFile(backups + f, &data) && SaveValid(data)) {
+			from = "local backup " + WideToUtf8(f.c_str());
+			break;
+		}
+	}
+	if (from.empty() && relay::Active() && relay::CloudRead(CloudName(gamertag).c_str(), &data) && SaveValid(data)) {
+		from = "the Steam Cloud backup";
+	}
+	if (from.empty()) {
+		if (missing) {
+			XLS_LOG_INFO("mods: saves: no save yet and no backup of one (a new profile).");
+		}
+		else {
+			XLS_LOG_WARN("mods: saves: the save is damaged and there's no good backup to restore.");
+		}
+		return;
+	}
+	if (!missing) {
+		MoveFileExW(path.c_str(), (path + L".damaged").c_str(), MOVEFILE_REPLACE_EXISTING);
+	}
+	if (WriteWholeFile(path, data)) {
+		XLS_LOG_INFO("mods: saves: the save was %s; restored %s.", missing ? "missing" : "damaged (kept as .damaged)", from.c_str());
+	}
+}
+
+struct BackupJob {
+	std::wstring path, dir;
+	std::string gamertag;
+};
+
+static DWORD WINAPI BackupThread(LPVOID param)
+{
+	BackupJob job = *(BackupJob*)param;
+	delete (BackupJob*)param;
+	FILETIME last = {};
+	for (;; Sleep(60000)) {
+		WIN32_FILE_ATTRIBUTE_DATA info;
+		if (!GetFileAttributesExW(job.path.c_str(), GetFileExInfoStandard, &info) || CompareFileTime(&info.ftLastWriteTime, &last) == 0) {
+			continue;
+		}
+		Bytes data;
+		if (!ReadWholeFile(job.path, &data) || !SaveValid(data)) {
+			continue; // mid-write, or not a save we know: next minute
+		}
+		last = info.ftLastWriteTime;
+		std::vector<std::wstring> old = LocalBackups(job.dir);
+		Bytes newest;
+		if (!old.empty() && ReadWholeFile(job.dir + old[0], &newest) && newest == data) {
+			continue; // backed up already (an earlier run)
+		}
+		SYSTEMTIME t;
+		GetLocalTime(&t);
+		std::wstring name = FormatW(L"%04u%02u%02u-%02u%02u%02u.sav", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond);
+		bool local = WriteWholeFile(job.dir + name, data);
+		for (size_t i = kKeep - 1; local && i < old.size(); i++) {
+			DeleteFileW((job.dir + old[i]).c_str());
+		}
+		bool cloud = relay::Active() && relay::CloudWrite(CloudName(job.gamertag).c_str(), data);
+		XLS_LOG_INFO("mods: saves: backed up (local %s, Steam Cloud %s).", local ? "ok" : "failed", cloud ? "ok" : relay::Active() ? "failed" : "off: no cross-play helper");
+	}
+	return 0;
+}
+
 void SavesImport(const std::string& gamertag)
 {
 	wchar_t docs[MAX_PATH];
@@ -188,10 +305,33 @@ void SavesImport(const std::string& gamertag)
 	}
 	std::wstring root = std::wstring(docs) + L"\\CAPCOM\\LOST PLANET 2\\";
 	std::wstring mine = root + Utf8ToWide(gamertag.c_str());
-	if (GetFileAttributesW((mine + L"\\" + kSave).c_str()) == INVALID_FILE_ATTRIBUTES) {
-		ImportNewest(root, mine, gamertag);
+	std::wstring path = mine + L"\\" + kSave;
+	std::wstring backups = Cfg().modCacheDir + L"saves\\" + Utf8ToWide(gamertag.c_str()) + L"\\";
+	bool imported = false;
+	if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+		bool any = !LocalBackups(backups).empty();
+		if (!any) {
+			ImportNewest(root, mine, gamertag); // first run with this dll: the GFWL profile's save
+			imported = GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+		}
 	}
-	ConvertFile(mine + L"\\" + kSave);
+	ConvertFile(path);
+	Bytes data;
+	bool missing = GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES;
+	if (!imported && (missing || (ReadWholeFile(path, &data) && !SaveValid(data)))) {
+		CreateDirectoryW(mine.c_str(), nullptr);
+		Restore(path, backups, gamertag, missing);
+	}
+	CreateDirectoryW((Cfg().modCacheDir + L"saves").c_str(), nullptr);
+	CreateDirectoryW(backups.c_str(), nullptr);
+	static bool started = false;
+	if (!started) {
+		started = true;
+		HANDLE t = CreateThread(nullptr, 0, BackupThread, new BackupJob{path, backups, gamertag}, 0, nullptr);
+		if (t) {
+			CloseHandle(t);
+		}
+	}
 }
 
 }

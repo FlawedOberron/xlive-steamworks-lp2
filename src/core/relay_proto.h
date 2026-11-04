@@ -33,6 +33,8 @@ enum Op : uint16_t {
 	kSendMessage, kListenChannel, kAcceptSession, kCloseSession, kCloseChannel, kSessionInfo,
 	// networking utils
 	kSetConfigInt32, kInitRelayNetwork,
+	// remote storage (the helper app's Steam Cloud: save backups): write name + data -> u8 ok; read name -> u8 ok + data
+	kCloudWrite, kCloudRead,
 	// events
 	kEvent = 0x8000,
 	kEvCallback,   // i32 callback id, then its struct
@@ -46,6 +48,7 @@ struct Out {
 	Out& raw(const void* p, size_t n) { b.insert(b.end(), (const uint8_t*)p, (const uint8_t*)p + n); return *this; }
 	template <typename T> Out& put(T v) { return raw(&v, sizeof v); }
 	Out& str(const char* s) { uint32_t n = s ? (uint32_t)strlen(s) : 0; put(n); return raw(s, n); }
+	Out& bytes(const void* p, size_t n) { put((uint32_t)n); return raw(p, n); } // read back with In::str()
 };
 
 struct In {

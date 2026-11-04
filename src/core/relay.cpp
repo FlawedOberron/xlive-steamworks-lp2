@@ -457,6 +457,29 @@ uint64_t LobbyByIndex(int i)
 	return AskValue<uint64_t>(kGetLobbyByIndex, Out().put<int32_t>(i));
 }
 
+bool CloudWrite(const char* name, const std::vector<uint8_t>& data)
+{
+	Out o;
+	o.str(name).bytes(data.data(), data.size());
+	std::vector<uint8_t> r = Ask(kCloudWrite, o);
+	return r.size() == 1 && r[0];
+}
+
+bool CloudRead(const char* name, std::vector<uint8_t>* data)
+{
+	Out o;
+	o.str(name);
+	std::vector<uint8_t> r = Ask(kCloudRead, o);
+	In in(r.data(), r.size());
+	bool ok = in.get<uint8_t>() != 0;
+	std::string bytes = in.str();
+	if (!ok || !in.ok || bytes.empty()) {
+		return false;
+	}
+	data->assign(bytes.begin(), bytes.end());
+	return true;
+}
+
 bool SetConfigInt32(int value, int32_t v)
 {
 	return AskValue<uint8_t>(kSetConfigInt32, Out().put<int32_t>(value).put<int32_t>(v)) != 0;
