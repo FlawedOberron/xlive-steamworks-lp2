@@ -428,6 +428,7 @@ bool ConfigLoad()
 			config.partsAnyFaction = root["mods"]["parts_any_faction"].GetBool(false);
 			config.partsShare = root["mods"]["share_parts"].GetBool(true);
 			config.partsReceive = root["mods"]["receive_parts"].GetBool(true);
+			config.partsReceiveLore = std::min<uint32_t>(root["mods"]["receive_parts_lore"].GetUint32(0), 2);
 			config.rulesUnlimitedAmmo = root["mods"]["rules"]["unlimited_ammo"].GetBool(false);
 			config.rulesUnlimitedGrenades = root["mods"]["rules"]["unlimited_grenades"].GetBool(false);
 			config.rulesSecondary = root["mods"]["rules"]["secondary"].GetString(std::string());
@@ -531,10 +532,11 @@ const std::string* StatNameFor(uint32_t viewId, uint16_t columnId)
 	return nullptr;
 }
 
-void ConfigSetNetwork(bool share, bool receive, uint32_t sendRateKBytes, bool updateAuto, int lobbyDistanceFilter)
+void ConfigSetNetwork(bool share, bool receive, int receiveLore, uint32_t sendRateKBytes, bool updateAuto, int lobbyDistanceFilter)
 {
 	g_config.partsShare = share;
 	g_config.partsReceive = receive;
+	g_config.partsReceiveLore = receiveLore;
 	g_config.sendRateKBytes = sendRateKBytes;
 	g_config.updateAuto = updateAuto;
 	g_config.lobbyDistanceFilter = lobbyDistanceFilter;
@@ -544,6 +546,7 @@ void ConfigSetNetwork(bool share, bool receive, uint32_t sendRateKBytes, bool up
 		text.assign(bytes.begin(), bytes.end());
 	}
 	if (!SetSetting(&text, "mods", "share_parts", share ? "true" : "false") || !SetSetting(&text, "mods", "receive_parts", receive ? "true" : "false") ||
+	    !SetSetting(&text, "mods", "receive_parts_lore", std::to_string(receiveLore)) ||
 	    !SetSetting(&text, "network", "send_rate_kbytes", std::to_string(sendRateKBytes)) ||
 	    !SetSetting(&text, "update", "auto", updateAuto ? "true" : "false") ||
 	    !SetSetting(&text, "sessions", "lobby_distance_filter", std::to_string(lobbyDistanceFilter))) {

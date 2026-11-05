@@ -353,6 +353,26 @@ bool ReadManifest(const Zip& zip, const std::wstring& label, MapPackage* map)
 			map->physics.oneway.push_back(v);
 		}
 	}
+	for (const Json& e : root["force_volumes"].Elements()) {
+		ForceVolume v;
+		bool ok = e["min"].Elements().size() == 3 && e["max"].Elements().size() == 3 && e["force"].Elements().size() == 3;
+		for (int i = 0; ok && i < 3; i++) {
+			v.min[i] = (float)e["min"].Elements()[i].GetNumber(0.0);
+			v.max[i] = (float)e["max"].Elements()[i].GetNumber(0.0);
+			v.force[i] = (float)e["force"].Elements()[i].GetNumber(0.0);
+		}
+		const char* names[] = {"players", "vs", "bullets", "grenades", "akrid"};
+		for (int i = 0; i < 5; i++) {
+			v.flags |= e[names[i]].GetBool(false) ? 1 << i : 0;
+		}
+		const std::string mode = e["mode"].GetString("continuous");
+		v.mode = mode == "impulse" ? kForceImpulse : mode == "velocity" ? kForceVelocity : kForceContinuous;
+		SetTurn(v.turn, e["yaw"].GetNumber(0.0));
+		v.sid = (int)e["sid"].GetInt(-1);
+		if (ok && v.flags) {
+			map->physics.force.push_back(v);
+		}
+	}
 	for (const Json& e : root["post_volumes"].Elements()) {
 		PostVolume v;
 		bool ok = e["min"].Elements().size() == 3 && e["max"].Elements().size() == 3;

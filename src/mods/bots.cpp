@@ -10,8 +10,9 @@
 //
 // cAIPlanFilterWeapon (vf5, thiscall(filter, character)) gets a mode the game doesn't have: mWpMode 3 tests
 // the character's other weapon (+0x1694 DX9 / +0x16a4 DX11) instead of the held one (+0x1678 / +0x1688),
-// so a brain can switch weapons by range only when the other weapon suits the range. Done by swapping the
-// two pointers around a mode-0 call (the AI runs on the game thread).
+// so a brain can switch weapons by range only when the other weapon suits the range. Done by a mode-0 call on
+// private copies with the other weapon as the held one. AI runs on worker threads: nothing shared is written here,
+// and the personality table takes g_personalityLock.
 //
 // Personality (bot-match areas only: area category byte game +599 == 0, the aArea_TUTOREAL ones). Every human
 // AI has a cAIParam at +0x2418 (DX9) / +0x2428 (DX11): bytes the brain reads through
@@ -35,6 +36,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include <mutex>
 #include <string>
 #include <unordered_map>
 
@@ -69,8 +71,10 @@ const uint8_t kModeOther = 3;
 const char kStockBrain[] = "tool\\AI\\Think\\HumanBotBt";
 
 typedef uint32_t(__attribute__((thiscall)) * ThinkSetFn)(void* spec, const char* path);
-typedef uint32_t(__attribute__((thiscall)) * FilterFn)(uint8_t* filter, uint8_t* character);
-typedef float(__attribute__((thiscall)) * EvalFn)(uint8_t* eval, uint8_t* unit);
+// Both take three stack arguments (ret 0xc: unit, the think, a third; only the unit is used), and a hook that returns
+// by itself must clean all three up or the caller's stack is 8 bytes off and it "returns" into its data.
+typedef uint32_t(__attribute__((thiscall)) * FilterFn)(uint8_t* filter, uint8_t* character, void* b, void* c);
+typedef float(__attribute__((thiscall)) * EvalFn)(uint8_t* eval, uint8_t* unit, void* b, void* c);
 
 // cAIParam byte offsets
 enum : uint32_t { kQuickness = 5, kCalm = 6, kAttacker = 7, kHold = 8, kImpatient = 0xb, kFollow = 0xe,
@@ -96,6 +100,8 @@ ThinkSetFn g_thinkOriginal = nullptr;
 FilterFn g_filterOriginal = nullptr;
 EvalFn g_evalOriginal = nullptr;
 std::unordered_map<uint8_t*, int> g_personality; // unit -> archetype
+std::mutex g_personalityLock; // also covers Rand's seed
+const size_t kFilterCharacterSize = 0x16b0; // past the other weapon slot on every build
 uint32_t g_seed = 0;
 bool g_brains = false; // uHm6d.arc is overlaid (our brains are in it)
 int g_lastKind = -1;
@@ -144,25 +150,24 @@ uint32_t __attribute__((thiscall)) ThinkSet(void* spec, const char* path)
 	return g_thinkOriginal(spec, path);
 }
 
-uint32_t __attribute__((thiscall)) FilterWeapon(uint8_t* filter, uint8_t* character)
+uint32_t __attribute__((thiscall)) FilterWeapon(uint8_t* filter, uint8_t* character, void* b, void* c)
 {
 	if (filter[kFilterMode] != kModeOther || !character) {
-		return g_filterOriginal(filter, character);
+		return g_filterOriginal(filter, character, b, c);
 	}
-	uint8_t** held = (uint8_t**)(character + g_vas->held);
-	uint8_t** other = (uint8_t**)(character + g_vas->other);
-	if (!*other) {
+	uint8_t* other = *(uint8_t**)(character + g_vas->other);
+	if (!other) {
 		return filter[kFilterInverse] ? 1 : 0; // no other weapon: it matches nothing
 	}
-	uint8_t* h = *held;
-	*held = *other;
-	*other = h;
-	filter[kFilterMode] = 0;
-	uint32_t r = g_filterOriginal(filter, character);
-	filter[kFilterMode] = kModeOther;
-	*other = *held;
-	*held = h;
-	return r;
+	// AI evaluates on worker threads and brains are shared between bots, so neither the character nor the filter may
+	// be changed, even briefly. The game's filter only reads plain fields of both (no calls), so it gets private copies.
+	uint8_t filterCopy[kFilterMode + 1];
+	uint8_t characterCopy[kFilterCharacterSize];
+	memcpy(filterCopy, filter, sizeof(filterCopy));
+	memcpy(characterCopy, character, g_vas->other + sizeof(uint8_t*));
+	filterCopy[kFilterMode] = 0;
+	*(uint8_t**)(characterCopy + g_vas->held) = other;
+	return g_filterOriginal(filterCopy, characterCopy, b, c);
 }
 
 uint32_t Rand()
@@ -190,6 +195,7 @@ void Scale(uint8_t* p, uint32_t at, float m)
 
 int Personality(uint8_t* unit)
 {
+	std::lock_guard<std::mutex> lock(g_personalityLock); // bots first evaluate on several worker threads at once
 	auto it = g_personality.find(unit);
 	if (it != g_personality.end()) {
 		return it->second;
@@ -218,11 +224,11 @@ int Personality(uint8_t* unit)
 	return a;
 }
 
-float __attribute__((thiscall)) EvalParam(uint8_t* eval, uint8_t* unit)
+float __attribute__((thiscall)) EvalParam(uint8_t* eval, uint8_t* unit, void* b, void* c)
 {
 	uint8_t* game = *(uint8_t**)At(g_vas->game);
 	if (!unit || unit[0x1f] != 1 || !game || game[kAreaCategory] != 0) {
-		return g_evalOriginal(eval, unit);
+		return g_evalOriginal(eval, unit, b, c);
 	}
 	int a = Personality(unit);
 	if (*(uint32_t*)(eval + kEvalMode) == kModeAppeal) {
@@ -232,7 +238,7 @@ float __attribute__((thiscall)) EvalParam(uint8_t* eval, uint8_t* unit)
 			return 0.0f;
 		}
 	}
-	return g_evalOriginal(eval, unit);
+	return g_evalOriginal(eval, unit, b, c);
 }
 
 }

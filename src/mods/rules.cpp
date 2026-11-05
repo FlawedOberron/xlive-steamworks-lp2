@@ -379,21 +379,88 @@ void HarmonizerSet(bool on)
 	}
 }
 
-// Grapple range: the anchor (uWp00) keeps it at +0x225c (DX11) / +0x224c (DX9), set to 1100 when made, and everything
-// (the aim ray, the green crosshair, the bots) reads it through its vf379 (fld dword [ecx+range]; ret). That getter is
-// replaced by a jump to ours: the range times the Grappling row's scale (Off: a centimetre, nothing in reach).
+// Grapple range: the anchor (uWp00) keeps it at +0x225c (DX11) / +0x224c (DX9), set to 1100 when made, and the aim ray,
+// the bots and the rope limit (uCharacter FUN_009cb4f0: a rope longer than this pulls the player in by the difference)
+// read it through its vf379 (fld dword [ecx+range]; ret). That getter is replaced by a jump to ours: the range times the
+// Grappling row's scale.
+// The hook's flight doesn't use it: the shot (FUN_00c89ab0) and the reel (FUN_00c8a720) compare the rope with a shared
+// constant, 1100.0 (DX11 0x138a01c), which enemies and VS read too, so only these three instructions are pointed at
+// g_grappleLimit. Off: limit 0, the hook goes back straight away.
 const uint32_t kGrappleRangeGet[kBuildCount] = {0xc86600, 0xc769f0, 0xc86620, 0xc765f0};
+// The disp32 of: shot "mulss xmm0, [1100]" (x 1.2, a locked target's lead), shot and reel "comiss xmm0, [1100]", and the
+// green crosshair's reach for humans (FUN_00ed69a0: "movss xmm1, [1100]").
+const uint32_t kGrappleLimitAt[kBuildCount][4] = {
+	{0xc89d35, 0xc8a242, 0xc8aacd, 0xed6fde},
+	{0xc7a155, 0xc7a662, 0xc7aeed, 0xec71ce},
+	{0xc89ca5, 0xc8a1b2, 0xc8aa3d, 0xed73ae},
+	{0xc79ce5, 0xc7a1f2, 0xc7aa7d, 0xec726e},
+};
+const float kGrappleStock = 1100.0f;
 uint32_t g_grappleRangeAt = 0;
+volatile float g_grappleLimit = kGrappleStock;
 
 extern "C" float __attribute__((thiscall)) GrappleRange(uint8_t* anchor)
 {
 	float range = *(float*)(anchor + g_grappleRangeAt);
 	float scaled = range * kGrappleScales[g_grapple % kGrappleValues];
+	static std::atomic<float> logged{-1.0f};
+	if (logged.exchange(scaled) != scaled) {
+		XLS_LOG_INFO("mods: rules: grapple range %.0f x %.2f = %.0f cm (read by 0x%p).", range, kGrappleScales[g_grapple % kGrappleValues], scaled, __builtin_return_address(0));
+	}
 	return scaled < 1.0f ? 1.0f : scaled;
+}
+
+// Grappling Off: the two human actions that fire the anchor (uHuman vf371, action 0x23: anchor state 1, the shot;
+// vf468, action 0x46: anchor state 2) do nothing and report finished (vf +0x114 clears 0x100, as they do when they
+// end), so there is no animation and no hook. The think goes back to normal the way it does after a grapple.
+const uint32_t kAnchorFire[kBuildCount][2] = {
+	{0xc5c240, 0xc5e840},
+	{0xc4c630, 0xc4ec30},
+	{0xc5c260, 0xc5e860},
+	{0xc4c220, 0xc4e820},
+};
+const uint8_t kAnchorFirePrologue[] = {0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf0}; // push ebp; mov ebp, esp; and esp, -16
+typedef void(__attribute__((thiscall)) * AnchorActionFn)(void*);
+typedef void(__attribute__((thiscall)) * ClearFlagsFn)(void*, uint32_t, uint32_t);
+AnchorActionFn g_anchorFireOriginal[2] = {nullptr, nullptr};
+
+bool AnchorBlocked(void* human)
+{
+	if (kGrappleScales[g_grapple % kGrappleValues] != 0.0f) {
+		return false;
+	}
+	static std::atomic<bool> logged{false};
+	if (!logged.exchange(true)) {
+		XLS_LOG_INFO("mods: rules: Grappling is Off, the anchor doesn't fire.");
+	}
+	void** vtable = *(void***)human;
+	((ClearFlagsFn)vtable[0x114 / 4])(human, 0x100, 0);
+	return true;
+}
+
+extern "C" void __attribute__((thiscall)) AnchorShot(void* human)
+{
+	if (!AnchorBlocked(human)) {
+		g_anchorFireOriginal[0](human);
+	}
+}
+
+extern "C" void __attribute__((thiscall)) AnchorReel(void* human)
+{
+	if (!AnchorBlocked(human)) {
+		g_anchorFireOriginal[1](human);
+	}
 }
 
 void GrappleInstall(uint8_t* base, int build)
 {
+	for (int i = 0; i < 2; i++) {
+		g_anchorFireOriginal[i] = (AnchorActionFn)Detour(base + (kAnchorFire[build][i] - 0x400000), kAnchorFirePrologue, sizeof(kAnchorFirePrologue), i == 0 ? (void*)&AnchorShot : (void*)&AnchorReel);
+		if (!g_anchorFireOriginal[i]) {
+			XLS_LOG_WARN("mods: rules: anchor fire action %d not hooked, Grappling Off won't stop the shot.", i);
+		}
+	}
+
 	uint8_t* get = base + (kGrappleRangeGet[build] - 0x400000);
 	if (get[0] != 0xd9 || get[1] != 0x81 || get[4] != 0x00 || get[5] != 0x00 || get[6] != 0xc3) {
 		XLS_LOG_WARN("mods: rules: grapple range getter not found, the Grappling rows have no effect.");
@@ -406,6 +473,27 @@ void GrappleInstall(uint8_t* base, int build)
 		*(int32_t*)(get + 1) = (int32_t)((uint8_t*)&GrappleRange - (get + 5));
 		VirtualProtect(get, 5, old, &old);
 		FlushInstructionCache(GetCurrentProcess(), get, 5);
+	}
+
+	// All or none: half of them would let the hook fly past a limit the rest still enforce.
+	uint8_t* sites[4];
+	for (int i = 0; i < 4; i++) {
+		sites[i] = base + (kGrappleLimitAt[build][i] - 0x400000);
+		bool opcode = i == 0 ? (sites[i][-4] == 0xf3 && sites[i][-3] == 0x0f && sites[i][-2] == 0x59 && sites[i][-1] == 0x05)
+		            : i == 3 ? (sites[i][-4] == 0xf3 && sites[i][-3] == 0x0f && sites[i][-2] == 0x10 && sites[i][-1] == 0x0d)
+		                     : (sites[i][-3] == 0x0f && sites[i][-2] == 0x2f && sites[i][-1] == 0x05);
+		const float* constant = *(const float**)sites[i];
+		if (!opcode || IsBadReadPtr(constant, sizeof(float)) || *constant != kGrappleStock) {
+			XLS_LOG_WARN("mods: rules: grapple limit %d not found at 0x%p, the hook keeps its stock 11 m flight.", i, sites[i]);
+			return;
+		}
+	}
+	for (uint8_t* site : sites) {
+		if (VirtualProtect(site, 4, PAGE_EXECUTE_READWRITE, &old)) {
+			*(volatile float**)site = &g_grappleLimit;
+			VirtualProtect(site, 4, old, &old);
+			FlushInstructionCache(GetCurrentProcess(), site, 4);
+		}
 	}
 }
 
@@ -489,10 +577,13 @@ DWORD WINAPI SyncThread(LPVOID)
 		if (UserGetContext(0, kContextRichMode, &mode) && (mode <= 1 || mode == 5)) {
 			r = Rules();
 		}
-		if (g_offline && g_botArmed && g_botSurvival && g_botRule <= 1) { // a training bot match set to Survival
-			r.survival = true;
-			r.lives = kLives[g_botLives % kLivesValues];
-			r.team = g_botRule == 1;
+		if (g_offline && g_botArmed) { // a training bot match: its menu's rows only, not the last VS lobby's rules
+			r = Rules();
+			if (g_botSurvival && g_botRule <= 1) {
+				r.survival = true;
+				r.lives = kLives[g_botLives % kLivesValues];
+				r.team = g_botRule == 1;
+			}
 		}
 		// Test override for fixed-rule modes (training bot matches): ModCache\survival-test.txt = "respawns=N;team=0|1"
 		Bytes test;
@@ -511,6 +602,7 @@ DWORD WINAPI SyncThread(LPVOID)
 		g_lives = r.lives;
 		HarmonizerSet(r.harmonizer);
 		g_grapple = r.grapple;
+		g_grappleLimit = kGrappleStock * kGrappleScales[r.grapple % kGrappleValues];
 		g_stagger = r.stagger;
 		g_team = r.team;
 		std::string now = Format(r);
@@ -1028,6 +1120,11 @@ int CockpitShow(uint8_t* hud, bool show)
 void __attribute__((thiscall)) ListDraw(uint8_t* list)
 {
 	g_listDrawOriginal(list);
+	static std::atomic<int> displayLogged{-1};
+	int display = (g_survival ? 1 : 0) | (g_team ? 2 : 0) | (CountersOurs() ? 4 : 0);
+	if (displayLogged.exchange(display) != display) {
+		XLS_LOG_INFO("mods: rules: survival display: survival %d, team %d, lives %d, counters ours %d, local slot %d.", display & 1, (display >> 1) & 1, (int)g_lives, (display >> 2) & 1, (int)g_localIndex);
+	}
 	if (!CountersOurs()) { // the team counters show the respawns when hooked
 		TeamRows(list);
 	}
@@ -1500,9 +1597,13 @@ ListDrawFn g_killRedOriginal = nullptr, g_killBlueOriginal = nullptr, g_cockpitU
 uint8_t* g_counterCockpit = nullptr;
 int g_counterShown[2] = {-1, -1};
 
+// Only the team kills rule shows mc_Kill. On Team Elimination (rule 4, as training bot matches are) that clip is off
+// screen and the team bar is hidden too, so the respawns go in the list's text rows (TeamRows) instead.
 bool CountersOurs()
 {
-	return g_survival && g_team && g_lives > 0 && g_killRedOriginal && g_killBlueOriginal && g_cockpitUpdateOriginal && g_flashCall;
+	uint8_t* setup = g_matchSetup ? *g_matchSetup : nullptr;
+	return g_survival && g_team && g_lives > 0 && setup && *(int32_t*)(setup + kSetupRule) == kRuleTeamKills &&
+	       g_killRedOriginal && g_killBlueOriginal && g_cockpitUpdateOriginal && g_flashCall;
 }
 
 void SetCounter(uint8_t* cockpit, int team)
@@ -1512,6 +1613,10 @@ void SetCounter(uint8_t* cockpit, int team)
 		return;
 	}
 	int total = std::min(g_lives - 1, 99), left = std::min(std::max(total - TeamDeaths(team), 0), 999);
+	static std::atomic<int> counterLogged{-1};
+	if (counterLogged.exchange(left * 2 + team) != left * 2 + team) {
+		XLS_LOG_INFO("mods: rules: survival display: team %d counter = %d respawns (cockpit %p, movie %p).", team, left, cockpit, movie);
+	}
 	struct { uint8_t flag; uint32_t type; float number; } args[6] = {
 		{0, 3, float(left / 100)}, {0, 3, float(left / 10 % 10)}, {0, 3, float(left % 10)},
 		{0, 3, float(total / 10)}, {0, 3, float(total % 10)}, {0, 2, 0.0f}}; // 2: bool (false: no infinity)
@@ -1549,7 +1654,7 @@ void __attribute__((thiscall)) CockpitUpdate(uint8_t* cockpit)
 }
 uint8_t** g_input = nullptr;
 const uint32_t kMenuState = 0x190, kMenuPhase = 0x194, kMenuRule = 0x198, kMenuMode = 0x1a0, kMenuRow = 0x1b0, kMenuFlags = 0x1d4;
-const uint32_t kMenuMouseOn = 0x168, kMenuMouse = 0x154, kMenuClick = 0x15c, kInputPressed = 0x330;
+const uint32_t kMenuMouseOn = 0x168, kMenuMouse = 0x154, kMenuWheel = 0x158, kMenuClick = 0x15c, kInputPressed = 0x330;
 const int kPhaseBot = 2, kModeBusy = 0x3e5, kMouseBotRow = 0x22e, kMouseArrowL = 10, kMouseArrowR = 11;
 const uint32_t kKeyUp = 0x40, kKeyDown = 0x80, kKeyLeft = 0x100, kKeyRight = 0x200, kFlagRow = 0x80;
 
@@ -1655,9 +1760,23 @@ void __attribute__((fastcall)) BotCursorBody(uint8_t* menu)
 	} else if (pressed & kKeyDown) {
 		at = at + 1 >= shown ? 0 : at + 1;
 	}
-	row = rows[at];
 	int mouse = *(int32_t*)(menu + kMenuMouse) - kMouseBotRow;
-	for (int i = 0; menu[kMenuMouseOn] && i < shown; i++) {
+	// The wheel scrolls the window (uPlanetFlash keeps the last wheel event; used up here). The cursor stays on its row
+	// while that's visible. The row id under a still mouse is out of date after a scroll, so it's ignored until it changes.
+	static int staleMouse = -1000;
+	int32_t& wheel = *(int32_t*)(menu + kMenuWheel);
+	if (wheel != 0 && shown > kRowsVisible) {
+		g_botScroll = std::max(0, std::min(g_botScroll + (wheel > 0 ? 1 : -1), shown - kRowsVisible)); // the game's sign: positive = down
+		at = std::max(g_botScroll, std::min(at, g_botScroll + kRowsVisible - 1));
+		staleMouse = mouse;
+		BotRowsDraw(menu);
+	}
+	wheel = 0;
+	if (mouse != staleMouse) {
+		staleMouse = -1000;
+	}
+	row = rows[at];
+	for (int i = 0; menu[kMenuMouseOn] && staleMouse == -1000 && i < shown; i++) {
 		if (rows[i] == mouse) {
 			row = mouse;
 		}

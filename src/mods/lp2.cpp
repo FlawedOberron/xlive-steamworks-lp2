@@ -67,6 +67,7 @@ DWORD WINAPI Worker(LPVOID)
 		WaterInstall(base);
 		DamageInstall(base);
 		OnewayInstall(base);
+		ForceInstall(base);
 		BotsInstall(base);
 		SpawnInstall(base);
 		ScriptsInit();

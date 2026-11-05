@@ -10,10 +10,10 @@ var lp2NetFocus;
 var lp2NetAngle = -48; // the game's entries sit at 32, 16, 0, -16, -32
 var lp2NetTexts = new Array("NETWORK","","","","","","","","","","");
 var lp2NetRows = 5;
-// Our texts are MsgOption messages 401-417 (the DLL adds them to every language of the message
+// Our texts are MsgOption messages 401-419 (the DLL adds them to every language of the message
 // file); English when they are missing.
 var lp2NetBase = 401;
-var lp2NetEnglish = new Array("NETWORK","Share Custom Parts","Receive Custom Parts","Upload Speed","Auto","Custom parts sharing and upload speed for online play.","Let other players download and see your custom parts.","Download and show other players\' custom parts.","Upload speed to each player for custom parts and maps. Lower it on a slow connection.","Update Automatically","Download and install new versions of the mod when the game starts.","Matchmaking Distance","Close","Region","Far","Worldwide","How far away to look for online games. Nearer games usually connect better; Worldwide finds the most.");
+var lp2NetEnglish = new Array("NETWORK","Share Custom Parts","Receive Custom Parts","Upload Speed","Auto","Custom parts sharing and upload speed for online play.","Let other players download and see your custom parts.","Which of other players\' custom parts to download and show. Any others show a stock set of their faction.","Upload speed to each player for custom parts and maps. Lower it on a slow connection.","Update Automatically","Download and install new versions of the mod when the game starts.","Matchmaking Distance","Close","Region","Far","Worldwide","How far away to look for online games. Nearer games usually connect better; Worldwide finds the most.","Lore-Accurate","Lore-Adjacent","All");
 function lp2NetMsg(i)
 {
    var s = Message["get"]("MsgOption",lp2NetBase + i);
@@ -28,13 +28,17 @@ function lp2NetOnOff(on)
    var s = Message["get"]("MsgOption",91 + (on ? 1 : 0));
    return s == undefined || s == "" ? (on ? "On" : "Off") : s;
 }
-// The DLL's values: share, receive and update "0" / "1", the upload speed's text ("" = Auto), the matchmaking
+function lp2NetReceive(v)
+{
+   return v == "0" ? lp2NetOnOff(false) : lp2NetMsg(16 + Number(v));
+}
+// The DLL's values: share and update "0" / "1", receive "0"-"3" (Off, Lore-Accurate, Lore-Adjacent, All), the upload speed's text ("" = Auto), the matchmaking
 // distance "0"-"3" (Close, Region, Far, Worldwide). The texts are kept
 // and put back every frame: the copied panel's text fields come back with their authored text when
 // the rows change frames.
 function lp2NetSet(share, receive, rate, update, distance)
 {
-   lp2NetTexts = new Array(lp2NetMsg(0),lp2NetMsg(1),lp2NetOnOff(share == "1"),lp2NetMsg(2),lp2NetOnOff(receive == "1"),lp2NetMsg(3),rate == "" ? lp2NetMsg(4) : rate,lp2NetMsg(9),lp2NetOnOff(update == "1"),lp2NetMsg(11),lp2NetMsg(12 + Number(distance)));
+   lp2NetTexts = new Array(lp2NetMsg(0),lp2NetMsg(1),lp2NetOnOff(share == "1"),lp2NetMsg(2),lp2NetReceive(receive),lp2NetMsg(3),rate == "" ? lp2NetMsg(4) : rate,lp2NetMsg(9),lp2NetOnOff(update == "1"),lp2NetMsg(11),lp2NetMsg(12 + Number(distance)));
    lp2NetApply(_root.mc_main);
    return true;
 }

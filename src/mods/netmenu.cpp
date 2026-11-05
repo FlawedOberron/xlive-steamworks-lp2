@@ -83,11 +83,17 @@ int RateIndex(uint32_t kb)
 	return best;
 }
 
+// The Receive Custom Parts row: 0 Off, 1 Lore-Accurate, 2 Lore-Adjacent, 3 All.
+int ReceiveIndex(const Config& c)
+{
+	return !c.partsReceive ? 0 : c.partsReceiveLore >= 2 ? 1 : c.partsReceiveLore == 1 ? 2 : 3;
+}
+
 void Push(uint8_t* screen)
 {
 	const Config& c = Cfg();
 	const char* const distances[] = {"0", "1", "2", "3"};
-	FlashArg args[5] = {{0, 4, c.partsShare ? "1" : "0"}, {0, 4, c.partsReceive ? "1" : "0"}, {0, 4, kRateNames[RateIndex(c.sendRateKBytes)]},
+	FlashArg args[5] = {{0, 4, c.partsShare ? "1" : "0"}, {0, 4, distances[ReceiveIndex(c)]}, {0, 4, kRateNames[RateIndex(c.sendRateKBytes)]},
 	                    {0, 4, c.updateAuto ? "1" : "0"}, {0, 4, distances[c.lobbyDistanceFilter & 3]}};
 	if (!g_flashCall || !g_flashCall(screen, 0, "lp2NetSet", args, 5)) {
 		XLS_LOG_WARN("mods: network menu: the Options Flash has no lp2NetSet (entry not added).");
@@ -97,14 +103,15 @@ void Push(uint8_t* screen)
 void Step(int row, int step)
 {
 	const Config& c = Cfg();
-	bool share = c.partsShare, receive = c.partsReceive, update = c.updateAuto;
+	bool share = c.partsShare, update = c.updateAuto;
+	int receive = ReceiveIndex(c);
 	uint32_t rate = c.sendRateKBytes;
 	int distance = c.lobbyDistanceFilter & 3;
 	if (row == 0) {
 		share = !share;
 	}
 	else if (row == 1) {
-		receive = !receive;
+		receive = (receive + 4 + (step < 0 ? -1 : 1)) % 4;
 	}
 	else if (row == 2) {
 		rate = kRates[(RateIndex(rate) + kRateCount + (step < 0 ? -1 : 1)) % kRateCount];
@@ -118,9 +125,10 @@ void Step(int row, int step)
 	else {
 		return;
 	}
-	bool partsChanged = share != c.partsShare || receive != c.partsReceive;
+	int lore = receive == 1 ? 2 : receive == 2 ? 1 : 0;
+	bool partsChanged = share != c.partsShare || (receive != 0) != c.partsReceive || lore != c.partsReceiveLore;
 	bool rateChanged = rate != c.sendRateKBytes;
-	ConfigSetNetwork(share, receive, rate, update, distance);
+	ConfigSetNetwork(share, receive != 0, lore, rate, update, distance);
 	if (partsChanged) {
 		PartsNetworkChanged();
 	}
@@ -133,8 +141,9 @@ void Step(int row, int step)
 // labels, Auto, the help lines of the entry and the rows, then the Update Automatically row's label
 // and help line, then the Matchmaking Distance row's label, its four values and help line. Per language block of the message file: 0 Japanese, 1 English, 2 French, 3 Spanish, 4 German, 5 Italian, 6 Korean, 10 Russian,
 // 11 Polish; the rest (the game's unused Czech, Hungarian, Slovak) get English.
+// The Receive row's three values other than Off follow.
 const uint32_t kMsgBase = 401; // the file's message count: ours follow the game's
-const int kMsgCount = 17;
+const int kMsgCount = 20;
 struct NetTexts {
 	uint32_t language;
 	const char* text[kMsgCount];
@@ -143,75 +152,84 @@ const NetTexts kTexts[] = {
 	{1, {"NETWORK", "Share Custom Parts", "Receive Custom Parts", "Upload Speed", "Auto",
 	     "Custom parts sharing and upload speed for online play.",
 	     "Let other players download and see your custom parts.",
-	     "Download and show other players' custom parts.",
+	     "Which of other players' custom parts to download and show. Any others show a stock set of their faction.",
 	     "Upload speed to each player for custom parts and maps. Lower it on a slow connection.",
 	     "Update Automatically", "Download and install new versions of the mod when the game starts.",
 	     "Matchmaking Distance", "Close", "Region", "Far", "Worldwide",
-	     "How far away to look for online games. Nearer games usually connect better; Worldwide finds the most."}},
+	     "How far away to look for online games. Nearer games usually connect better; Worldwide finds the most.",
+	     "Lore-Accurate", "Lore-Adjacent", "All"}},
 	{0, {"ネットワーク", "カスタムパーツを共有", "カスタムパーツを受信", "アップロード速度", "自動",
 	     "オンラインでのカスタムパーツの共有とアップロード速度を設定します。",
 	     "他のプレイヤーがあなたのカスタムパーツをダウンロードして表示できます。",
-	     "他のプレイヤーのカスタムパーツをダウンロードして表示します。",
+	     "ダウンロードして表示する他のプレイヤーのカスタムパーツを選びます。それ以外はその勢力の標準セットで表示します。",
 	     "カスタムパーツとマップを各プレイヤーへ送る速度です。回線が遅い場合は下げてください。",
 	     "自動アップデート", "ゲーム起動時にMODの新しいバージョンをダウンロードしてインストールします。",
 	     "マッチング範囲", "近距離", "地域", "遠距離", "全世界",
-	     "オンラインゲームを探す範囲です。近いほど通信が安定しやすく、全世界が最も多く見つかります。"}},
+	     "オンラインゲームを探す範囲です。近いほど通信が安定しやすく、全世界が最も多く見つかります。",
+	     "世界観に忠実", "世界観に近い", "すべて"}},
 	{2, {"RÉSEAU", "Partager mes pièces", "Recevoir les pièces", "Vitesse d'envoi", "Auto",
 	     "Partage des pièces personnalisées et vitesse d'envoi en ligne.",
 	     "Permet aux autres joueurs de télécharger et de voir vos pièces personnalisées.",
-	     "Télécharge et affiche les pièces personnalisées des autres joueurs.",
+	     "Pièces des autres joueurs à télécharger et afficher. Les autres affichent une tenue de base de leur faction.",
 	     "Vitesse d'envoi vers chaque joueur pour les pièces et les cartes. Réduisez-la si votre connexion est lente.",
 	     "Mise à jour auto", "Télécharge et installe les nouvelles versions du mod au lancement du jeu.",
 	     "Distance de recherche", "Proche", "Région", "Loin", "Monde entier",
-	     "Jusqu'où chercher des parties en ligne. Les parties proches se connectent mieux ; Monde entier en trouve le plus."}},
+	     "Jusqu'où chercher des parties en ligne. Les parties proches se connectent mieux ; Monde entier en trouve le plus.",
+	     "Fidèles au lore", "Proches du lore", "Toutes"}},
 	{3, {"RED", "Compartir mis piezas", "Recibir piezas", "Velocidad de subida", "Auto",
 	     "Uso compartido de piezas personalizadas y velocidad de subida en línea.",
 	     "Permite que otros jugadores descarguen y vean tus piezas personalizadas.",
-	     "Descarga y muestra las piezas personalizadas de otros jugadores.",
+	     "Qué piezas de otros jugadores descargar y mostrar. Las demás muestran un equipo básico de su facción.",
 	     "Velocidad de subida a cada jugador para piezas y mapas. Redúcela si tu conexión es lenta.",
 	     "Actualizar automáticamente", "Descarga e instala las nuevas versiones del mod al iniciar el juego.",
 	     "Distancia de búsqueda", "Cerca", "Región", "Lejos", "Todo el mundo",
-	     "Hasta dónde buscar partidas en línea. Las cercanas suelen conectar mejor; Todo el mundo encuentra más."}},
+	     "Hasta dónde buscar partidas en línea. Las cercanas suelen conectar mejor; Todo el mundo encuentra más.",
+	     "Fieles al lore", "Cercanas al lore", "Todas"}},
 	{4, {"NETZWERK", "Eigene Teile teilen", "Fremde Teile empfangen", "Upload-Tempo", "Auto",
 	     "Teilen eigener Teile und Upload-Tempo im Online-Spiel.",
 	     "Andere Spieler können deine eigenen Teile herunterladen und sehen.",
-	     "Lädt die eigenen Teile anderer Spieler herunter und zeigt sie an.",
+	     "Welche Teile anderer Spieler geladen und gezeigt werden. Alle anderen zeigen ein Standard-Set ihrer Fraktion.",
 	     "Upload-Tempo pro Spieler für Teile und Karten. Bei langsamer Verbindung verringern.",
 	     "Automatisch aktualisieren", "Lädt neue Versionen der Mod beim Spielstart herunter und installiert sie.",
 	     "Suchentfernung", "Nah", "Region", "Weit", "Weltweit",
-	     "Wie weit nach Online-Spielen gesucht wird. Nähere Spiele verbinden meist besser; Weltweit findet die meisten."}},
+	     "Wie weit nach Online-Spielen gesucht wird. Nähere Spiele verbinden meist besser; Weltweit findet die meisten.",
+	     "Lore-getreu", "Lore-nah", "Alle"}},
 	{5, {"RETE", "Condividi le mie parti", "Ricevi parti", "Velocità di upload", "Auto",
 	     "Condivisione delle parti personalizzate e velocità di upload online.",
 	     "Consente agli altri giocatori di scaricare e vedere le tue parti personalizzate.",
-	     "Scarica e mostra le parti personalizzate degli altri giocatori.",
+	     "Quali parti degli altri giocatori scaricare e mostrare. Le altre mostrano un set base della loro fazione.",
 	     "Velocità di upload verso ogni giocatore per parti e mappe. Riducila con una connessione lenta.",
 	     "Aggiornamento automatico", "Scarica e installa le nuove versioni della mod all'avvio del gioco.",
 	     "Distanza di ricerca", "Vicino", "Regione", "Lontano", "Tutto il mondo",
-	     "Quanto lontano cercare partite online. Quelle vicine si collegano meglio; Tutto il mondo ne trova di più."}},
+	     "Quanto lontano cercare partite online. Quelle vicine si collegano meglio; Tutto il mondo ne trova di più.",
+	     "Fedeli alla lore", "Vicine alla lore", "Tutte"}},
 	{6, {"네트워크", "커스텀 파츠 공유", "커스텀 파츠 수신", "업로드 속도", "자동",
 	     "온라인 플레이의 커스텀 파츠 공유와 업로드 속도를 설정합니다.",
 	     "다른 플레이어가 당신의 커스텀 파츠를 다운로드하고 볼 수 있습니다.",
-	     "다른 플레이어의 커스텀 파츠를 다운로드하여 표시합니다.",
+	     "다운로드하여 표시할 다른 플레이어의 커스텀 파츠를 선택합니다. 그 외에는 해당 진영의 기본 세트로 표시됩니다.",
 	     "커스텀 파츠와 맵을 각 플레이어에게 보내는 속도입니다. 연결이 느리면 낮추십시오.",
 	     "자동 업데이트", "게임 시작 시 모드의 새 버전을 다운로드하여 설치합니다.",
 	     "매치메이킹 범위", "가까움", "지역", "멀리", "전 세계",
-	     "온라인 게임을 찾을 범위입니다. 가까울수록 연결이 좋고, 전 세계는 가장 많이 찾습니다."}},
+	     "온라인 게임을 찾을 범위입니다. 가까울수록 연결이 좋고, 전 세계는 가장 많이 찾습니다.",
+	     "설정에 충실", "설정에 가까움", "전체"}},
 	{10, {"СЕТЬ", "Делиться деталями", "Получать детали", "Скорость отдачи", "Авто",
 	      "Обмен своими деталями и скорость отдачи в сетевой игре.",
 	      "Другие игроки смогут скачивать и видеть ваши детали.",
-	      "Скачивать и показывать детали других игроков.",
+	      "Какие детали других игроков скачивать и показывать. Остальные заменяются стандартным набором их фракции.",
 	      "Скорость отдачи деталей и карт каждому игроку. Уменьшите при медленном соединении.",
 	      "Автообновление", "Загружать и устанавливать новые версии мода при запуске игры.",
 	     "Дальность поиска", "Близко", "Регион", "Далеко", "Весь мир",
-	      "Как далеко искать сетевые игры. Ближние обычно соединяются лучше; «Весь мир» находит больше всего."}},
+	      "Как далеко искать сетевые игры. Ближние обычно соединяются лучше; «Весь мир» находит больше всего.",
+	      "По лору", "Близко к лору", "Все"}},
 	{11, {"SIEĆ", "Udostępniaj części", "Odbieraj części", "Prędkość wysyłania", "Auto",
 	      "Udostępnianie własnych części i prędkość wysyłania w grze online.",
 	      "Inni gracze mogą pobierać i widzieć twoje własne części.",
-	      "Pobiera i pokazuje własne części innych graczy.",
+	      "Które części innych graczy pobierać i pokazywać. Pozostałe zastępuje standardowy zestaw ich frakcji.",
 	      "Prędkość wysyłania części i map do każdego gracza. Zmniejsz przy wolnym łączu.",
 	      "Aktualizuj automatycznie", "Pobiera i instaluje nowe wersje moda przy uruchomieniu gry.",
 	     "Zasięg wyszukiwania", "Blisko", "Region", "Daleko", "Cały świat",
-	      "Jak daleko szukać gier online. Bliższe zwykle łączą się lepiej; Cały świat znajduje najwięcej."}},
+	      "Jak daleko szukać gier online. Bliższe zwykle łączą się lepiej; Cały świat znajduje najwięcej.",
+	      "Zgodne z lore", "Bliskie lore", "Wszystkie"}},
 };
 
 uint32_t Read32(const std::vector<uint8_t>& f, size_t at)

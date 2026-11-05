@@ -19,6 +19,7 @@
 // calls: after it, +0x30 is where last frame's move left the unit, and we remember where it was the frame before.
 // A move through a box against its arrow: characters lose the move's part along the arrow (they can still slide
 // sideways), shells are removed (unit state 3: sUnit deletes them, DX9 0x4a0360).
+// The same two calls hand every unit to the force volumes (force.cpp).
 // Runs on every machine: each moves its own copies (remote players are put back by their own machine anyway).
 
 namespace xls::mods {
@@ -50,6 +51,7 @@ std::vector<OnewayVolume> g_volumes; // the map's (game thread)
 std::unordered_map<uint8_t*, Last> g_last;
 std::unordered_map<void*, bool> g_isGrenade; // by vtable
 std::vector<bool> g_logged;
+bool g_force = false; // the map has force volumes (force.cpp)
 
 bool IsCall(uint8_t* base, uint32_t rva, uint32_t fn)
 {
@@ -85,6 +87,16 @@ bool IsGrenade(uint8_t* shell)
 	}
 	g_isGrenade[vtable] = yes;
 	return yes;
+}
+
+// kOneway* of a unit (0: something else)
+int Kind(uint8_t* unit, bool shell)
+{
+	if (shell) {
+		return IsGrenade(unit) ? kOnewayGrenades : kOnewayBullets;
+	}
+	int type = unit[0x1f];
+	return type == 1 ? kOnewayPlayers : type == 2 ? kOnewayVs : type == 3 ? kOnewayAkrid : 0;
 }
 
 // The move a -> b in the volume's frame (centre, z along its arrow's back): whether it goes through the box while
@@ -142,14 +154,7 @@ void Check(uint8_t* unit, bool shell)
 	if (!fresh) {
 		return;
 	}
-	int what = 0;
-	if (shell) {
-		what = IsGrenade(unit) ? kOnewayGrenades : kOnewayBullets;
-	}
-	else {
-		int type = unit[0x1f];
-		what = type == 1 ? kOnewayPlayers : type == 2 ? kOnewayVs : type == 3 ? kOnewayAkrid : 0;
-	}
+	int what = Kind(unit, shell);
 	for (size_t i = 0; i < g_volumes.size(); i++) {
 		const OnewayVolume& v = g_volumes[i];
 		float dz = 0.0f;
@@ -179,11 +184,19 @@ void Check(uint8_t* unit, bool shell)
 	}
 }
 
+bool Removed(uint8_t* unit)
+{
+	return (*(uint32_t*)(unit + 4) & 7u) == 3;
+}
+
 void __fastcall CharUpdate(uint8_t* unit)
 {
 	g_update(unit);
 	if (!g_volumes.empty()) {
 		Check(unit, false);
+	}
+	if (g_force) {
+		ForceUnit(unit, Kind(unit, false));
 	}
 }
 
@@ -192,6 +205,9 @@ void __fastcall ShellUpdate(uint8_t* unit)
 	g_update(unit);
 	if (!g_volumes.empty()) {
 		Check(unit, true);
+	}
+	if (g_force && !Removed(unit)) {
+		ForceUnit(unit, Kind(unit, true));
 	}
 }
 
@@ -222,6 +238,8 @@ void OnewaySetMap(const MapPhysics* physics)
 	g_volumes = physics ? physics->oneway : std::vector<OnewayVolume>();
 	g_logged.assign(g_volumes.size(), false);
 	g_last.clear();
+	g_force = physics && !physics->force.empty();
+	ForceSetMap(physics);
 	if (!g_volumes.empty()) {
 		XLS_LOG_INFO("mods: oneway: %u volume(s).", (unsigned)g_volumes.size());
 	}

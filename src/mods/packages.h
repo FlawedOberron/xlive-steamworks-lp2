@@ -70,6 +70,19 @@ struct OnewayVolume {
 	int sid = -1;
 };
 
+// A force volume (force.cpp): pushes what it affects (the kOneway* flags). "force" is cm/s^2 for kForceContinuous (an
+// acceleration while inside), cm/s for kForceImpulse (added once on entering) and kForceVelocity (replaces the velocity
+// on entering: lifts, man cannons); game axes, already turned by the editor's yaw.
+enum { kForceContinuous = 0, kForceImpulse = 1, kForceVelocity = 2 };
+struct ForceVolume {
+	float min[3], max[3];  // cm, game axes, before the turn
+	float turn[2] = {1.0f, 0.0f}; // "yaw" (InBox)
+	int flags = 0;         // kOneway*
+	int mode = kForceContinuous;
+	float force[3] = {0.0f, 0.0f, 0.0f};
+	int sid = -1;
+};
+
 // Visual scripting (map.json "script", scripts.cpp; the editor's scripts.gd, lp2mapc.script_manifest).
 enum ScriptType { kScriptStart, kScriptEnter, kScriptTimer, kScriptDelay, kScriptFlipflop, kScriptCounter, kScriptSet,
 	kScriptIf, kScriptVolume, kScriptLog, kScriptRandom, kScriptMath, kScriptCompare, kScriptSetValue, kScriptPlayers,
@@ -222,6 +235,7 @@ struct MapPhysics {
 	std::vector<WaterVolume> water;     // "water_volumes": [{"min": [x,y,z], "max": [x,y,z]}] (water.cpp)
 	std::vector<DamageVolume> damage;   // "damage_volumes": [{"min", "max", "player", "vs", "player_kill", "vs_kill"}] (damage.cpp)
 	std::vector<OnewayVolume> oneway;   // "oneway_volumes": [{"min", "max", "players", "vs", "bullets", "grenades", "akrid"}] (oneway.cpp)
+	std::vector<ForceVolume> force;     // "force_volumes": [{"min", "max", "mode", "force": [x,y,z], flags as oneway's}] (force.cpp)
 	ScriptGraph script;                 // "script", "script_volumes" (scripts.cpp)
 };
 

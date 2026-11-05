@@ -101,6 +101,25 @@ LONG CALLBACK Handler(EXCEPTION_POINTERS* info)
 			found++;
 		}
 	}
+	// Raw memory, for crashes the trail can't explain (a jump through a bad pointer): the stack top, the code at eip and
+	// what each register points at. A first word inside the exe's data is that object's vtable.
+	auto dump = [](const char* name, uintptr_t at, int words) {
+		if (at < 0x10000 || IsBadReadPtr((const void*)at, words * 4)) {
+			return;
+		}
+		const uint32_t* p = (const uint32_t*)at;
+		for (int i = 0; i < words; i += 8) {
+			XLS_LOG_ERROR("crash: %s %08x: %08x %08x %08x %08x %08x %08x %08x %08x", name, (unsigned)(at + i * 4), p[i], p[i + 1], p[i + 2], p[i + 3], p[i + 4], p[i + 5], p[i + 6], p[i + 7]);
+		}
+	};
+	dump("esp", c->Esp, 32);
+	dump("eip", c->Eip - 16, 16);
+	dump("ebx", c->Ebx, 16);
+	dump("ecx", c->Ecx, 16);
+	dump("edx", c->Edx, 16);
+	dump("esi", c->Esi, 16);
+	dump("edi", c->Edi, 16);
+	dump("ebp", c->Ebp, 16);
 #endif
 	return EXCEPTION_CONTINUE_SEARCH;
 }

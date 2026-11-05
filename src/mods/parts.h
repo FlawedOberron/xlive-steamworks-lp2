@@ -42,6 +42,7 @@ struct PartSet {
 	std::wstring chainCols[kPartSlotCount]; // the part's own .rChainCol (what the chain collides with), empty = the template's
 	std::wstring chains[kPartSlotCount]; // the part's own .rChain (bone physics), empty = the template's
 	std::string templates[kPartSlotCount]; // original part each was built on ("bd2900")
+	int lore[kPartSlotCount] = {}; // lpc.json part "lore" (or the set's): 0 not lore, 1 lore-adjacent, 2 lore-accurate; the author's word
 	bool noEffects[kPartSlotCount] = {}; // lpc.json part "effects": "none": drop the template's effects (lamps)
 	bool weaponOffset = false; // lpc.json parts.back "weapon_offset": [x, y, z]: moves the back weapon mount (joint 100)
 	float weaponOffsetXyz[3] = {};
@@ -66,6 +67,7 @@ struct PartPackage {
 	std::string name;         // the set's menu name
 	std::string carrierToken; // carrier builds: the set's 6-character stand-in for the slot's part names
 	int faction = -1;         // the set's faction byte, -1 = every faction
+	int lore = 0;             // PartSet::lore of this part
 	bool carrier = false;     // the carrier slot's registered package (the worn set's files are swapped in)
 	std::string setHash;      // carrier builds: the part's content hash (PartSet::partHash; an older build's: the set's)
 	bool remote = false;      // a set downloaded from another player: worn by them only, never in our menu

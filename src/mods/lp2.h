@@ -61,6 +61,11 @@ void CharacterTeleport(unsigned char* character, const float pos[3], float yaw);
                                                                                  // the markers' (NaN: keep facing)
 // Map packages' one-way volumes (oneway.cpp): characters', VS's and shells' updates wrapped; OnewaySetMap at area load.
 void OnewayInstall(unsigned char* base);
+// Map packages' force volumes (force.cpp): ForceUnit(unit, kOneway* kind) from oneway.cpp's update wrappers;
+// ForceSetMap from OnewaySetMap.
+void ForceInstall(unsigned char* base);
+void ForceUnit(unsigned char* unit, int kind);
+void ForceSetMap(const MapPhysics* physics);
 
 // Game versions that may play together (sessions.compatible_versions; versions.cpp).
 void VersionsInstall(unsigned char* base);

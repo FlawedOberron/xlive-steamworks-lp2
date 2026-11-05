@@ -318,6 +318,7 @@ void LoadFolder(const std::wstring& dir, const std::wstring& label, std::vector<
 		}
 		set.models[s] = path;
 		set.templates[s] = part["template"].GetString(std::string());
+		set.lore[s] = (int)std::min<int64_t>(std::max<int64_t>(part["lore"].GetInt(root["lore"].GetInt(0)), 0), 2);
 		set.noEffects[s] = _stricmp(part["effects"].GetString(std::string()).c_str(), "none") == 0;
 		if (s == kSlotBack && part["weapon_offset"].IsArray()) {
 			const auto& xyz = part["weapon_offset"].Elements();
@@ -1241,6 +1242,7 @@ bool BuildPackage(const PartSet& set, int slot, int item, PartPackage* out, cons
 	out->lpcPath = lpcBase;
 	out->colours = set.colours;
 	out->faction = set.factionIndex;
+	out->lore = set.lore[slot];
 	out->name = set.name;
 	out->carrierToken = carrierTok;
 	for (const MaterialOverride& o : set.overrides[slot]) {
@@ -1674,6 +1676,7 @@ const uint64_t kFakeMember = 0x01100001fffffff0ull; // the fake member's (made u
 struct MemberParts {
 	std::map<int, std::string> choice; // ChoiceItem * kPartSlotCount + category -> "<set id>[:<hash>]"
 	std::string worn[kPartSlotCount];
+	std::map<std::string, int> lore;   // hash -> the part's lore level (";l.<hash>=<level>"; none = 0)
 };
 
 std::mutex g_membersMutex;
@@ -1692,7 +1695,8 @@ thread_local int t_stageRequest = 0;
 thread_local const PartPackage* t_requestSet = nullptr; // the request being built wears this set
 
 // Our member value: "1" then ";<item>.<cat>=<set id>:<hash>" per carrier choice and
-// ";d.<cat>=<set id>:<hash>" per last-worn set (hash: the set bundle's, MakeBundle).
+// ";d.<cat>=<set id>:<hash>" per last-worn set (hash: the set bundle's, MakeBundle), and ";l.<hash>=<level>" per
+// part with a lore level (older DLLs skip those entries), so a receiver can filter without downloading.
 std::string PartsMemberValue()
 {
 	std::string value = "1";
@@ -1700,16 +1704,24 @@ std::string PartsMemberValue()
 		return value; // "share custom parts" off (Options > Network): no sets, others see stock parts
 	}
 	std::lock_guard<std::mutex> lock(g_carrierMutex);
+	std::map<std::string, int> lore;
 	for (int s = 0; s < kPartSlotCount; s++) {
 		if (!g_carrierSets[s].empty()) {
 			const PartPackage& worn = g_carrierSets[s][g_carrierWorn[s]];
 			value += std::string(";d.") + kSlotNames[s] + "=" + worn.setId + ":" + worn.setHash;
+			lore[worn.setHash] = worn.lore;
 		}
 	}
 	for (const auto& c : g_carrierChoice) {
 		int s = c.first % kPartSlotCount;
 		const PartPackage& chosen = g_carrierSets[s][c.second];
 		value += ";" + std::to_string(c.first / kPartSlotCount) + "." + kSlotNames[s] + "=" + chosen.setId + ":" + chosen.setHash;
+		lore[chosen.setHash] = chosen.lore;
+	}
+	for (const auto& l : lore) {
+		if (l.second > 0) {
+			value += ";l." + l.first + "=" + std::to_string(l.second);
+		}
 	}
 	return value;
 }
@@ -1734,6 +1746,10 @@ bool ParseMemberParts(const std::string& value, MemberParts* out)
 			continue;
 		}
 		std::string where = entry.substr(0, dot), cat = entry.substr(dot + 1, eq - dot - 1), id = entry.substr(eq + 1);
+		if (where == "l") {
+			out->lore[cat] = atoi(id.c_str());
+			continue;
+		}
 		for (int s = 0; s < kPartSlotCount; s++) {
 			if (_stricmp(cat.c_str(), kSlotNames[s]) != 0) {
 				continue;
@@ -2066,6 +2082,22 @@ void OnMemberParts(uint64_t steamId, XUID xuid, const std::string& value)
 		XLS_LOG_WARN("mods: parts: member %llu: unknown parts data \"%.40s\".", (unsigned long long)steamId, value.c_str());
 		return;
 	}
+	// below "receive custom parts"'s lore level: not fetched, blank (a stand-in, not their other sets)
+	if (int minimum = Cfg().partsReceiveLore) {
+		auto filter = [&](std::string& entry) {
+			size_t colon = entry.find(':');
+			auto it = colon == std::string::npos ? parts.lore.end() : parts.lore.find(entry.substr(colon + 1));
+			if ((it == parts.lore.end() ? 0 : it->second) < minimum) {
+				entry.clear();
+			}
+		};
+		for (auto& c : parts.choice) {
+			filter(c.second);
+		}
+		for (std::string& w : parts.worn) {
+			filter(w);
+		}
+	}
 	{
 		std::lock_guard<std::mutex> lock(g_membersMutex);
 		if (value.empty()) {
@@ -2249,12 +2281,15 @@ const PartPackage* MemberSet(uint64_t member, uint32_t cat, int item)
 		entry = c != it->second.choice.end() ? c->second : it->second.worn[cat];
 	}
 	const PartPackage* pkg = entry.empty() ? nullptr : ResolveEntry(member, cat, entry, true);
+	if (pkg && pkg->lore < Cfg().partsReceiveLore) {
+		pkg = nullptr; // what its own lpc.json says, whatever they published
+	}
 	if (!pkg && !entry.empty()) {
 		static std::set<std::string> missing;
 		static std::mutex mutex;
 		std::lock_guard<std::mutex> lock(mutex);
 		if (missing.insert(entry).second) {
-			XLS_LOG_WARN("mods: parts: player %llu wears %s %s, not here (yet): shows our choice.", (unsigned long long)member, kSlotNames[cat], entry.c_str());
+			XLS_LOG_WARN("mods: parts: player %llu wears %s %s, not here (yet) or filtered: shows a stand-in.", (unsigned long long)member, kSlotNames[cat], entry.c_str());
 		}
 	}
 	return pkg;
@@ -2927,6 +2962,63 @@ int PartsPlayer(uint8_t* parts)
 	return player >= 0 && player < kMaxPlayers ? player : -1;
 }
 
+using PartCodeFn = uint32_t(__cdecl*)(uint32_t, uint32_t);
+PartCodeFn g_partCodeOriginal = nullptr;
+
+// --- Stand-ins. A carrier code on another player whose part we can't show (receiving off, below the lore level, they
+// don't share, the download failed or is still running) shows a stock outfit of their faction instead of our own set:
+// picked by their Steam id and the lobby's, in colour A. Outfits are the game's id tables' parts that exist in all four
+// categories under one set and variant. Their archives and paths always use the |0x20 form of the set byte (bd260000).
+const std::vector<uint32_t>& StockSets(int faction)
+{
+	static std::vector<uint32_t> sets[5];
+	static std::once_flag once;
+	std::call_once(once, [] {
+		std::set<uint32_t> have[kPartSlotCount];
+		for (int s = 0; s < kPartSlotCount; s++) {
+			for (uint32_t id = 1; id < 180; id++) {
+				uint32_t code = g_partCodeOriginal(id, s), set = code & 0xdf;
+				if (code && !(code & 0xff00) && (set < 0x0c || set > 0x0f)) {
+					have[s].insert(code);
+				}
+			}
+		}
+		for (uint32_t code : have[0]) {
+			if (have[1].count(code) && have[2].count(code) && have[3].count(code) && code >> 24 < 5) {
+				sets[code >> 24].push_back(code | 0x20);
+			}
+		}
+	});
+	return sets[faction];
+}
+
+// The code member shows instead of carrier code `code`, or 0 (our own player, or their part is here).
+uint32_t StandInCode(uint64_t member, uint32_t cat, uint32_t code)
+{
+	if (!member || cat >= kPartSlotCount || !g_partCodeOriginal || !IsCarrier(code)) {
+		return 0;
+	}
+	int item = (code >> 16) & 0xff;
+	if (MemberSet(member, cat, item)) {
+		return 0;
+	}
+	const std::vector<uint32_t>& sets = StockSets(item >= kAliasFirst && item < kAliasFirst + kAliasCount ? (item - kAliasFirst) / 4 : 0);
+	if (sets.empty()) {
+		return 0;
+	}
+	static std::atomic<uint64_t> lastLobby{0}; // the lobby may be gone by the time a match's paths are built
+	if (CSteamID lobby = xls::SessionPresenceLobby(); lobby.IsValid()) {
+		lastLobby = lobby.ConvertToUint64();
+	}
+	uint64_t hash = 0xcbf29ce484222325ull;
+	for (uint64_t v : {member, lastLobby.load()}) {
+		for (int i = 0; i < 8; i++) {
+			hash = (hash ^ ((v >> (i * 8)) & 0xff)) * 0x100000001b3ull;
+		}
+	}
+	return sets[hash % sets.size()];
+}
+
 // The set the carrier part a parts object wears in category cat (alias item) stands for.
 const PartPackage* CarrierFor(uint8_t* parts, uint32_t cat, int item)
 {
@@ -2946,6 +3038,18 @@ PathFn g_pathOriginal = nullptr;
 
 void __attribute__((thiscall)) PartPath(uint8_t* parts, char* out, int kind, uint32_t cat)
 {
+	if (cat < kPartSlotCount && IsCarrier(*(uint32_t*)(parts + 0x44 + cat * 4))) {
+		uint32_t* worn = (uint32_t*)(parts + 0x44 + cat * 4);
+		int lobby = LobbyMemberOfParts(parts), player = lobby >= 0 ? -1 : PartsPlayer(parts);
+		uint64_t member = lobby >= 0 ? LobbyMember(lobby) : player >= 0 ? SlotMember(player) : 0;
+		if (uint32_t stock = StandInCode(member, cat, *worn)) {
+			uint32_t code = *worn;
+			*worn = stock;
+			g_pathOriginal(parts, out, kind, cat);
+			*worn = code;
+			return;
+		}
+	}
 	g_pathOriginal(parts, out, kind, cat);
 	if (cat >= 4 || kind < 0 || kind > 5 || kind == 2) {
 		return;
@@ -3213,8 +3317,6 @@ char* __attribute__((thiscall)) DlcName(void* names, uint32_t cat, uint32_t vari
 // carrier, Left/Right step through the sets first (the menu's faction, sets for every faction
 // everywhere); past either end the game's step moves on. Coming onto the carrier starts at the
 // near end.
-using PartCodeFn = uint32_t(__cdecl*)(uint32_t, uint32_t);
-PartCodeFn g_partCodeOriginal = nullptr;
 
 // Backup for a set's first load in a session: if the preview hasn't got it after 1.5 s (state 3 at
 // preview + g_previewState + cat*4 = loaded; the preview is menu+0x344), it is applied again.
@@ -3376,8 +3478,10 @@ void __attribute__((thiscall)) PartRequest(void* loader, uint32_t character, uin
 	}
 	// in the stage loop: whose part this is (the loop asks for 4 categories per present player)
 	const PartPackage* own = nullptr;
+	uint64_t wearer = 0;
 	if (t_stagePlayerCount > 0 && IsCarrier(code)) {
 		int player = t_stagePlayers[(t_stageRequest / 4) % t_stagePlayerCount];
+		wearer = player >= 0 ? SlotMember(player) : 0;
 		own = PlayerSet(player, cat, (code >> 16) & 0xff);
 		if (own) {
 			XLS_LOG_INFO("mods: parts: stage request player %d %s -> %s.", player, kSlotNames[cat], own->setId.c_str());
@@ -3385,7 +3489,8 @@ void __attribute__((thiscall)) PartRequest(void* loader, uint32_t character, uin
 	}
 	else if (IsCarrier(code)) {
 		int member = LobbyMemberOfCharacter(character);
-		own = member >= 0 ? MemberSet(LobbyMember(member), cat, (code >> 16) & 0xff) : nullptr;
+		wearer = member >= 0 ? LobbyMember(member) : 0;
+		own = member >= 0 ? MemberSet(wearer, cat, (code >> 16) & 0xff) : nullptr;
 		if (own) {
 			XLS_LOG_INFO("mods: parts: lobby member %d %s -> %s.", member, kSlotNames[cat], own->setId.c_str());
 		}
@@ -3396,7 +3501,11 @@ void __attribute__((thiscall)) PartRequest(void* loader, uint32_t character, uin
 		t_stageRequest++;
 	}
 	t_requestSet = own;
-	g_partRequestOriginal(loader, character, cat, code);
+	uint32_t stock = StandInCode(wearer, cat, code);
+	if (stock) {
+		XLS_LOG_INFO("mods: parts: character %u %s stands in as 0x%08x.", character, cat < kPartSlotCount ? kSlotNames[cat] : "?", stock);
+	}
+	g_partRequestOriginal(loader, character, cat, stock ? stock : code);
 	t_requestSet = nullptr;
 }
 
