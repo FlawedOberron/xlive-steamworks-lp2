@@ -115,6 +115,10 @@ bool TitlePatchFlash(std::vector<uint8_t>* gfx);
 // Adds the Network entry's texts to message\msgPC\MsgOption, every language (netmenu.cpp).
 bool NetMenuPatchMessages(std::vector<uint8_t>* file);
 void NetMenuInstall(unsigned char* base);
+void BotMatchInstall(unsigned char* base);
+void BotMatchLogSlots();
+bool BotMatchPatchFlash(std::vector<uint8_t>* gfx);
+bool BotMatchEvent(uint8_t* screen, int event, int value);
 // A map package was bound to online slot 13 / 14 (packages.cpp): its base map's preload list and its size class.
 void MapsRebind(int slot, int base, int size, const std::vector<std::string>& preload);
 

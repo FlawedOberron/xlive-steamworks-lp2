@@ -1230,6 +1230,7 @@ void PutSecondary(uint8_t index, const char* when)
 	if (index >= 16 || !g_game || !*g_game) {
 		return;
 	}
+	BotMatchLogSlots();
 	auto* info = *(uint8_t**)(*g_game + 0x28 + index * 4);
 	auto* second = info ? (uint32_t*)(info + 0x10 + kSlotSecond * 4) : nullptr;
 	int kind = g_secondary;

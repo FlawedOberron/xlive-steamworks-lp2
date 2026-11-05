@@ -73,6 +73,7 @@ DWORD WINAPI Worker(LPVOID)
 		ScriptsInit();
 		MapPicsInstall(base);
 		NetMenuInstall(base);
+		BotMatchInstall(base);
 	}
 	if (started) {
 		PartsStartUnlocker();

@@ -256,6 +256,12 @@ bool Number(const uint8_t* arg, int* out)
 void __attribute__((thiscall)) FlashCallback(uint8_t* screen, void* movie, void* name, const uint8_t* args, uint32_t count)
 {
 	int event = 0;
+	if (args && count >= 2 && Number(args, &event) && (event == 992 || event == 993)) {
+		int value = 0;
+		Number(args + 12, &value);
+		BotMatchEvent(screen, event, value);
+		return;
+	}
 	if (args && count >= 1 && Number(args, &event) && (event == kEventHello || event == kEventStep)) {
 		if (event == kEventHello) {
 			XLS_LOG_INFO("mods: network menu: entry added, sending its texts.");
