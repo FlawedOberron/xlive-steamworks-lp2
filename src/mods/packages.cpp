@@ -1386,7 +1386,25 @@ bool GenerateBrains(const std::wstring& source, const std::wstring& out)
 {
 	Bytes file;
 	std::vector<ArcEntry> entries;
-	return ReadWholeFile(source, &file) && ArcRead(file, &entries) && BotsBuildBrains(&entries) && WriteWholeFile(out, ArcWrite(entries));
+	if (!ReadWholeFile(source, &file) || !ArcRead(file, &entries)) {
+		return false;
+	}
+	if (_wcsicmp(source.substr(source.find_last_of(L"\\/") + 1).c_str(), L"uHm6d.arc") == 0) {
+		return BotsBuildBrains(&entries) && WriteWholeFile(out, ArcWrite(entries));
+	}
+	// A player match never opens uHm6d.arc: its bots' brains go in the core archive their partner brain is in.
+	Bytes stockFile;
+	std::vector<ArcEntry> stock;
+	std::wstring dir = source.substr(0, source.find_last_of(L"\\/") + 1);
+	if (!ReadWholeFile(dir + L"autoArc\\uHm6d.arc", &stockFile) || !ArcRead(stockFile, &stock) || !BotsBuildBrains(&stock)) {
+		return false;
+	}
+	for (const ArcEntry& e : stock) {
+		if (e.name.find("HumanBotBt_") != std::string::npos) {
+			entries.push_back(e);
+		}
+	}
+	return WriteWholeFile(out, ArcWrite(entries));
 }
 
 const std::wstring* PackagesGenerated(const std::wstring& rel, const std::wstring& source)
@@ -1399,7 +1417,8 @@ const std::wstring* PackagesGenerated(const std::wstring& rel, const std::wstrin
 	                                       L"nativepc\\arclp2xml\\id_title.arc", L"nativepc\\arclp2xml\\id_title_multi.arc",
 	                                       L"nativepc\\arclp2xml\\id_title_pc.arc", L"nativepc\\arcxmltmppc\\aoption.arc"};
 	bool names = rel.compare(0, prefix.size(), prefix) == 0 && rel.size() >= 7 && rel.compare(rel.size() - 7, 7, L"_pc.arc") == 0;
-	bool brains = rel == L"nativepc\\arclp2xml\\autoarc\\uhm6d.arc"; // the bots' stock brain: ours go next to it
+	bool brains = rel == L"nativepc\\arclp2xml\\autoarc\\uhm6d.arc" || rel == L"nativepc\\arclp2xml\\id_core_multi.arc" ||
+	              rel == L"nativepc\\arclp2xml\\id_core.arc"; // the bots' stock brain and their partner brain: ours go next to them
 	if (!names && !brains && std::find(std::begin(creates), std::end(creates), rel) == std::end(creates)) {
 		return nullptr;
 	}

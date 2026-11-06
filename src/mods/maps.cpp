@@ -399,12 +399,20 @@ using SoundFn = void(__attribute__((thiscall)) *)(void*, uint32_t, uint32_t, voi
 StepFn g_stepOriginal = nullptr;
 MessageFn g_messageOriginal = nullptr;
 
-void StepSound(void* screen)
+void MenuSoundAt(void* screen, uint32_t id)
 {
 	const PickerVas& va = kPickerVas[g_build];
 	auto sound = (SoundFn)(uintptr_t)va.sound;
-	sound(*(void**)(uintptr_t)va.soundOwner, *(uint32_t*)(*(uint8_t**)(uintptr_t)va.soundIds + 0x78), 7, screen, 0);
+	sound(*(void**)(uintptr_t)va.soundOwner, *(uint32_t*)(*(uint8_t**)(uintptr_t)va.soundIds + 0x78), id, screen, 0);
 }
+
+void StepSound(void* screen)
+{
+	MenuSoundAt(screen, 7);
+}
+
+void* g_onlineMessages = nullptr; // from the game's own MsgOnline lookups: for ours
+uint32_t g_onlineLang = 0;
 
 int __attribute__((thiscall)) RuleStep(void* screen, int key, uint8_t* value, int max, int min, int rule, char wrap)
 {
@@ -571,6 +579,10 @@ const char* BrowsedName(uint32_t slot)
 
 const char* __attribute__((thiscall)) Message(void* messages, const char* file, uint32_t id, uint32_t lang)
 {
+	if (file && strcmp(file, "MsgOnline") == 0) {
+		g_onlineMessages = messages;
+		g_onlineLang = lang;
+	}
 	if (file && strcmp(file, "MsgBattle") == 0) {
 		if (const char* text = RulesBattleMessage(id)) {
 			return text;
@@ -656,6 +668,20 @@ bool MapsTryInstall(unsigned char* base)
 		return true;
 	}
 	return false;
+}
+
+void MenuSound(void* screen, uint32_t id)
+{
+	MenuSoundAt(screen, id);
+}
+
+std::string MapsOnlineText(uint32_t id)
+{
+	if (!g_messageOriginal || !g_onlineMessages) {
+		return "";
+	}
+	const char* text = g_messageOriginal(g_onlineMessages, "MsgOnline", id, g_onlineLang);
+	return text ? text : "";
 }
 
 }

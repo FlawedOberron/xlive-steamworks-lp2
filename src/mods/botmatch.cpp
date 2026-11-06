@@ -11,7 +11,7 @@
 #include <vector>
 
 // Bot Match: a fifth entry on the Multiplayer screen (flash\online\id200, uIdBattle under aBattle) that
-// opens AI Enemy Battle (aTrainingTop) with all its bot rows, as the main menu's Training entry does.
+// opens a System Link match's create screen, skipping the Create / Find list, with bots on and every seat private.
 //
 // The screen's input function (DX11 FUN_00e80320) wraps its index at 0..3 and maps it through a four-entry
 // table when an entry is chosen, behind a network check. So: index 4 is ours. From 4 the game's own Up and
@@ -71,6 +71,10 @@ const BotMatchVas* g_vas = nullptr;
 uint8_t* g_base = nullptr;
 ScreenFn g_input = nullptr;
 ScreenFn g_scene = nullptr;
+typedef uint32_t(__attribute__((thiscall)) * SceneRetFn)(uint8_t*);
+SceneRetFn g_playerMatch = nullptr;
+bool g_toCreate = false;
+int g_toCreateTicks = 0;
 bool g_hasEntry = false; // the Flash script added the row (never index 4 without it)
 
 uint8_t* At(uint32_t va)
@@ -153,15 +157,37 @@ void __attribute__((thiscall)) Input(uint8_t* screen)
 	}
 }
 
+// aBattlePlayerMatch::vf7: its screen (+0x34) has three entries. When it's up, take its Create Match route (DX11 FUN_00e9bd80):
+// close, result 1, choice 2.
+uint32_t __attribute__((thiscall)) PlayerMatch(uint8_t* scene)
+{
+	if (g_toCreate && (*(uint32_t*)(scene + 4) & 0xff) == 1) {
+		uint8_t* screen = *(uint8_t**)(scene + 0x34);
+		if (++g_toCreateTicks > 600) {
+			g_toCreate = false;
+			XLS_LOG_WARN("mods: bot match: the System Link screen never came up.");
+		}
+		else if (screen && screen[0x18] == 1 && g_toCreateTicks > 10) {
+			g_toCreate = false;
+			screen[0x18] = 3;
+			screen[0x19] = 0;
+			*(int32_t*)(screen + 0x39c) = 1;
+			*(int32_t*)(screen + 0x3a4) = 2;
+			RulesNextCreateIsBotMatch();
+		}
+	}
+	return g_playerMatch(scene);
+}
+
 void __attribute__((thiscall)) Scene(uint8_t* scene)
 {
 	if ((*(uint32_t*)(scene + 4) & 0xff) == 5 && *(int32_t*)(scene + 0x2c) == kChoice) {
-		XLS_LOG_INFO("mods: bot match: opening AI Enemy Battle.");
-		((LeaveFn)At(g_vas->leave))();
-		uint8_t* mgr = *(uint8_t**)At(g_vas->sceneMgr);
-		*(int32_t*)(mgr + 0x3868) = 2; // as the main menu: its Training entry
-		(*(uint8_t**)At(g_vas->net))[0x5a6] = 1;
-		((SwitchFn)(*(void***)mgr)[0x24 / 4])(mgr, At(g_vas->training));
+		// As the game's System Link entry (value 5), then on to its Create Match (PlayerMatch below).
+		XLS_LOG_INFO("mods: bot match: opening System Link, create match.");
+		*(int32_t*)(scene + 0x2c) = 5;
+		g_toCreate = true;
+		g_toCreateTicks = 0;
+		g_scene(scene);
 		return;
 	}
 	g_scene(scene);
@@ -235,6 +261,12 @@ void BotMatchInstall(unsigned char* base)
 		g_input = nullptr; // (a hooked Input with no entry passes straight through)
 		XLS_LOG_WARN("mods: bot match: Multiplayer screen code not recognised, no Bot Match entry.");
 		return;
+	}
+	static const uint32_t kPlayerMatch[kBuildCount] = {0x89b6b0, 0x88c020, 0x89ba80, 0x88c260};
+	static const uint8_t kPlayerMatchPrologue[] = {0x56, 0x8b, 0xf1, 0x0f, 0xb6, 0x46, 0x04};
+	g_playerMatch = (SceneRetFn)Detour(At(kPlayerMatch[GameBuild()]), kPlayerMatchPrologue, sizeof(kPlayerMatchPrologue), (void*)&PlayerMatch);
+	if (!g_playerMatch) {
+		XLS_LOG_WARN("mods: bot match: System Link scene not recognised.");
 	}
 	XLS_LOG_INFO("mods: bot match: Multiplayer screen hooked.");
 }

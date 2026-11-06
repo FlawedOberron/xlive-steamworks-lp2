@@ -62,12 +62,13 @@ struct BotVas {
 	uint32_t slots;       // global -> player slot records (0x7c each at +0x148, AI flag at +0x1b1)
 	uint32_t target, recentDamage, team; // character: current target (0x1194), recent damage (0x18b4, decays), team byte
 	uint32_t lifeRatio, charFlags; // fastcall(character): life / max life (FUN_00900880); character flags (0xd84), bit 20 = has life
+	uint32_t resolve;     // plan target -> position, thiscall(?, unit, plan, ctx, target type, float* out, info), ret 0x18 (DX11 FUN_0091bb40)
 };
 const BotVas kBotVas[kBuildCount] = {
-	{0xf8f060, 0x98fd90, 0x18520c0, 0x1688, 0x16a4, 0x992600, 0x2428, 0x93b1b0, 0x90ffb0, 0x1852850, 0x1194, 0x18b4, 0xce2, 0x900880, 0xd84}, // DX11
-	{0xf7f0f0, 0x980410, 0x1842020, 0x1678, 0x1694, 0x982c80, 0x2418, 0x92b820, 0x900640, 0x18427b0, 0x1184, 0x18a4, 0xcd2, 0x8f0f20, 0xd74}, // DX9
-	{0xf8f4f0, 0x98ff70, 0x18530c0, 0x1688, 0x16a4, 0x9927e0, 0x2428, 0x93b420, 0x910280, 0x1853850, 0x1194, 0x18b4, 0xce2, 0x900b60, 0xd84}, // DX11 1.1
-	{0xf7f400, 0x9806e0, 0x1842020, 0x1678, 0x1694, 0x982f50, 0x2418, 0x92b9e0, 0x900800, 0x18427b0, 0x1184, 0x18a4, 0xcd2, 0x8f10d0, 0xd74}, // DX9 1.1
+	{0xf8f060, 0x98fd90, 0x18520c0, 0x1688, 0x16a4, 0x992600, 0x2428, 0x93b1b0, 0x90ffb0, 0x1852850, 0x1194, 0x18b4, 0xce2, 0x900880, 0xd84, 0x91bb40}, // DX11
+	{0xf7f0f0, 0x980410, 0x1842020, 0x1678, 0x1694, 0x982c80, 0x2418, 0x92b820, 0x900640, 0x18427b0, 0x1184, 0x18a4, 0xcd2, 0x8f0f20, 0xd74, 0x90c1b0}, // DX9
+	{0xf8f4f0, 0x98ff70, 0x18530c0, 0x1688, 0x16a4, 0x9927e0, 0x2428, 0x93b420, 0x910280, 0x1853850, 0x1194, 0x18b4, 0xce2, 0x900b60, 0xd84, 0x91bdd0}, // DX11 1.1
+	{0xf7f400, 0x9806e0, 0x1842020, 0x1678, 0x1694, 0x982f50, 0x2418, 0x92b9e0, 0x900800, 0x18427b0, 0x1184, 0x18a4, 0xcd2, 0x8f10d0, 0xd74, 0x90c370}, // DX9 1.1
 };
 // mov edx,[esp+4]; cmp byte [edx+0x1f],1
 const uint8_t kEvalPrologue[] = {0x8b, 0x54, 0x24, 0x04, 0x80, 0x7a, 0x1f, 0x01};
@@ -198,9 +199,21 @@ bool BrainApply(const Bytes& stock, const EmbeddedBrain& brain, Bytes* out)
 	return out->size() == brain.size && BrainCrc(*out) == brain.crc;
 }
 
+// The AI Enemy Battle areas (category 0; campaign episodes are 1-5), or a versus match this PC hosts with bots.
+bool BotWorld(const uint8_t* game)
+{
+	return game && (game[kAreaCategory] == 0 || (game[0x256] && BotsInPlayerMatch()));
+}
+
+const char* const kPartnerBrain = "tool\\AI\\Think\\HumanBotCp";
+
 uint32_t __attribute__((thiscall)) ThinkSet(void* spec, const char* path)
 {
-	if (g_brains && BotMenuOptions().improved && path && strcmp(path, kStockBrain) == 0) {
+	// A player match's bots are built as campaign partners (FUN_00828ca0's co-op route), so they ask for HumanBotCp.
+	uint8_t* game = *(uint8_t**)At(g_vas->game);
+	bool partner = path && strcmp(path, kPartnerBrain) == 0, battle = path && strcmp(path, kStockBrain) == 0;
+	// Only in a bot match or a player match with bots: campaign and co-op keep the game's own brains, whichever they ask for.
+	if (g_brains && BotMenuOptions().improved && (partner ? game && game[0x256] && BotsInPlayerMatch() : battle && BotWorld(game))) {
 		int kind = GameKind();
 		std::string mine = std::string(kStockBrain) + "_" + ModeName(kind);
 		uint32_t ok = g_thinkOriginal(spec, mine.c_str());
@@ -320,7 +333,7 @@ void LogAimValues()
 float __attribute__((thiscall)) EvalParam(uint8_t* eval, uint8_t* unit, void* b, void* c)
 {
 	uint8_t* game = *(uint8_t**)At(g_vas->game);
-	if (!unit || unit[0x1f] != 1 || !game || game[kAreaCategory] != 0) {
+	if (!unit || unit[0x1f] != 1 || !BotWorld(game)) {
 		return g_evalOriginal(eval, unit, b, c);
 	}
 	LogAimValues();
@@ -408,14 +421,19 @@ uint8_t LifePercent(uint8_t* character)
 // Debugging, off unless ModCache\\bot-log.txt exists (read at the first bot think): a line each time a bot's running plan
 // item changes, for judging brains from a match's log. cThinkPlanAI mpItemNow (+0x710) -> cItemProcessor, +0x30 the item,
 // its mName at +4 (MtString: chars at +8).
-void LogPlan(uint8_t slot, uint8_t* plan, uint8_t* unit, const uint8_t* p)
+bool BotLogOn()
 {
 	static const bool enabled = [] {
 		Bytes unused;
 		return ReadWholeFile(Cfg().modCacheDir + L"bot-log.txt", &unused);
 	}();
+	return enabled;
+}
+
+void LogPlan(uint8_t slot, uint8_t* plan, uint8_t* unit, const uint8_t* p)
+{
 	static void* last[16];
-	if (!enabled || !plan) {
+	if (!BotLogOn() || !plan) {
 		return;
 	}
 	void* now = *(void**)(plan + 0x710);
@@ -442,7 +460,7 @@ void ReactToHit(uint8_t* think, uint8_t* unit)
 	const uint8_t slot = think[kThinkSlot];
 	uint8_t* game = *(uint8_t**)At(g_vas->game);
 	uint8_t* slots = *(uint8_t**)At(g_vas->slots);
-	if (slot >= 16 || !unit || !game || !slots || game[kAreaCategory] != 0 || !slots[0x1b1 + slot * 0x7c] || !BotMenuOptions().improved) {
+	if (slot >= 16 || !unit || !slots || !BotWorld(game) || !slots[0x1b1 + slot * 0x7c] || !BotMenuOptions().improved) {
 		return;
 	}
 	uint8_t* p = unit + g_vas->param;
@@ -488,6 +506,177 @@ void ReactToHit(uint8_t* think, uint8_t* unit)
 			}
 		}
 	}
+}
+
+// Where a bot with nobody to fight goes. Stock has no such thing: its idle items aim at Pef_Hm40's ShotPoint, 3-10 m away, and with no
+// free post ExecDataPost (800 against RUN's 300) "takes" the bot's own spot for 5 s, as target 16 then resolves to it. So:
+//   Target 16 with no post now fails, as does one that gunfire outranks (not in Post Grab, nor for a post the bot is at).
+//   Target 20 (FreePoint, unused by stock; our brains' RUN and RunToPatrol, lp2brain.py roam) is a goal kept per bot until it's reached or
+//   the bot stops getting closer: gunfire within earshot, else a far spawn point, which every map has and a player can stand on.
+// Posts come between the two in the brains: ExecPostFar outscores RUN.
+typedef char(__attribute__((thiscall)) * ResolveFn)(void*, uint8_t*, uint8_t*, void*, uint32_t, float*, void*);
+ResolveFn g_resolveOriginal = nullptr;
+const int kTgtPost = 16, kTgtRoam = 20, kKindPostGrab = 8, kInitPosSet = 0x52e4, kSetCount = 0x70, kSetArray = 0x7c, kRecPos = 0x10, kRecKind = 0x26;
+const float kHearing = 6000.0f, kArrive = 600.0f, kRoamNear = 2000.0f, kPostHere = 800.0f, kProgress = 300.0f;
+const DWORD kShotHeard = 3000, kNoiseLasts = 10000, kNoiseCheck = 250, kStuckCheck = 6000, kNoiseRest = 2000;
+struct RoamGoal {
+	float pos[3] = {0, 0, 0};
+	float best = 0;
+	bool has = false, noise = false;
+	DWORD used = 0, set = 0, heard = 0, progress = 0, rest = 0;
+};
+std::unordered_map<uint8_t*, RoamGoal> g_goals;
+std::mutex g_goalLock;
+
+float Distance2(const float* a, const float* b)
+{
+	float dx = a[0] - b[0], dy = a[1] - b[1], dz = a[2] - b[2];
+	return dx * dx + dy * dy + dz * dz;
+}
+
+bool RoamPoint(const float* from, RoamGoal& g)
+{
+	uint8_t* game = *(uint8_t**)At(g_vas->game);
+	uint8_t* set = game ? *(uint8_t**)(game + kInitPosSet) : nullptr;
+	uint32_t count = set ? *(uint32_t*)(set + kSetCount) : 0;
+	uint8_t** records = set ? *(uint8_t***)(set + kSetArray) : nullptr;
+	if (!records || !count || count > 256) {
+		return false;
+	}
+	const float* pick = nullptr;
+	float farthest = -1.0f;
+	for (int tries = 0; tries < 12; tries++) {
+		uint8_t* r = records[Rand() % count];
+		if (!r || r[kRecKind] > 5) { // 6, 7: team base markers
+			continue;
+		}
+		const float* pos = (const float*)(r + kRecPos);
+		float d = Distance2(from, pos);
+		if (d > farthest) {
+			farthest = d;
+			pick = pos;
+		}
+		if (d >= kRoamNear * kRoamNear) { // the first pick enough: random, not always the pick end of the map
+			break;
+		}
+	}
+	if (!pick) {
+		return false;
+	}
+	memcpy(g.pos, pick, sizeof(g.pos));
+	g.has = true;
+	g.noise = false;
+	return true;
+}
+
+// Caller holds g_goalLock.
+void GoalUpdate(uint8_t* unit, RoamGoal& g, DWORD now)
+{
+	const float* here = (const float*)(unit + 0xd0);
+	if (now - g.heard >= kNoiseCheck && (int)(now - g.rest) >= 0) {
+		g.heard = now;
+		RadarShotInfo shots[32];
+		int n = RadarRecentShots(shots, 32, kShotHeard), kind = GameKind();
+		bool everyone = kind >= 1 && kind <= 3;
+		float nearest = g.has && g.noise ? Distance2(here, g.pos) : kHearing * kHearing;
+		const float* heard = nullptr;
+		for (int i = 0; i < n; i++) {
+			float d = Distance2(here, shots[i].pos);
+			if (shots[i].who != unit && (everyone || shots[i].team != unit[g_vas->team]) && d < nearest && d > kArrive * kArrive) {
+				nearest = d;
+				heard = shots[i].pos;
+			}
+		}
+		if (heard) {
+			memcpy(g.pos, heard, sizeof(g.pos));
+			g.has = g.noise = true;
+			g.set = now;
+			g.best = sqrtf(nearest);
+			g.progress = now;
+			if (BotLogOn()) {
+				XLS_LOG_INFO("mods: bots: %p hears gunfire %.0f m away.", unit, g.best / 100.0f);
+			}
+		}
+	}
+	bool gap = now - g.used > 5000; // it was fighting or dead: its timers mean nothing
+	g.used = now;
+	if (gap) {
+		g.progress = now;
+		g.best = g.has ? sqrtf(Distance2(here, g.pos)) : 0;
+	}
+	bool renew = !g.has;
+	if (g.has) {
+		float d = sqrtf(Distance2(here, g.pos));
+		if (d < kArrive || (g.noise && now - g.set > kNoiseLasts)) {
+			if (g.noise) {
+				g.rest = now + kNoiseRest; // it's seen what there was to see
+			}
+			renew = true;
+		}
+		else if (d < g.best - kProgress) {
+			g.best = d;
+			g.progress = now;
+		}
+		else if (now - g.progress > kStuckCheck) {
+			renew = true;
+			if (BotLogOn()) {
+				XLS_LOG_INFO("mods: bots: %p gave up on a goal %.0f m away.", unit, d / 100.0f);
+			}
+		}
+	}
+	if (renew) {
+		g.has = false;
+		g.noise = false;
+		if (RoamPoint(here, g)) {
+			g.set = g.progress = now;
+			g.best = sqrtf(Distance2(here, g.pos));
+			if (BotLogOn()) {
+				XLS_LOG_INFO("mods: bots: %p roams to a point %.0f m away.", unit, g.best / 100.0f);
+			}
+		}
+	}
+}
+
+char __attribute__((thiscall)) Resolve(void* self, uint8_t* unit, uint8_t* plan, void* ctx, uint32_t target, float* out, void* info)
+{
+	const uint8_t type = target & 0xff;
+	if ((type != kTgtPost && type != kTgtRoam) || !unit || !plan) {
+		return g_resolveOriginal(self, unit, plan, ctx, target, out, info);
+	}
+	uint8_t* game = *(uint8_t**)At(g_vas->game);
+	if (!BotWorld(game) || !BotMenuOptions().improved) {
+		return g_resolveOriginal(self, unit, plan, ctx, target, out, info);
+	}
+	DWORD now = GetTickCount();
+	std::lock_guard<std::mutex> lock(g_goalLock);
+	if (g_goals.size() > 128) {
+		g_goals.clear();
+	}
+	RoamGoal& g = g_goals[unit];
+	GoalUpdate(unit, g, now);
+	if (type == kTgtPost) {
+		uint8_t* post = *(uint8_t**)(plan + kPlanPost);
+		if (!post) {
+			return 0;
+		}
+		bool here = Distance2((const float*)(unit + 0xd0), (const float*)(post + 0xd0)) < kPostHere * kPostHere;
+		if (g.has && g.noise && !here && GameKind() != kKindPostGrab) {
+			return 0;
+		}
+		return g_resolveOriginal(self, unit, plan, ctx, target, out, info);
+	}
+	if (!g.has) {
+		return g_resolveOriginal(self, unit, plan, ctx, target, out, info);
+	}
+	out[0] = g.pos[0];
+	out[1] = g.pos[1];
+	out[2] = g.pos[2];
+	out[3] = 0.0f;
+	static LONG logged = 0;
+	if (InterlockedIncrement(&logged) <= 3) {
+		XLS_LOG_INFO("mods: bots: roam goal in use (%.0f, %.0f, %.0f).", g.pos[0], g.pos[1], g.pos[2]);
+	}
+	return 1;
 }
 
 uint32_t __attribute__((thiscall)) ThinkBody(uint8_t* think, uint8_t* unit)
@@ -556,6 +745,11 @@ void BotsInstall(unsigned char* base)
 	g_thinkBodyOriginal = (ThinkFn)Detour(At(g_vas->think), kThinkBodyPrologue, sizeof(kThinkBodyPrologue), (void*)&ThinkBody);
 	if (!g_thinkBodyOriginal) {
 		XLS_LOG_WARN("mods: bots: think code not recognised, bots won't react to being shot.");
+	}
+	static const uint8_t kResolvePrologue[] = {0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf0, 0x81, 0xec, 0xd4, 0x01, 0x00, 0x00};
+	g_resolveOriginal = (ResolveFn)Detour(At(g_vas->resolve), kResolvePrologue, sizeof(kResolvePrologue), (void*)&Resolve);
+	if (!g_resolveOriginal) {
+		XLS_LOG_WARN("mods: bots: target code not recognised, bots won't roam.");
 	}
 	g_seed = GetTickCount();
 	XLS_LOG_INFO("mods: bots: installed (%s).", BuildName((int)(g_vas - kBotVas)));

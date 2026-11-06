@@ -80,6 +80,19 @@ struct BotOptions {
 	int taunts;      // 0 off, 1 rare, 2 normal, 3 lots
 };
 BotOptions BotMenuOptions();
+void RadarInstall(uint8_t* base, int build); // radar.cpp
+void ResupplyInstall(uint8_t* base, int build); // resupply.cpp
+void ResupplySet(bool on);
+struct RadarShotInfo {
+	float pos[3];
+	uint8_t* who; // compare only: it may be gone
+	uint8_t team;
+	unsigned long at;
+};
+int RadarRecentShots(RadarShotInfo* out, int max, unsigned long age); // gunfire in the last age ms, newest not first
+void RadarRulesSet(int mode, int players, int vs); // 0 Always On, 1 Near Data Post, 2 Hidden; 0 Always, 1 Moving, 2 Running, 3 Shooting
+void RulesNextCreateIsBotMatch(); // the next create screen comes from the Multiplayer screen's Bot Match (rules.cpp)
+bool BotsInPlayerMatch(); // this machine hosts a player match with bots filled in (rules.cpp)
 // The overlay mod file that replaces a game file (overlay.cpp), or nullptr.
 const std::wstring* OverlayRedirect(const std::wstring& path);
 void OnewaySetMap(const MapPhysics* physics);
@@ -100,6 +113,8 @@ float ScriptValue(int sid, int setting, float base);
 // was ours), answers our MsgOnline texts, adds the rows to the menu's Flash (id221 GFx).
 int RulesStep(int rule, int key, uint8_t* value, const std::function<int()>& original); // -1 not ours, 0 unchanged, 1 changed, 2 changed by original (sound made)
 const char* RulesMessage(uint32_t id);
+void MenuSound(void* screen, uint32_t id);
+std::string MapsOnlineText(uint32_t id); // the game's MsgOnline text in its language, "" before it has asked for one
 const char* RulesBattleMessage(uint32_t id); // MsgBattle: the Eliminated text while a battle message is being formatted, else null
 int RulesSlotOf(const uint8_t* character); // the match slot whose body it is, -1 none (AI, akrid)
 int RulesLocalSlot();                      // the local player's match slot, -1 not known

@@ -2,7 +2,8 @@
 #include "mods/package.h"
 #include "mods/parts.h"
 #include "mods/flash/botrows.h"
-#include "mods/flash/sections.h"
+#include "mods/flash/setup.h"
+#include "mods/gamerules.h"
 
 #include "api/xsession.h"
 #include "core/config.h"
@@ -161,8 +162,10 @@ const int kMsgInfinite = 620;
 // distance: a page holds 10 rows at most (the row table), and the team categories' Settings 3 has 8 with Ammo Supply.
 // Value 0 is the game's own (settings saved before the row).
 const int kMsgGrapple = 700, kMsgStagger = 710;
-const char* const kGrappleNames[] = {"Default", "Off", "Short", "Long", "Very Long", "Extreme"};
-const float kGrappleScales[] = {1.0f, 0.0f, 0.5f, 1.5f, 2.0f, 3.0f};
+// The Anchor page: Range is this list, Speed the same without Off. Rule file values index these.
+const char* const kGrappleNames[] = {"Off", "1/4", "1/2", "Default", "2X", "3X", "4X", "5X", "6X", "7X", "8X", "9X", "10X"};
+const float kGrappleScales[] = {0.0f, 0.25f, 0.5f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f};
+const int kGrappleDefault = 3, kAnchorSpeedDefault = 2, kAnchorSpeedValues = 12;
 const int kGrappleValues = (int)(sizeof(kGrappleScales) / sizeof(kGrappleScales[0]));
 // Hit Stagger: the stagger (shrink) points a hit takes off a character, times the scale (see StaggerAdd).
 const char* const kStaggerNames[] = {"Default", "Reduced", "Low", "Off"};
@@ -222,7 +225,7 @@ const Row kRowDefs[] = {
 	{kPageSettings2, 0x2f, kInfiniteValues, 501, 76, kMsgInfinite, "Infinite Ammo"},
 	{kPageSettings3, 0x31, kSupplyValues, 503, 78, kMsgSupply, "Ammo Supply"},
 	{kPageSettings3, 0x34, 2, 504, 81, kMsgOffOn, "Harmonizer"},
-	{kPageSettings3, 0x35, kGrappleValues, 505, 82, kMsgGrapple, "Grappling"},
+	{kPageSettings3, 0x35, 6, 505, 82, kMsgGrapple, "Grappling"},
 	{kPageSettings2, 0x36, kStaggerValues, 506, 83, kMsgStagger, "Hit Stagger"},
 };
 const int kRows = (int)(sizeof(kRowDefs) / sizeof(kRowDefs[0]));
@@ -239,8 +242,14 @@ struct Rules {
 	int lives = 0; // Survival lives per player (Elimination) or team (Team Elimination)
 	bool team = false;
 	bool harmonizer = false; // the Campaign's Harmonizer (auto heal when low) in VS matches too
-	int grapple = 0; // kGrappleScales index
+	int grapple = kGrappleDefault; // kGrappleScales index
+	int anchorSpeed = kAnchorSpeedDefault; // the same, less Off
+	int fall = 0; // kFallScales index
 	int stagger = 0; // kStaggerScales index
+	int radar = 1, detectPlayers = 0, detectVs = 0; // radar.cpp
+	int grenadeCount = 0;  // 0 the game's amounts, else 1 + the count (so 1 is none)
+	int grenadePickup = 0; // 0 the game's amounts, else the count
+	int quickResupply = 0; // running over a carried weapon takes its ammo (resupply.cpp)
 };
 const int kSlotSecond = 7;
 const DWORD kContextRichMode = 0; // the SPA presence context naming the mode (Campaign, Online...)
@@ -252,7 +261,8 @@ std::atomic<bool> g_grenades{false};
 std::atomic<int> g_secondary{0};
 std::atomic<int> g_supply{0};
 std::atomic<bool> g_harmonizer{false};
-std::atomic<int> g_grapple{0};
+uint8_t** g_game = nullptr;
+std::atomic<int> g_grapple{kGrappleDefault};
 std::atomic<int> g_stagger{0};
 std::atomic<bool> g_survival{false};
 std::atomic<bool> g_offline{true}; // not in a lobby (training): the bots run on this PC
@@ -261,6 +271,10 @@ std::atomic<bool> g_botArmed{false}, g_botSurvival{false};
 std::atomic<int> g_botLives{3}, g_botRule{0}; // index into kLives; the screen's rule (0 Elimination, 1 Team Elimination)
 std::atomic<int> g_botCount{15};
 std::atomic<int> g_botDifficulty{1}, g_botBrain{1}, g_botPersona{0}, g_botTaunts{2};
+std::atomic<bool> g_matchBots{false}, g_botsInMatch{false};
+std::atomic<int> g_quickResupplyRule{0}, g_grenadeCountRule{0}, g_grenadePickupRule{0}, g_grenadeCount{0}, g_grenadePickup{0};
+thread_local int g_inSpawn = 0; // weapons set up during a spawn are the player's own, any other is a pickup
+std::atomic<int> g_radarMode{1}, g_radarPlayers{0}, g_radarVs{0}, g_anchorRangeRule{kGrappleDefault}, g_anchorSpeedRule{kAnchorSpeedDefault}, g_fallRule{0};
 const char* const kDifficultyNames[] = {"Easy", "Normal", "Hard", "Veteran"};
 const char* const kBrainNames[] = {"Stock", "Improved"};
 const char* const kPersonaNames[] = {"Mixed", "Aggressor", "Tactician", "Cautious", "Show-off", "Grenadier"};
@@ -271,10 +285,29 @@ std::atomic<int> g_menuLives{0};
 std::atomic<bool> g_team{false};
 std::atomic<bool> g_menuTeam{false};
 uint32_t g_magazine = 0;
+uint8_t** g_ruleSlots = nullptr;
+bool Host();
+uint32_t g_dataAt = 0;
+
+// Grenade totals are in units: the count shown is the total over the entry's cost of a throw (+0x4e; 1 with +5 bit 1), rounded
+// up (DX11 FUN_00c7acc0). The weapon's own entry is at g_dataAt + 4.
+int GrenadeCost(const uint8_t* entry)
+{
+	if (!entry || (entry[5] & 2)) {
+		return 1;
+	}
+	int16_t cost = *(const int16_t*)(entry + 0x4e);
+	return cost > 0 ? cost : 1;
+}
+
+const uint8_t* WeaponEntry(const uint8_t* weapon)
+{
+	return *(uint8_t* const*)(weapon + g_dataAt + 4);
+}
 
 std::string Format(const Rules& r)
 {
-	return FormatA("ammo=%d;grenades=%d;secondary=%d;magazines=%d;survival=%d;lives=%d;team=%d;harmonizer=%d;grapple=%d;stagger=%d", r.ammo, r.grenades, r.secondary, r.supply, r.survival, r.lives, r.team, r.harmonizer, r.grapple, r.stagger);
+	return FormatA("ammo=%d;grenades=%d;secondary=%d;magazines=%d;survival=%d;lives=%d;team=%d;harmonizer=%d;grapple=%d;stagger=%d;radar=%d;detectp=%d;detectv=%d;anchor=%d;fall=%d;gcount=%d;gpick=%d;qres=%d", r.ammo, r.grenades, r.secondary, r.supply, r.survival, r.lives, r.team, r.harmonizer, r.grapple, r.stagger, r.radar, r.detectPlayers, r.detectVs, r.anchorSpeed, r.fall, r.grenadeCount, r.grenadePickup, r.quickResupply);
 }
 
 Rules Parse(const std::string& s)
@@ -288,10 +321,23 @@ Rules Parse(const std::string& s)
 	r.team = s.find("team=1") != std::string::npos;
 	r.harmonizer = s.find("harmonizer=1") != std::string::npos;
 	size_t grappleAt = s.find("grapple="), staggerAt = s.find("stagger=");
-	r.grapple = grappleAt == std::string::npos ? 0 : atoi(s.c_str() + grappleAt + 8);
-	r.grapple = r.grapple >= 0 && r.grapple < kGrappleValues ? r.grapple : 0;
+	r.grapple = grappleAt == std::string::npos ? kGrappleDefault : atoi(s.c_str() + grappleAt + 8);
+	r.grapple = r.grapple >= 0 && r.grapple < kGrappleValues ? r.grapple : kGrappleDefault;
 	r.stagger = staggerAt == std::string::npos ? 0 : atoi(s.c_str() + staggerAt + 8);
 	r.stagger = r.stagger >= 0 && r.stagger < kStaggerValues ? r.stagger : 0;
+	auto small = [&](const char* key, int count, int fallback) {
+		size_t found = s.find(key);
+		int value = found == std::string::npos ? fallback : atoi(s.c_str() + found + strlen(key));
+		return value >= 0 && value < count ? value : fallback;
+	};
+	r.radar = small("radar=", 3, 1);
+	r.anchorSpeed = small("anchor=", kAnchorSpeedValues, kAnchorSpeedDefault);
+	r.fall = small("fall=", 4, 0);
+	r.grenadeCount = small("gcount=", 12, 0);
+	r.grenadePickup = small("gpick=", 11, 0);
+	r.quickResupply = small("qres=", 2, 0);
+	r.detectPlayers = small("detectp=", 4, 0);
+	r.detectVs = small("detectv=", 4, 0);
 	size_t livesAt = s.find("lives=");
 	r.lives = livesAt == std::string::npos ? 0 : atoi(s.c_str() + livesAt + 6);
 	at = s.find("magazines=");
@@ -308,6 +354,15 @@ std::atomic<int> g_menu[kRows];
 Rules Own()
 {
 	Rules r;
+	r.radar = g_radarMode;
+	r.detectPlayers = g_radarPlayers;
+	r.detectVs = g_radarVs;
+	r.grapple = g_anchorRangeRule;
+	r.anchorSpeed = g_anchorSpeedRule;
+	r.fall = g_fallRule;
+	r.grenadeCount = g_grenadeCountRule;
+	r.grenadePickup = g_grenadePickupRule;
+	r.quickResupply = g_quickResupplyRule;
 	if (g_menuSeen) {
 		r.ammo = (g_menu[kRowInfinite] & kInfiniteAmmo) != 0;
 		r.grenades = (g_menu[kRowInfinite] & kInfiniteGrenades) != 0;
@@ -317,7 +372,6 @@ Rules Own()
 		r.lives = r.survival ? g_menuLives.load() : 0;
 		r.team = r.survival && g_menuTeam;
 		r.harmonizer = g_menu[kRowHarmonizer] != 0;
-		r.grapple = g_menu[kRowGrapple] % kGrappleValues;
 		r.stagger = g_menu[kRowStagger] % kStaggerValues;
 		return r;
 	}
@@ -397,6 +451,33 @@ const uint32_t kGrappleLimitAt[kBuildCount][4] = {
 	{0xc79ce5, 0xc7a1f2, 0xc7aa7d, 0xec726e},
 };
 const float kGrappleStock = 1100.0f;
+// Fall Stagger: a human landing (19 sites across its jump and fall actions, uHuman vf337 and friends) compares its fall speed
+// (cJump mSpd.y, +0x17c8) with a shared -40.0: at or past it the heavy landing (motion 0x53, the stagger), otherwise the light
+// one (0x0c). These compares read ours instead. Others read the constant for other things and keep it.
+const float kFallStock = -40.0f;
+const float kFallScales[] = {1.0f, 1.5f, 2.0f, 1000000.0f}; // the names are kStaggerNames: Default, Reduced, Low, Off
+volatile float g_fallThreshold = kFallStock;
+struct FallSites {
+	uint32_t constant, first, last;
+};
+const FallSites kFallSites[kBuildCount] = {
+	{0x147e90c, 0xc43158, 0xc73605},
+	{0x146e7b4, 0xc33568, 0xc639f5},
+	{0x147eb5c, 0xc431b8, 0xc73625},
+	{0x146ea1c, 0xc330c8, 0xc635e5},
+};
+const int kFallSiteCount = 19;
+// Anchor Speed: the hook's launch speed, a shared 120.0 read when each of the three launches sets its velocity (+0xc30): the
+// shot (FUN_00c89ab0), the second firing (FUN_00c8a720) and FUN_00c8ada0. These "movss xmm, [120]" read ours instead.
+// The flight back has its own speed.
+const float kAnchorSpeedStock = 120.0f;
+volatile float g_anchorSpeed = kAnchorSpeedStock;
+const uint32_t kAnchorSpeedAt[kBuildCount][3] = {
+	{0xc8a0ae, 0xc8a993, 0xc8b0cc},
+	{0xc7a4ce, 0xc7adb3, 0xc7b4ec},
+	{0xc8a01e, 0xc8a903, 0xc8b03c},
+	{0xc7a05e, 0xc7a943, 0xc7b07c},
+};
 uint32_t g_grappleRangeAt = 0;
 volatile float g_grappleLimit = kGrappleStock;
 
@@ -474,6 +555,46 @@ void GrappleInstall(uint8_t* base, int build)
 		*(int32_t*)(get + 1) = (int32_t)((uint8_t*)&GrappleRange - (get + 5));
 		VirtualProtect(get, 5, old, &old);
 		FlushInstructionCache(GetCurrentProcess(), get, 5);
+	}
+
+	bool speedFound = true;
+	for (int i = 0; i < 3; i++) {
+		uint8_t* site = base + (kAnchorSpeedAt[build][i] - 0x400000);
+		const float* constant = *(const float**)site;
+		speedFound = speedFound && site[-4] == 0xf3 && site[-3] == 0x0f && site[-2] == 0x10 && !IsBadReadPtr(constant, sizeof(float)) && *constant == kAnchorSpeedStock;
+	}
+	for (int i = 0; speedFound && i < 3; i++) {
+		uint8_t* site = base + (kAnchorSpeedAt[build][i] - 0x400000);
+		if (VirtualProtect(site, 4, PAGE_EXECUTE_READWRITE, &old)) {
+			*(volatile float**)site = &g_anchorSpeed;
+			VirtualProtect(site, 4, old, &old);
+			FlushInstructionCache(GetCurrentProcess(), site, 4);
+		}
+	}
+	if (!speedFound) {
+		XLS_LOG_WARN("mods: rules: anchor launch speed not found, the Speed row has no effect.");
+	}
+
+	const FallSites& fall = kFallSites[build];
+	uint32_t fallConstant = (uint32_t)(uintptr_t)(base + (fall.constant - 0x400000));
+	uint8_t* fallEnd = base + (fall.last - 0x400000);
+	std::vector<uint8_t*> fallAt;
+	for (uint8_t* at = base + (fall.first - 0x400000); at <= fallEnd; at++) {
+		if (*(uint32_t*)at == fallConstant) {
+			fallAt.push_back(at);
+		}
+	}
+	if ((int)fallAt.size() == kFallSiteCount && *(const float*)(uintptr_t)fallConstant == kFallStock) {
+		for (uint8_t* at : fallAt) {
+			if (VirtualProtect(at, 4, PAGE_EXECUTE_READWRITE, &old)) {
+				*(volatile float**)at = &g_fallThreshold;
+				VirtualProtect(at, 4, old, &old);
+				FlushInstructionCache(GetCurrentProcess(), at, 4);
+			}
+		}
+	}
+	else {
+		XLS_LOG_WARN("mods: rules: landing check not recognised (%d sites), the Fall Stagger row has no effect.", (int)fallAt.size());
 	}
 
 	// All or none: half of them would let the hook fly past a limit the rest still enforce.
@@ -554,8 +675,18 @@ DWORD WINAPI SyncThread(LPVOID)
 			// Survival only where the lobby's match is Survival: the rules come from the create screen's last
 			// state, which a lobby set up another way (System Link, a later Battle Gauge / Points / VS match)
 			// doesn't change
-			long rule = -1, sub = -1;
-			if (r.survival && (!LobbyRule(lobby, kPropRule, &rule) || !LobbyRule(lobby, kPropSubRule, &sub) || rule > 1 || sub != kSubKills)) {
+			// The match's own rule and sub-type: the bytes the lobby's panel shows (slots +0x74, +0x75, copied from rules 0x16, 0x17
+			// when the session is made). The advertised properties don't follow them: Elimination / Kills advertised 1, 0.
+			int8_t rule = -1, sub = -1;
+			uint8_t* slots = nullptr;
+			bool known = g_ruleSlots && ReadGame(g_ruleSlots, &slots) && slots && ReadGame(slots + 0x74, &rule) && ReadGame(slots + 0x75, &sub);
+			if (r.survival && (!known || rule < 0 || rule > 1 || sub != kSubKills)) {
+				static int loggedRule = -2, loggedSub = -2;
+				if (rule != loggedRule || sub != loggedSub) {
+					loggedRule = rule;
+					loggedSub = sub;
+					XLS_LOG_INFO("mods: rules: survival dropped: the match says rule %d, sub %d.", rule, sub);
+				}
 				r.survival = false;
 				r.lives = 0;
 				r.team = false;
@@ -603,8 +734,15 @@ DWORD WINAPI SyncThread(LPVOID)
 		g_lives = r.lives;
 		HarmonizerSet(r.harmonizer);
 		g_grapple = r.grapple;
+		bool versus = g_game && *g_game && (*g_game)[0x256] != 0; // these two leave the Campaign as it is
+		g_anchorSpeed = kAnchorSpeedStock * (versus ? kGrappleScales[(r.anchorSpeed + 1) % kGrappleValues] : 1.0f);
+		g_fallThreshold = kFallStock * (versus ? kFallScales[r.fall & 3] : 1.0f);
 		g_grappleLimit = kGrappleStock * kGrappleScales[r.grapple % kGrappleValues];
 		g_stagger = r.stagger;
+		g_grenadeCount = r.grenades ? 0 : r.grenadeCount; // infinite grenades: the counts are hidden and mean nothing
+		g_grenadePickup = r.grenades ? 0 : r.grenadePickup;
+		RadarRulesSet(r.radar, r.detectPlayers, r.detectVs);
+		ResupplySet(r.quickResupply != 0);
 		g_team = r.team;
 		std::string now = Format(r);
 		if (now != logged) {
@@ -675,7 +813,6 @@ const size_t kSpawnGameAt = 0x1f; // mov ecx,[game] (8b 0d <addr>) at +0x1d
 const uint8_t kSpawnGameOp[] = {0x8b, 0x0d};
 using SpawnFn = uint32_t(__attribute__((thiscall)) *)(uint8_t*, uint32_t, void*, void*);
 SpawnFn g_spawnOriginal = nullptr;
-uint8_t** g_game = nullptr;
 using LocalSlotFn = int(__attribute__((thiscall)) *)(void*);
 LocalSlotFn g_localSlot = nullptr;
 void** g_net = nullptr;
@@ -1464,7 +1601,11 @@ void __attribute__((thiscall)) ControlUpdate(uint8_t* ctl)
 	}
 	int self = g_localIndex;
 	// each PC holds its own player; offline (training) the bots run here too
-	bool local = ctl && self >= 0 && self < 16 && ctl[kCtlSlot] == self, hold = ctl && (local || g_offline) && SlotOut(ctl[kCtlSlot]);
+	bool local = ctl && self >= 0 && self < 16 && ctl[kCtlSlot] == self;
+	// and the host runs a player match's bots
+	uint8_t* slotRecords = g_ruleSlots ? *g_ruleSlots : nullptr;
+	bool hostBot = ctl && !local && !g_offline && g_game && *g_game && (*g_game)[0x256] && slotRecords && ctl[kCtlSlot] < 16 && slotRecords[0x1b1 + ctl[kCtlSlot] * 0x7c] && Host();
+	bool hold = ctl && (local || g_offline || hostBot) && SlotOut(ctl[kCtlSlot]);
 	uint8_t was = ctl ? ctl[kCtlState] : 0;
 	if (hold && was == kStateDeath) {
 		float* timers = (float*)(ctl + kCtlDeathTimers);
@@ -1938,6 +2079,11 @@ extern "C" void __attribute__((thiscall)) MenuHelpBody(uint8_t* menu, int id)
 // Its callers keep the menu in ecx across the call, so the replacement keeps ecx and edx.
 }
 
+bool BotsInPlayerMatch()
+{
+	return g_botsInMatch;
+}
+
 BotOptions BotMenuOptions()
 {
 	return {g_botDifficulty & 3, g_botBrain != 0, g_botPersona % 6, g_botTaunts & 3};
@@ -2105,7 +2251,20 @@ uint32_t __attribute__((thiscall)) Spawn(uint8_t* spawner, uint32_t respawn, voi
 	if (second) {
 		RespawnSecondJump(true);
 	}
+	g_inSpawn++;
 	uint32_t r = g_spawnOriginal(spawner, respawn, a, b);
+	g_inSpawn--;
+	if ((respawn & 0xff) && b && g_magazine && g_grenadeCount != 0) { // the old grenade object carries over
+		auto* m = (int16_t*)((uint8_t*)b + g_magazine);
+		m[0] = m[1] = (int16_t)((g_grenadeCount - 1) * GrenadeCost(WeaponEntry((uint8_t*)b)));
+	}
+	if (uint8_t* unit = *(uint8_t**)(spawner + 0x40)) {
+		const float* at = (const float*)(unit + 0x30);
+		XLS_LOG_INFO("mods: rules: player %u unit %p id %08x at %.0f %.0f %.0f.", spawner[kCtlSlot], unit, *(uint32_t*)(unit + 0x1c), at[0], at[1], at[2]);
+	}
+	else {
+		XLS_LOG_WARN("mods: rules: player %u: no unit made.", spawner[kCtlSlot]);
+	}
 	if (respawn & 0xff) { // bug 14 (respawning with 0 grenades): the grenade object the controller handed over (+0xe0)
 		auto* g = (uint8_t*)b;
 		if (g && g_magazine) {
@@ -2123,72 +2282,32 @@ uint32_t __attribute__((thiscall)) Spawn(uint8_t* spawner, uint32_t respawn, voi
 	return r;
 }
 
-// The create-match screen (DX11 FUN_00e90180) has three tabs of rows, stepped by rules offset through the row table. It stays
-// in charge of input, mouse, values and side effects; only which rows each tab holds and what the tabs are called changes.
-// Tab 1 is always Game. Tabs 2 and 3 show two sub-menus and slide over the rest: moving past one slides the window and lands on
-// the same tab. The row table (ours for all categories, as the game reads it by rule) and the Flash's row arrays
-// (flash/sections.as) are rewritten together. Rows stay wherever they apply: a category shows a row only if it had it.
-//
-// Game's rows are kept first: the screen dims Private and Fox Hunt's Time only on tab 1, from row 2 on.
-// Survival hides the Respawn row of the Kills categories it shares and keeps the rule On.
+// The game setup screen: the create-match screen (DX11 FUN_00e90180) without its four saved slots and three tabs. The map
+// circle and ten rows stay. Rows show one page at a time (Setup below), scrolled when there are more than ten. The game
+// still steps value rows, draws them and starts the match; the row table (read only by this screen) and the Flash's row
+// list (flash/setup.as) hold the visible rows, and a nav row is a row of ours with no rule behind it.
 const int kRuleRespawn = 0x2a, kRespawnOn = 1;
-const uint32_t kMsgSettingsTab = 375; // MSG_SETTINGS_01-03
+const uint32_t kMsgSettingsTab = 375; // MSG_SETTINGS_01-03: tab 1 is the page's title, the others are blank
 uint8_t* g_rowTable = nullptr;
-uint8_t g_stockRows[16 * 0x23];
-struct Section {
-	const char* name;
-	std::vector<uint8_t> offsets;
-};
-const std::vector<Section> kSections = {
-	{"Game", {0x1b, 0x16, 0x17, 0x0e, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x1e, 0x01, 0x12, 0x13}},
-	{"General", {0x15, 0x2a, 0x20, 0x08, 0x0f, 0x02, 0x10, 0x11, 0x29}},
-	{"Rounds", {0x26}},
-	{"Player", {0x03, 0x2e, 0x04, 0x31, 0x2f, 0x36, 0x34, 0x35, 0x27, 0x28}},
-	{"Weapons", {0x05, 0x06}},
-	{"VS", {0x07}},
-};
-const int kCategories = 16;
-const uint8_t kFallbackRow = 0x12; // in every category: what an empty tab holds, as a tab can't have no rows
-const char* g_tabText[3] = {"Game", "", ""};
-int g_sectionWindow = 1; // the sub-menu on tab 2, among the current category's
-bool g_sectionsFresh = true;
-std::string g_sectionsSent;
+uint8_t g_stockRows[16 * 0x23]; // says which rules a category has
+const int kCategories = 16, kSetupRows = 10;
+const uint8_t kNavOffset = 0x37; // nothing reads it; left and right never reach the game on a nav row
+const int kNavItem = 520; // flash/setup.as: 520 + row
+std::string g_setupTitle;
+const char* g_tabText[3] = {"", "", ""};
 
-// The screen's rule pages list the categories main 3 (Akrid Egg) and main 4 (Fox Hunt) the other way round from the row table.
-int FlashCategory(int c)
-{
-	return c == 12 ? 13 : c == 13 ? 12 : c;
-}
-
-// The stock place of a rule in a category: page and row, false if it doesn't have it.
-bool StockRow(int c, uint8_t offset, int* pageOut, int* rowOut)
+bool StockRow(int c, uint8_t offset)
 {
 	const uint8_t* cat = g_stockRows + c * 0x23;
 	for (int page = 0; page < 3; page++) {
 		const uint8_t* rows = cat + 2 + page * 0xb;
 		for (int r = 0; r < rows[0] && r < 10; r++) {
 			if (rows[1 + r] == offset) {
-				*pageOut = page;
-				*rowOut = r;
 				return true;
 			}
 		}
 	}
 	return false;
-}
-
-std::vector<uint8_t> SectionRows(int c, int section, bool survival)
-{
-	std::vector<uint8_t> rows;
-	const uint8_t* cat = g_stockRows + c * 0x23;
-	int page, row;
-	for (uint8_t offset : kSections[section].offsets) {
-		bool hidden = offset == kRuleRespawn && survival && cat[0] <= 1 && cat[1] == kSubKills;
-		if (!hidden && rows.size() < 10 && StockRow(c, offset, &page, &row)) {
-			rows.push_back(offset);
-		}
-	}
-	return rows;
 }
 
 int RowCategory(const uint8_t* rules)
@@ -2202,175 +2321,1027 @@ int RowCategory(const uint8_t* rules)
 	return 0;
 }
 
-// The sub-menus a category has rows in.
-std::vector<int> ActiveSections(int c, bool survival)
+// OnlineRule's item of a rule: its label and value texts.
+int RuleItem(uint8_t offset, const uint8_t* rules)
 {
-	std::vector<int> active;
-	for (int s = 1; s < (int)kSections.size(); s++) {
-		if (!SectionRows(c, s, survival).empty()) {
-			active.push_back(s);
+	static const uint8_t kItems[][2] = {{0x0e, 4}, {0x09, 5}, {0x0a, 6}, {0x0c, 8}, {0x0b, 10}, {0x1e, 11}, {0x12, 12}, {0x13, 13},
+		{0x1b, 14}, {0x03, 15}, {0x01, 16}, {0x08, 17}, {0x0f, 18}, {0x27, 19}, {0x28, 20}, {0x04, 21}, {0x05, 22}, {0x06, 23},
+		{0x07, 24}, {0x29, 25}, {0x15, 26}, {0x2a, 27}, {0x20, 28}, {0x02, 29}, {0x26, 30}, {0x10, 31}, {0x11, 32}};
+	if (offset == 0x0d) {
+		return rules[kRuleMain] == 3 ? 9 : 7; // the egg target, or VS Annihilator's
+	}
+	for (const auto& pair : kItems) {
+		if (pair[0] == offset) {
+			return pair[1];
 		}
 	}
-	return active;
+	for (const Row& r : kRowDefs) {
+		if (r.offset == offset) {
+			return r.item;
+		}
+	}
+	return 12;
 }
 
-// Tabs 2 and 3 hold active[window - 1] and active[window]; put them, tab 1's rows and the labels in place.
-void SectionsPush(void* screen, const uint8_t* rules, bool force)
+struct Section {
+	const char* name;
+	std::vector<uint8_t> offsets;
+};
+const std::vector<Section> kSections = {
+	{"General", {0x12, 0x15, 0x13, 0x2a, 0x20, 0x08, 0x0f, 0x02, 0x10, 0x11, 0x29}},
+	{"Rounds", {0x26}},
+	{"Player", {0x03, 0x2e, 0x04, 0x36, 0x34, 0x27, 0x28}},
+	{"Weapons", {0x05, 0x06, 0x2f, 0x31}},
+	{"VS", {0x07}},
+};
+const size_t kSectionPlayer = 2, kSectionWeapons = 3; // these have a row of ours, so they're always there
+const uint8_t kScoreRows[] = {0x01, 0x0e, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x1e};
+
+enum SetupPage { kSetupTop, kSetupOptions, kSetupSection, kSetupTypes, kSetupEntries, kSetupName, kSetupBots, kSetupRadar, kSetupAnchor };
+enum SetupKind { kKindValue, kKindNav, kKindHeader, kKindOwn };
+enum SetupAction { kActNone, kActTypes, kActType, kActOptions, kActCreate, kActSection, kActDefault, kActProfile, kActBots, kActRadar, kActAnchor };
+const char* const kBotRuleKeys[] = {"bots", "botDifficulty", "botBrain", "botPersona", "botTaunts", "radar", "radarPlayers", "radarVs", "anchorRange", "anchorSpeed", "fallStagger", "grenadeCount", "grenadePickup", "quickResupply"};
+const int kBotRuleCounts[] = {2, 4, 2, 6, 4, 3, 4, 4, 13, 12, 4, 12, 11, 2};
+const char* const kRadarNames[] = {"Always On", "Near Data Post", "Hidden"};
+const char* const kDetectNames[] = {"Always Show", "Moving & Shooting", "Running & Shooting", "Shooting"};
+struct SetupRow {
+	SetupKind kind;
+	uint8_t offset;
+	SetupAction action;
+	int arg;
+	std::string label, value;
+};
+struct SetupAt {
+	int page, arg, cursor, top;
+};
+std::vector<SetupAt> g_setupStack;
+std::vector<SetupRow> g_setupRows;
+std::vector<GameProfile> g_setupProfiles;
+std::string g_setupProfile; // "" = Default
+int g_matchDesired = 0; // Players Desired, kept for the lobby: the create screen's rules are gone by then
+std::wstring g_setupName;
+bool g_setupEdited = false, g_setupOpen = false, g_setupLeaving = false;
+std::atomic<bool> g_nextIsBotMatch{false};
+bool g_setupBotMatch = false;
+int g_botsBefore = -1;
+int g_setupMouse = -1;
+
+using CreateTickFn = void(__attribute__((thiscall)) *)(uint8_t*);
+using CreateRefreshFn = void(__attribute__((thiscall)) *)(uint8_t*, int, char);
+CreateTickFn g_createTickOriginal = nullptr;
+CreateRefreshFn g_createRefresh = nullptr; // the screen's row states (Private greyed)
+CreateTickFn g_createHelp = nullptr, g_createArrows = nullptr; // the help line's text, the value arrows
+const uint32_t kCreateTick[kBuildCount] = {0xe90180, 0xe80030, 0xe90590, 0xe80550};
+const uint32_t kCreateRefresh[kBuildCount] = {0xe8f7a0, 0xe7f650, 0xe8fbb0, 0xe7fb70};
+const uint32_t kCreateHelp[kBuildCount] = {0xe8f4c0, 0xe7f370, 0xe8f8d0, 0xe7f890};
+const uint32_t kCreateArrows[kBuildCount] = {0xe8f510, 0xe7f3c0, 0xe8f920, 0xe7f8e0};
+const uint8_t kCreateTickPrologue[] = {0x83, 0xec, 0x28, 0x55, 0x8b, 0xe9}; // sub esp,0x28; push ebp; mov ebp,ecx
+const uint32_t kCreateReady = 0x3cd, kCreateState = 0x3b8, kCreateCursor = 0x3b0, kCreateSlot = 0x418, kCreateSlots = 0x3d0, kCreateTab = 0x3c0;
+const uint32_t kCreateHelpId = 0x3ca, kCreateHelpFlag = 0x3cc;
+const uint32_t kInputButtons = 800, kButtonConfirm = 1, kButtonBack = 2, kButtonSave = 4;
+const uint32_t kKeyStepUp = 0x40, kKeyStepDown = 0x80, kKeysStep = 0x100 | 0x200;
+const int kMouseRow0 = 0x1fe, kMouseSave = 1, kMouseConfirm = 2, kMouseBack = 3, kMouseValueL = 10, kMouseValueR = 11;
+const int kSoundMove = 7, kSoundConfirm = 8, kSoundBack = 9;
+
+void __attribute__((thiscall)) PushRules(void* screen, uint8_t* rules);
+
+std::string GameTypeName(int type)
 {
-	if (!g_rowTable || !g_flashCall) {
-		return;
+	const GameType& t = GameTypes()[type];
+	std::string main = MapsOnlineText(72 + t.main);
+	if (main.empty()) {
+		main = t.id; // the message file isn't loaded yet
 	}
-	bool survival = SurvivalOn(rules);
-	std::vector<int> active = ActiveSections(RowCategory(rules), survival);
-	int count = (int)active.size();
-	g_sectionWindow = std::max(1, std::min(g_sectionWindow, std::max(count - 1, 1)));
-	int tabSection[3] = {0, g_sectionWindow - 1 < count ? active[g_sectionWindow - 1] : -1,
-	                     g_sectionWindow < count ? active[g_sectionWindow] : -1};
-	char key[64];
-	sprintf(key, "%d %d %d %d", tabSection[1], tabSection[2], survival ? 1 : 0, RowCategory(rules));
-	if (!force && g_sectionsSent == key) {
-		return;
+	if (t.main >= 3) {
+		return main;
 	}
-	g_sectionsSent = key;
+	std::string sub = t.survival ? kSurvivalName : MapsOnlineText((t.main == 0 ? 79 : t.main == 1 ? 83 : 88) + t.sub);
+	return sub.empty() ? main : main + " - " + sub;
+}
+
+void SetupBuild(const uint8_t* rules)
+{
+	g_setupRows.clear();
+	g_matchDesired = rules[0x15];
+	const SetupAt& at = g_setupStack.back();
+	int c = RowCategory(rules);
+	auto valueRow = [&](uint8_t offset) { g_setupRows.push_back({kKindValue, offset, kActNone, 0, "", ""}); };
+	auto navRow = [&](SetupKind kind, SetupAction action, int arg, const std::string& label, const std::string& value) {
+		g_setupRows.push_back({kind, kNavOffset, action, arg, label, value});
+	};
+	auto hidden = [&](uint8_t offset) {
+		return (offset == kRuleRespawn && SurvivalOn(rules) && rules[kRuleSub] == kSubKills) || (offset == 0x01 && rules[kRuleMain] == 4) ||
+		       (offset == 0x31 && (rules[0x2f] & kInfiniteAmmo)); // infinite ammo: no supply to set
+	};
+	switch (at.page) {
+	case kSetupTop: {
+		g_setupTitle = "Game Setup";
+		navRow(kKindNav, kActTypes, 0, "Game Mode", GameTypeName(GameTypeOf(rules)));
+		navRow(kKindNav, kActType, GameTypeOf(rules), "Rules", (g_setupProfile.empty() ? "Default" : g_setupProfile) + (g_setupEdited ? " *" : ""));
+		valueRow(0x1b);
+		navRow(kKindNav, kActOptions, 0, "Game Options", ">");
+		navRow(kKindNav, kActCreate, 0, "Begin Match", "");
+		break;
+	}
+	case kSetupOptions:
+		g_setupTitle = "Game Options";
+		for (uint8_t offset : kScoreRows) {
+			if (StockRow(c, offset) && !hidden(offset)) {
+				valueRow(offset);
+			}
+		}
+		for (size_t s = 0; s < kSections.size(); s++) {
+			if (s == kSectionPlayer || s == kSectionWeapons) {
+				navRow(kKindNav, kActSection, (int)s, kSections[s].name, ">");
+				continue;
+			}
+			for (uint8_t offset : kSections[s].offsets) {
+				if (StockRow(c, offset) && !hidden(offset)) {
+					navRow(kKindNav, kActSection, (int)s, kSections[s].name, ">");
+					break;
+				}
+			}
+		}
+		navRow(kKindNav, kActBots, 0, "Bots", g_matchBots ? "On" : "Off");
+		navRow(kKindNav, kActRadar, 0, "Radar", kRadarNames[g_radarMode % 3]);
+		navRow(kKindNav, kActAnchor, 0, "Anchor", ">");
+		navRow(kKindOwn, kActNone, 10, "Fall Stagger", kStaggerNames[GameRulesExtras()["fallStagger"] & 3]);
+		navRow(kKindNav, kActCreate, 0, "Begin Match", "");
+		break;
+	case kSetupSection:
+		g_setupTitle = kSections[at.arg].name;
+		for (uint8_t offset : kSections[at.arg].offsets) {
+			if (StockRow(c, offset) && !hidden(offset)) {
+				valueRow(offset);
+			}
+		}
+		if ((size_t)at.arg == kSectionPlayer && !(rules[0x2f] & kInfiniteGrenades)) {
+			int count = GameRulesExtras()["grenadeCount"];
+			navRow(kKindOwn, kActNone, 11, "Grenades at Spawn", count ? std::to_string(count - 1) : "Default");
+		}
+		if ((size_t)at.arg == kSectionWeapons && !(rules[0x2f] & kInfiniteGrenades)) {
+			int pickup = GameRulesExtras()["grenadePickup"];
+			navRow(kKindOwn, kActNone, 12, "Grenade Pickups", pickup ? std::to_string(pickup) : "Default");
+		}
+		if ((size_t)at.arg == kSectionWeapons) {
+			navRow(kKindOwn, kActNone, 13, "Quick Resupply", GameRulesExtras()["quickResupply"] ? "On" : "Off");
+		}
+		break;
+	case kSetupTypes:
+		g_setupTitle = "Game Mode";
+		for (int t = 0; t < (int)GameTypes().size(); t++) {
+			navRow(kKindNav, kActType, t, GameTypeName(t), ">");
+		}
+		break;
+	case kSetupEntries:
+		g_setupTitle = GameTypeName(at.arg);
+		g_setupProfiles = GameProfiles();
+		navRow(kKindNav, kActDefault, at.arg, "Default", "");
+		for (size_t p = 0; p < g_setupProfiles.size(); p++) {
+			if (g_setupProfiles[p].type == at.arg) {
+				navRow(kKindNav, kActProfile, (int)p, g_setupProfiles[p].name, "");
+			}
+		}
+		break;
+	case kSetupBots: {
+		g_setupTitle = "Bots";
+		std::map<std::string, int>& x = GameRulesExtras();
+		std::string fill = g_matchBots ? "Fill to " + std::to_string((int)rules[0x15]) + " Players" : "Off";
+		navRow(kKindOwn, kActNone, 0, "Bots", fill);
+		navRow(kKindOwn, kActNone, 1, "Difficulty", kDifficultyNames[x[kBotRuleKeys[1]] & 3]);
+		navRow(kKindOwn, kActNone, 2, "Brain", kBrainNames[x[kBotRuleKeys[2]] & 1]);
+		navRow(kKindOwn, kActNone, 3, "Personality", kPersonaNames[x[kBotRuleKeys[3]] % 6]);
+		navRow(kKindOwn, kActNone, 4, "Taunts", kTauntNames[x[kBotRuleKeys[4]] & 3]);
+		break;
+	}
+	case kSetupRadar: {
+		g_setupTitle = "Radar";
+		std::map<std::string, int>& x = GameRulesExtras();
+		navRow(kKindOwn, kActNone, 5, "Radar", kRadarNames[x["radar"] % 3]);
+		navRow(kKindOwn, kActNone, 6, "Players Show", kDetectNames[x["radarPlayers"] % 4]);
+		navRow(kKindOwn, kActNone, 7, "VS Show", kDetectNames[x["radarVs"] % 4]);
+		break;
+	}
+	case kSetupAnchor: {
+		g_setupTitle = "Anchor";
+		std::map<std::string, int>& x = GameRulesExtras();
+		navRow(kKindOwn, kActNone, 8, "Range", kGrappleNames[x["anchorRange"] % kGrappleValues]);
+		navRow(kKindOwn, kActNone, 9, "Speed", kGrappleNames[(x["anchorSpeed"] + 1) % kGrappleValues]);
+		break;
+	}
+	case kSetupName:
+		g_setupTitle = "Save Profile";
+		navRow(kKindNav, kActNone, 0, "Profile Name", WideToUtf8(g_setupName.c_str()) + "_");
+		break;
+	}
+}
+
+// The row table: every category the same, as the rows are already filtered for the current one.
+using CreateCheckFn = char(__cdecl*)();
+CreateCheckFn g_createCheck = nullptr;
+
+void SetupWriteTable()
+{
+	const SetupAt& at = g_setupStack.back();
 	DWORD old = 0;
 	if (!VirtualProtect(g_rowTable, sizeof(g_stockRows), PAGE_READWRITE, &old)) {
 		return;
 	}
-	for (int tab = 0; tab < 3; tab++) {
-		std::string list;
-		for (int c = 0; c < kCategories; c++) {
-			std::vector<uint8_t> rows;
-			if (tabSection[tab] >= 0) {
-				rows = SectionRows(c, tabSection[tab], survival);
-			}
-			if (rows.empty()) {
-				rows.push_back(kFallbackRow);
-			}
-			uint8_t* page = g_rowTable + c * 0x23 + 2 + tab * 0xb;
-			memset(page, 0, 0xb);
-			page[0] = (uint8_t)rows.size();
-			memcpy(page + 1, rows.data(), rows.size());
-			list += (c ? ";" : "") + std::to_string(FlashCategory(c)) + ":";
-			for (size_t i = 0; i < rows.size(); i++) {
-				int p = 0, r = 0;
-				StockRow(c, rows[i], &p, &r);
-				list += (i ? "," : "") + std::to_string(p) + "." + std::to_string(r);
-			}
+	int count = std::min((int)g_setupRows.size() - at.top, kSetupRows);
+	for (int c = 0; c < kCategories; c++) {
+		uint8_t* page = g_rowTable + c * 0x23 + 2;
+		memset(page, 0, 0xb);
+		page[0] = (uint8_t)std::max(count, 0);
+		for (int r = 0; r < count; r++) {
+			page[1 + r] = g_setupRows[at.top + r].offset;
 		}
-		std::string tabNo = std::to_string(tab + 1);
-		FlashArg args[2] = {{0, 4, tabNo.c_str()}, {0, 4, list.c_str()}};
-		g_flashCall((uint8_t*)screen, 0, "lp2SectionRows", args, 2);
 	}
 	VirtualProtect(g_rowTable, sizeof(g_stockRows), old, &old);
-	for (int tab = 0; tab < 3; tab++) {
-		g_tabText[tab] = tabSection[tab] >= 0 ? kSections[tabSection[tab]].name : "";
-	}
-	FlashArg tabs[3] = {{0, 4, g_tabText[0]}, {0, 4, g_tabText[1]}, {0, 4, g_tabText[2]}};
-	g_flashCall((uint8_t*)screen, 0, "lp2SectionTabs", tabs, 3);
 }
 
-// The screen's controller, each frame. Its tab step wraps over 1-3; a step here picks the tab and window, then runs the game's
-// own "previous tab" path from the tab after, so everything a tab change does still happens.
-using CreateTickFn = void(__attribute__((thiscall)) *)(uint8_t*);
-CreateTickFn g_createTickOriginal = nullptr;
-const uint32_t kCreateTick[kBuildCount] = {0xe90180, 0xe80030, 0xe90590, 0xe80550};
-const uint8_t kCreateTickPrologue[] = {0x83, 0xec, 0x28, 0x55, 0x8b, 0xe9}; // sub esp,0x28; push ebp; mov ebp,ecx
-const uint32_t kCreateReady = 0x3cd, kCreateState = 0x3b8, kCreateCursor = 0x3b0, kCreateSlot = 0x418, kCreateSlots = 0x3d0, kCreateTab = 0x3c0;
-const uint32_t kKeyTabPrev = 0x10, kKeyTabNext = 0x20;
-const int kMouseTab0 = 0x212, kMouseTabPrev = 0x21c, kMouseTabNext = 0x21d;
+void SetupSelect(uint8_t* screen)
+{
+	SetupAt& at = g_setupStack.back();
+	*(int32_t*)(screen + kCreateCursor) = at.cursor - at.top;
+	float row = (float)(at.cursor - at.top);
+	FlashArg arg = {0, 3, nullptr};
+	memcpy(&arg.text, &row, sizeof(row));
+	g_flashCall(screen, 0, "_root.selectItem", &arg, 1);
+	if (g_createArrows && g_createHelp) {
+		g_createArrows(screen);
+		g_createHelp(screen);
+		if (g_setupRows[at.cursor].kind != kKindValue) {
+			*(int16_t*)(screen + kCreateHelpId) = 0;
+		}
+		screen[kCreateHelpFlag] = 1;
+	}
+}
+
+// Rows, title, row states and cursor of the current page.
+void SetupShow(uint8_t* screen, const uint8_t* rules)
+{
+	SetupBuild(rules);
+	SetupAt& at = g_setupStack.back();
+	at.cursor = std::max(0, std::min(at.cursor, (int)g_setupRows.size() - 1));
+	while (at.cursor < (int)g_setupRows.size() - 1 && g_setupRows[at.cursor].kind == kKindHeader) {
+		at.cursor++;
+	}
+	at.top = std::max(0, std::min(at.top, at.cursor));
+	if (at.cursor >= at.top + kSetupRows) {
+		at.top = at.cursor - kSetupRows + 1;
+	}
+	SetupWriteTable();
+	std::string items, labels, values, kinds;
+	int count = std::min((int)g_setupRows.size() - at.top, kSetupRows);
+	for (int r = 0; r < count; r++) {
+		const SetupRow& row = g_setupRows[at.top + r];
+		items += (r ? "|" : "") + std::to_string(row.kind == kKindValue ? RuleItem(row.offset, rules) : kNavItem + r);
+		labels += (r ? "|" : "") + row.label;
+		values += (r ? "|" : "") + row.value;
+		int kind = 0; // for the Flash: 1 a value row of ours, 2 can go left, 4 can go right
+		if (row.kind == kKindOwn) {
+			int value = GameRulesExtras()[kBotRuleKeys[row.arg]];
+			kind = 1 | (value > 0 ? 2 : 0) | (value < kBotRuleCounts[row.arg] - 1 ? 4 : 0);
+			if (row.arg == 0 && g_setupBotMatch) {
+				kind = 1; // a Bot Match has bots: the row shows it, no arrows
+			}
+		}
+		kinds += (r ? "|" : "") + std::to_string(kind);
+	}
+	FlashArg args[4] = {{0, 4, items.c_str()}, {0, 4, labels.c_str()}, {0, 4, values.c_str()}, {0, 4, kinds.c_str()}};
+	g_flashCall(screen, 0, "lp2SetupRows", args, 4);
+	g_tabText[0] = g_setupTitle.c_str();
+	FlashArg title = {0, 4, g_setupTitle.c_str()};
+	g_flashCall(screen, 0, "lp2SetupTitle", &title, 1);
+	if (g_createRefresh) {
+		g_createRefresh(screen, 0, 1);
+	}
+	SetupSelect(screen);
+}
+
+void SetupOpenPage(uint8_t* screen, const uint8_t* rules, int page, int arg, int cursor)
+{
+	g_setupStack.push_back({page, arg, cursor, 0});
+	SetupShow(screen, rules);
+}
+
+// Up or down one selectable row, wrapping; the window follows the cursor, and shows a header above its first row.
+void SetupMove(uint8_t* screen, const uint8_t* rules, int step)
+{
+	SetupAt& at = g_setupStack.back();
+	int count = (int)g_setupRows.size(), next = at.cursor;
+	do {
+		next = (next + step + count) % count;
+	} while (g_setupRows[next].kind == kKindHeader && next != at.cursor);
+	if (next == at.cursor) {
+		return;
+	}
+	at.cursor = next;
+	int top = at.top;
+	if (next - 1 >= 0 && g_setupRows[next - 1].kind == kKindHeader && next - 1 < top) {
+		top = next - 1;
+	}
+	top = std::min(top, next);
+	if (next >= top + kSetupRows) {
+		top = next - kSetupRows + 1;
+	}
+	MenuSound(screen, kSoundMove);
+	if (top != at.top) {
+		at.top = top;
+		SetupShow(screen, rules);
+	}
+	else {
+		SetupSelect(screen);
+	}
+}
+
+// The profile name is typed into its row: the game's window hands us its characters while the page is open. Enter and
+// Backspace also reach the game's own input as confirm and back, so those count only from a pad (the key isn't down); if a
+// key's character never arrives (nothing typed so far), the button still acts after a moment, so the page can't trap anyone.
+const size_t kNameMax = 32;
+const int kNameButtonWait = 6;
+HWND g_nameWindow = nullptr;
+WNDPROC g_nameOldProc = nullptr;
+std::mutex g_nameMutex;
+std::wstring g_nameTyped;
+bool g_nameCharSeen = false;
+int g_nameWait = 0, g_setupIdleTicks = 0;
+uint32_t g_nameWaiting = 0;
+
+LRESULT CALLBACK NameWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
+{
+	if (message == WM_CHAR) {
+		std::lock_guard<std::mutex> lock(g_nameMutex);
+		g_nameTyped += (wchar_t)wParam;
+		return 0;
+	}
+	return CallWindowProcW(g_nameOldProc, window, message, wParam, lParam);
+}
+
+void NameCaptureEnd()
+{
+	if (g_nameWindow) {
+		SetWindowLongPtrW(g_nameWindow, GWLP_WNDPROC, (LONG_PTR)g_nameOldProc);
+		g_nameWindow = nullptr;
+	}
+}
+
+void NameCaptureStart()
+{
+	NameCaptureEnd();
+	HWND window = GetForegroundWindow();
+	DWORD process = 0;
+	GetWindowThreadProcessId(window, &process);
+	if (!window || process != GetCurrentProcessId()) {
+		XLS_LOG_WARN("mods: game rules: the game's window isn't in front, no typing for the profile name.");
+		return;
+	}
+	{
+		std::lock_guard<std::mutex> lock(g_nameMutex);
+		g_nameTyped.clear();
+	}
+	g_nameOldProc = (WNDPROC)SetWindowLongPtrW(window, GWLP_WNDPROC, (LONG_PTR)&NameWindowProc);
+	g_nameWindow = g_nameOldProc ? window : nullptr;
+	g_nameCharSeen = false;
+	g_nameWaiting = 0;
+}
+
+void SetupNameOpen(uint8_t* screen, const uint8_t* rules)
+{
+	g_setupName = Utf8ToWide(g_setupProfile.c_str());
+	NameCaptureStart();
+	MenuSound(screen, kSoundConfirm);
+	SetupOpenPage(screen, rules, kSetupName, 0, 0);
+}
+
+void SetupNameClose(uint8_t* screen, uint8_t* rules, bool save)
+{
+	NameCaptureEnd();
+	g_setupIdleTicks = 4; // the key that closed it is still down
+	std::string name = WideToUtf8(g_setupName.c_str());
+	for (char& c : name) {
+		c = c == '|' ? '/' : c;
+	}
+	bool saving = save && !name.empty() && GameProfileSave(rules, name);
+	if (saving) {
+		XLS_LOG_INFO("mods: game rules: saved profile %s.", name.c_str());
+		g_setupProfile = name;
+		g_setupEdited = false;
+		GameRulesSaveCurrent(rules, g_setupProfile, g_setupEdited);
+	}
+	MenuSound(screen, save ? kSoundConfirm : kSoundBack);
+	g_setupStack.pop_back();
+	SetupShow(screen, rules);
+}
+
+// One tick of the name page.
+void SetupNameTick(uint8_t* screen, uint8_t* rules, uint32_t buttons)
+{
+	std::wstring typed;
+	{
+		std::lock_guard<std::mutex> lock(g_nameMutex);
+		typed.swap(g_nameTyped);
+	}
+	bool changed = false;
+	for (wchar_t c : typed) {
+		g_nameCharSeen = true;
+		g_nameWaiting = 0;
+		if (c == L'\r' || c == L'\n') {
+			if (!g_setupName.empty()) {
+				SetupNameClose(screen, rules, true);
+				return;
+			}
+		}
+		else if (c == 27) {
+			SetupNameClose(screen, rules, false);
+			return;
+		}
+		else if (c == 8) {
+			if (!g_setupName.empty()) {
+				g_setupName.pop_back();
+				changed = true;
+			}
+		}
+		else if (c >= 32 && g_setupName.size() < kNameMax) {
+			g_setupName += c;
+			changed = true;
+		}
+	}
+	if (changed) {
+		MenuSound(screen, kSoundMove);
+		SetupShow(screen, rules);
+	}
+	uint32_t button = buttons & (kButtonConfirm | kButtonBack);
+	if (button && !g_nameWaiting) {
+		bool key = (GetAsyncKeyState(button & kButtonConfirm ? VK_RETURN : VK_BACK) & 0x8000) != 0;
+		if (key && g_nameCharSeen) {
+			button = 0; // typing, already handled above
+		}
+		else if (key) {
+			g_nameWaiting = button; // its character may be on the way
+			g_nameWait = kNameButtonWait;
+			button = 0;
+		}
+	}
+	else if (!button && g_nameWaiting && --g_nameWait <= 0) {
+		button = g_nameWaiting;
+		g_nameWaiting = 0;
+	}
+	if (button & kButtonBack) {
+		SetupNameClose(screen, rules, false);
+	}
+	else if (button & kButtonConfirm) {
+		if (g_setupName.empty()) { // a pad can't type: the next free number
+			std::vector<GameProfile> profiles = GameProfiles();
+			for (int n = 1; n < 1000 && g_setupName.empty(); n++) {
+				std::string name = "Profile " + std::to_string(n);
+				bool used = false;
+				for (const GameProfile& p : profiles) {
+					used |= p.name == name;
+				}
+				if (!used) {
+					g_setupName = Utf8ToWide(name.c_str());
+				}
+			}
+		}
+		SetupNameClose(screen, rules, true);
+	}
+}
+
+// Runs one game tick with only these inputs, so the screen does what it would for them and nothing else.
+void SetupRunGame(uint8_t* screen, uint32_t pressed, uint32_t buttons, uint32_t clicked, int32_t mouseId)
+{
+	uint32_t& inPressed = *(uint32_t*)(*g_input + kInputPressed);
+	uint32_t& inButtons = *(uint32_t*)(*g_input + kInputButtons);
+	uint32_t& inClick = *(uint32_t*)(screen + kMenuClick);
+	int32_t& inMouse = *(int32_t*)(screen + kMenuMouse);
+	uint32_t heldPressed = inPressed, heldButtons = inButtons, heldClick = inClick;
+	int32_t heldMouse = inMouse;
+	inPressed = pressed;
+	inButtons = buttons;
+	inClick = clicked;
+	inMouse = mouseId;
+	g_createTickOriginal(screen);
+	inPressed = heldPressed;
+	inButtons = heldButtons;
+	inClick = heldClick;
+	inMouse = heldMouse;
+}
+
+// The bot rules from the rule file to where the game's bot code reads them.
+void BotRulesSync()
+{
+	std::map<std::string, int>& x = GameRulesExtras();
+	if (g_setupBotMatch) {
+		x["bots"] = 1; // loading a rules profile can't turn them off either
+	}
+	g_matchBots = x["bots"] != 0;
+	g_botDifficulty = x["botDifficulty"];
+	g_botBrain = x["botBrain"];
+	g_botPersona = x["botPersona"];
+	g_botTaunts = x["botTaunts"];
+	g_radarMode = x["radar"];
+	g_radarPlayers = x["radarPlayers"];
+	g_radarVs = x["radarVs"];
+	g_anchorRangeRule = x["anchorRange"];
+	g_anchorSpeedRule = x["anchorSpeed"];
+	g_fallRule = x["fallStagger"];
+	g_grenadeCountRule = x["grenadeCount"];
+	g_grenadePickupRule = x["grenadePickup"];
+	g_quickResupplyRule = x["quickResupply"];
+}
+
+// Keep what carries between types, take the entry's rules, tell the game.
+void SetupPick(uint8_t* screen, uint8_t* rules, const SetupRow& row)
+{
+	if (row.action == kActDefault) {
+		GameRulesDefaults(row.arg, rules);
+		g_setupProfile.clear();
+	}
+	else {
+		GameProfileApply(g_setupProfiles[row.arg], rules);
+		g_setupProfile = g_setupProfiles[row.arg].name;
+	}
+	g_setupEdited = false;
+	BotRulesSync();
+	PushRules(screen, rules);
+	GameRulesSaveCurrent(rules, g_setupProfile, g_setupEdited);
+	g_setupStack.resize(1);
+	SetupShow(screen, rules);
+}
+
+const uint32_t kCreateDialog = 0x480, kDialogResult = 0x4e8;
+
+// Begin Match without the window: what the game does when its "create match?" dialog says yes (FUN_00e90180 state 6). State 7 waits, and with
+// +0x19 = 1 the screen's FUN_00e8f5e0 makes the session. The check (FUN_00e8cb60) puts up its own error when it says no.
+void SetupBegin(uint8_t* screen)
+{
+	bool ok = g_createCheck ? g_createCheck() != 0 : true;
+	XLS_LOG_INFO("mods: game rules: begin match, check %s.", ok ? "passed" : "refused");
+	if (!ok) {
+		return;
+	}
+	*(int32_t*)(screen + 0x3bc) = *(int32_t*)(screen + kCreateState); // where a failure comes back to
+	screen[0x19] = 1;
+	*(int32_t*)(screen + kCreateState) = 7;
+	*(float*)(screen + 0x39c) = 300.0f; // the game's: 5 seconds' worth of frames
+	screen[kCreateHelpFlag] = 1;
+}
+
+void SetupConfirm(uint8_t* screen, uint8_t* rules)
+{
+	const SetupRow row = g_setupRows[g_setupStack.back().cursor];
+	switch (row.action) {
+	case kActTypes:
+		MenuSound(screen, kSoundConfirm);
+		SetupOpenPage(screen, rules, kSetupTypes, 0, GameTypeOf(rules)); // starts on what's in use
+		break;
+	case kActType: {
+		int cursor = 0;
+		g_setupProfiles = GameProfiles();
+		if (row.arg == GameTypeOf(rules) && !g_setupProfile.empty()) {
+			int n = 0;
+			for (const GameProfile& p : g_setupProfiles) {
+				if (p.type == row.arg) {
+					n++;
+					cursor = p.name == g_setupProfile ? n : cursor;
+				}
+			}
+		}
+		MenuSound(screen, kSoundConfirm);
+		SetupOpenPage(screen, rules, kSetupEntries, row.arg, cursor);
+		break;
+	}
+	case kActOptions:
+		MenuSound(screen, kSoundConfirm);
+		SetupOpenPage(screen, rules, kSetupOptions, 0, 0);
+		break;
+	case kActBots:
+		MenuSound(screen, kSoundConfirm);
+		SetupOpenPage(screen, rules, kSetupBots, 0, 0);
+		break;
+	case kActAnchor:
+		MenuSound(screen, kSoundConfirm);
+		SetupOpenPage(screen, rules, kSetupAnchor, 0, 0);
+		break;
+	case kActRadar:
+		MenuSound(screen, kSoundConfirm);
+		SetupOpenPage(screen, rules, kSetupRadar, 0, 0);
+		break;
+	case kActSection:
+		MenuSound(screen, kSoundConfirm);
+		SetupOpenPage(screen, rules, kSetupSection, row.arg, 0);
+		break;
+	case kActCreate:
+		GameRulesSaveCurrent(rules, g_setupProfile, g_setupEdited);
+		{
+			// The game's own "create match?" yes / no (FUN_00efa8e0), whose yes starts it. The window opens only if it's idle (its
+			// +0x18); if it isn't, the screen would sit waiting for an answer nobody can give, so go on as a yes would.
+			uint8_t* dialog = *(uint8_t**)(screen + kCreateDialog);
+			if (g_setupBotMatch) {
+				rules[0x13] = rules[0x12]; // every seat private: nobody finds it on the network
+			}
+			XLS_LOG_INFO("mods: game rules: begin match with rule %d, sub %d, survival byte %d, map %d (menu survival %d).", rules[kRuleMain], rules[kRuleSub], rules[kRuleSurvival], rules[0x1b], (int)g_menuSurvival.load());
+			XLS_LOG_INFO("mods: game rules: begin match, dialog state %d, result %d.", dialog ? dialog[0x18] : -1, dialog ? *(int32_t*)(dialog + kDialogResult) : -1);
+			if (dialog && dialog[0x18] != 0) {
+				MenuSound(screen, kSoundConfirm);
+				SetupBegin(screen);
+				break;
+			}
+			SetupRunGame(screen, 0, kButtonConfirm, 0, 0);
+		}
+		break;
+	case kActDefault:
+	case kActProfile:
+		MenuSound(screen, kSoundConfirm);
+		SetupPick(screen, rules, row);
+		break;
+	default:
+		break;
+	}
+}
 
 void __attribute__((thiscall)) CreateTick(uint8_t* screen)
 {
 	if (!screen[kCreateReady]) {
-		g_sectionsFresh = true;
+		g_setupOpen = false;
+		g_setupMouse = -1;
+		NameCaptureEnd();
 		g_createTickOriginal(screen);
 		return;
 	}
 	int32_t state = *(int32_t*)(screen + kCreateState);
-	if (state != 0 && state != 1) {
+	uint8_t* rules = *(uint8_t**)(screen + kCreateSlots);
+	static int32_t lastState = -1;
+	if (state != lastState) {
+		uint8_t* dialog = *(uint8_t**)(screen + kCreateDialog);
+		XLS_LOG_INFO("mods: game rules: create screen state %d -> %d (phase %d, dialog state %d, result %d).", lastState, state, screen[0x19], dialog ? dialog[0x18] : -1, dialog ? *(int32_t*)(dialog + kDialogResult) : -1);
+		lastState = state;
+	}
+	if (!g_setupOpen || (state == 0 && !g_setupLeaving)) { // a closed screen doesn't always tick before it's back
+		if (state != 0 || !rules || !*g_input) {
+			g_createTickOriginal(screen);
+			return;
+		}
+		// Open on the rows: load the file, then let the game take the first slot as if it were picked.
+		g_setupOpen = true;
+		g_setupLeaving = false;
+		g_setupStack.clear();
+		g_setupStack.push_back({kSetupTop, 0, 0, 0});
+		g_setupProfile.clear();
+		g_setupEdited = false;
+		bool loaded = GameRulesLoadCurrent(rules, &g_setupProfile, &g_setupEdited);
+		XLS_LOG_INFO("mods: game rules: setup opened, %s.", loaded ? "current.json loaded" : "no rule file yet");
+		{
+			std::map<std::string, int>& x = GameRulesExtras();
+			g_setupBotMatch = g_nextIsBotMatch;
+			g_nextIsBotMatch = false;
+			if (g_setupBotMatch) { // from the Multiplayer screen's Bot Match: bots on, this time only
+				g_botsBefore = x["bots"];
+				x["bots"] = 1;
+			}
+			else if (g_botsBefore >= 0) {
+				x["bots"] = g_botsBefore;
+				g_botsBefore = -1;
+			}
+		}
+		BotRulesSync();
+		g_botsInMatch = false;
+		*(int32_t*)(screen + kCreateCursor) = 0;
+		*(int32_t*)(screen + kCreateTab) = 1;
+		PushRules(screen, rules);
+		SetupBuild(rules);
+		SetupWriteTable();
+		SetupRunGame(screen, 0, kButtonConfirm, 0, 0);
+		SetupShow(screen, rules);
+		return;
+	}
+	if (state != 1 || !rules || !*g_input) {
 		g_createTickOriginal(screen);
 		return;
 	}
-	int slot = *(int32_t*)(screen + (state == 0 ? kCreateCursor : kCreateSlot));
-	const uint8_t* rules = *(uint8_t**)(screen + kCreateSlots + slot * 4);
-	if (!rules) {
-		g_createTickOriginal(screen);
-		return;
-	}
-	int32_t& tab = *(int32_t*)(screen + kCreateTab);
-	if (g_sectionsFresh) {
-		g_sectionsFresh = false;
-		g_sectionWindow = 1;
-		SectionsPush(screen, rules, true);
-	}
-	uint32_t& pressed = *(uint32_t*)(*g_input + kInputPressed);
-	uint32_t& click = *(uint32_t*)(screen + kMenuClick);
-	int32_t& mouse = *(int32_t*)(screen + kMenuMouse);
+	*(int32_t*)(screen + kCreateSlot) = 0;
+	SetupAt& at = g_setupStack.back();
+	uint32_t pressed = *(uint32_t*)(*g_input + kInputPressed);
+	uint32_t buttons = *(uint32_t*)(*g_input + kInputButtons);
+	uint32_t click = *(uint32_t*)(screen + kMenuClick);
+	int32_t mouse = *(int32_t*)(screen + kMenuMouse);
+	int32_t& wheel = *(int32_t*)(screen + kMenuWheel);
 	bool clicked = (click & 1) != 0;
-	int step = (pressed & kKeyTabPrev) || (clicked && mouse == kMouseTabPrev) ? -1 : (pressed & kKeyTabNext) || (clicked && mouse == kMouseTabNext) ? 1 : 0;
-	int direct = clicked && mouse >= kMouseTab0 && mouse < kMouseTab0 + 3 ? mouse - kMouseTab0 + 1 : 0;
-	if (!step && !direct) {
-		g_createTickOriginal(screen);
+	int mouseRow = mouse >= kMouseRow0 && mouse < kMouseRow0 + kSetupRows ? mouse - kMouseRow0 : -1;
+	if (at.page == kSetupName) {
+		SetupNameTick(screen, rules, buttons | ((click & 2) || (clicked && mouse == kMouseBack) ? kButtonBack : 0) | (clicked && mouse == kMouseConfirm ? kButtonConfirm : 0));
 		return;
 	}
-	int count = (int)ActiveSections(RowCategory(rules), SurvivalOn(rules)).size();
-	int window = g_sectionWindow, target = tab;
-	if (direct) {
-		target = direct == 3 && window + 1 > count ? tab : direct;
+	if (g_setupIdleTicks > 0) {
+		g_setupIdleTicks--;
+		SetupRunGame(screen, 0, 0, 0, 0);
+		return;
 	}
-	else if (step > 0) {
-		if (tab == 1) {
-			target = count ? 2 : 1;
-			window = 1;
-		}
-		else if (tab == 2) {
-			target = window + 1 <= count ? 3 : 1;
-		}
-		else if (window + 2 <= count) {
-			window++;
+	bool back = (buttons & kButtonBack) || (click & 2) || (clicked && mouse == kMouseBack);
+	bool confirm = (buttons & kButtonConfirm) || (clicked && mouse == kMouseConfirm);
+
+	if ((buttons & kButtonSave) || (clicked && mouse == kMouseSave)) {
+		SetupNameOpen(screen, rules);
+		return;
+	}
+	if (back) {
+		if (g_setupStack.size() > 1) {
+			MenuSound(screen, kSoundBack);
+			g_setupStack.pop_back();
+			SetupShow(screen, rules);
 		}
 		else {
-			target = 1;
-			window = 1;
+			g_setupLeaving = true;
+			*(int32_t*)(screen + kCreateState) = 0; // the slot list's back leaves the screen
+			SetupRunGame(screen, 0, kButtonBack, 0, 0);
 		}
-	}
-	else if (tab == 1) {
-		target = count >= 2 ? 3 : count ? 2 : 1;
-		window = std::max(count - 1, 1);
-	}
-	else if (tab == 3) {
-		target = 2;
-	}
-	else if (window > 1) {
-		window--;
-	}
-	else {
-		target = 1;
-	}
-	if (target == tab && window == g_sectionWindow) {
-		uint32_t heldPressed = pressed, heldClick = click;
-		int32_t heldMouse = mouse;
-		pressed &= ~(kKeyTabPrev | kKeyTabNext);
-		click &= ~1u;
-		mouse = 0;
-		g_createTickOriginal(screen);
-		pressed = heldPressed;
-		click = heldClick;
-		mouse = heldMouse;
 		return;
 	}
-	g_sectionWindow = window;
-	SectionsPush(screen, rules, false);
-	tab = target == 3 ? 1 : target + 1; // the game's previous-tab step lands on target
-	uint32_t heldPressed = pressed, heldClick = click;
-	int32_t heldMouse = mouse;
-	pressed = (pressed & ~kKeyTabNext) | kKeyTabPrev;
-	click &= ~1u;
-	mouse = 0;
-	g_createTickOriginal(screen);
-	pressed = heldPressed;
-	click = heldClick;
-	mouse = heldMouse;
+	// A row under the mouse takes the cursor when the mouse moves to it, not when a scroll moves the rows under it.
+	if (mouseRow >= 0 && mouse != g_setupMouse && at.top + mouseRow < (int)g_setupRows.size() && g_setupRows[at.top + mouseRow].kind != kKindHeader && at.top + mouseRow != at.cursor) {
+		at.cursor = at.top + mouseRow;
+		MenuSound(screen, kSoundMove);
+		SetupSelect(screen);
+	}
+	g_setupMouse = mouse;
+	const SetupRow& now = g_setupRows[at.cursor];
+	if (confirm || (clicked && mouseRow >= 0 && now.kind == kKindNav)) {
+		if (now.kind == kKindNav) {
+			SetupConfirm(screen, rules);
+		}
+		return;
+	}
+	if (pressed & kKeyStepUp) {
+		SetupMove(screen, rules, -1);
+		return;
+	}
+	if (pressed & kKeyStepDown) {
+		SetupMove(screen, rules, 1);
+		return;
+	}
+	if (wheel != 0) {
+		int step = wheel > 0 ? 1 : -1;
+		wheel = 0;
+		SetupMove(screen, rules, step);
+		return;
+	}
+	if (now.kind == kKindOwn) {
+		int dir = (pressed & kKeyRight) || (clicked && mouse == kMouseValueR) ? 1 : (pressed & kKeyLeft) || (clicked && mouse == kMouseValueL) ? -1 : 0;
+		if (dir && !(now.arg == 0 && g_setupBotMatch)) {
+			int& value = GameRulesExtras()[kBotRuleKeys[now.arg]];
+			int at = value + dir;
+			if (at >= 0 && at < kBotRuleCounts[now.arg]) {
+				value = at;
+				BotRulesSync();
+				g_setupEdited = true;
+				GameRulesSaveCurrent(rules, g_setupProfile, g_setupEdited);
+				MenuSound(screen, kSoundMove);
+				SetupShow(screen, rules);
+			}
+		}
+		SetupRunGame(screen, 0, 0, 0, 0);
+		return;
+	}
+	if (now.kind != kKindValue) {
+		SetupRunGame(screen, 0, 0, 0, 0);
+		return;
+	}
+	// A value row: left and right go to the game, which steps it through the row table and pushes the rules.
+	uint8_t before[0x38];
+	memcpy(before, rules, sizeof(before));
+	bool arrow = clicked && (mouse == kMouseValueL || mouse == kMouseValueR);
+	SetupRunGame(screen, pressed & kKeysStep, 0, arrow ? 1 : 0, arrow ? mouse : 0);
+	if (memcmp(before, rules, sizeof(before)) != 0) {
+		g_setupEdited |= now.offset != 0x1b && now.offset != 0x12 && now.offset != 0x13 && now.offset != 0x15;
+		GameRulesSaveCurrent(rules, g_setupProfile, g_setupEdited);
+		if (now.offset == 0x2f) {
+			SetupShow(screen, rules); // infinite ammo / grenades hide rows; they're all below this one, so the cursor stays on it
+		}
+	}
+}
+
+// Bots in player matches (Public and System Link; Ranked has its own lobby screen, uIdBattleRankLobby). Campaign co-op already
+// does this: its host marks free slots AI (FUN_00828ca0), sends the mask (message 7, FUN_01011df0) and every client marks the
+// same slots (FUN_01012710 case 7). Ours does the same just before the host's match start (FUN_00e97130).
+// The lobby wants more than one player for Start Game: its input and prompt (FUN_00e969f0, FUN_00e95470) compare the member
+// count at screen +0x5b0, recounted each tick, so with bots on they see one more than they need while they run.
+using LobbyFn = void(__attribute__((thiscall)) *)(uint8_t*, int);
+using LobbyTickFn = void(__attribute__((thiscall)) *)(uint8_t*);
+using SlotAiFn = void(__attribute__((thiscall)) *)(uint8_t*, uint32_t);
+using NetMakeFn = uint8_t*(__cdecl*)(uint32_t);
+using NetSendFn = void(__cdecl*)(uint8_t*);
+using NetFillFn = void(__attribute__((thiscall)) *)(uint8_t*, uint32_t);
+using IsHostFn = char(__attribute__((thiscall)) *)(void*);
+LobbyFn g_lobbyInputOriginal = nullptr, g_lobbyPromptOriginal = nullptr;
+LobbyTickFn g_lobbyStartOriginal = nullptr, g_lobbyLeaveOriginal = nullptr;
+SlotAiFn g_slotAi = nullptr;
+SlotAiFn g_slotAiOriginal = nullptr;
+using FactionPartFn = uint32_t (*)(int, int, int, int, int);
+FactionPartFn g_factionPart = nullptr;
+
+// In versus the game dresses an AI slot in the local player's set (DX11 FUN_00828ca0 -> FUN_0081f600), so bots wear yours, and on
+// a client they'd wear that client's. Its campaign table (FUN_00f88a30: faction, 1, member, part, 0) has whole outfits: each bot
+// gets one by a hash of the slot and lobby, the same on every machine. Codes are at slot record +0xc + part * 4.
+void __attribute__((thiscall)) SlotAiLook(uint8_t* slots, uint32_t slot)
+{
+	g_slotAiOriginal(slots, slot);
+	uint32_t s = slot & 0xff;
+	if (!g_factionPart || !g_game || !*g_game || !(*g_game)[0x256] || !(*g_game)[599] || s >= 16) {
+		return;
+	}
+	CSteamID lobby = SessionPresenceLobby();
+	uint32_t h = (s + 1) * 2654435761u ^ (lobby.IsValid() ? (uint32_t)lobby.ConvertToUint64() : 0);
+	h ^= h >> 13;
+	h *= 0x5bd1e995;
+	h ^= h >> 15;
+	int faction = 1 + (int)(h % 6), member = (int)((h >> 8) & 3);
+	auto* codes = (uint32_t*)(slots + 0x148 + s * 0x7c + 0xc);
+	for (int part = 0; part < 4; part++) {
+		codes[part] = g_factionPart(faction, 1, member, part, 0);
+	}
+	XLS_LOG_INFO("mods: bots: slot %u wears faction %d, member %d (%08x %08x %08x %08x).", s, faction, member, codes[0], codes[1], codes[2], codes[3]);
+}
+NetMakeFn g_netMake = nullptr;
+NetSendFn g_netSend = nullptr;
+NetFillFn g_netFill = nullptr;
+IsHostFn g_isHost = nullptr;
+uint8_t** g_lobbySession = nullptr;
+uint8_t** g_lobbySlots = nullptr;
+const uint32_t kLobbyMembers = 0x5b0, kLobbyPhase = 0x1a, kLobbyStep = 0x1b, kSlotsMax = 0x70, kSlotsTeams = 0x87, kSlotOccupied = 0x1ac, kSlotAi = 0x1b1, kLobbyLeaveState = 0x19;
+const uint32_t kNetMessage = 0x42000002;
+const int kNetAiMask = 7;
+
+bool LobbyWantsBots()
+{
+	return g_matchBots && g_isHost && g_lobbySession && *g_lobbySession && g_isHost(*g_lobbySession) == 1;
+}
+
+void __attribute__((thiscall)) LobbyInput(uint8_t* screen, int mode);
+void __attribute__((thiscall)) LobbyPrompt(uint8_t* screen, int mode);
+
+void LobbyBoosted(uint8_t* screen, int mode, LobbyFn original)
+{
+	int32_t& members = *(int32_t*)(screen + kLobbyMembers);
+	uint8_t* slots = g_lobbySlots ? *g_lobbySlots : nullptr;
+	int need = slots && slots[kSlotsTeams] ? 3 : 2;
+	if (!slots || members >= need || !LobbyWantsBots()) {
+		original(screen, mode);
+		return;
+	}
+	int32_t held = members;
+	members = need;
+	original(screen, mode);
+	members = held;
+}
+
+void __attribute__((thiscall)) LobbyInput(uint8_t* screen, int mode)
+{
+	LobbyBoosted(screen, mode, g_lobbyInputOriginal);
+}
+
+void __attribute__((thiscall)) LobbyPrompt(uint8_t* screen, int mode)
+{
+	LobbyBoosted(screen, mode, g_lobbyPromptOriginal);
+}
+
+// The free slots up to Players Desired become bots, on every machine. FUN_00828ca0 leaves a slot's occupied flag clear and sets
+// its AI flag, so the two counts stay apart. Starting again from the same lobby finds its bots still there.
+void BotsFill(uint8_t* slots, int desired)
+{
+	int max = slots[kSlotsMax], humans = 0, ai = 0, added = 0;
+	if (desired < 2 || desired > max) {
+		desired = max;
+	}
+	for (int i = 0; i < max; i++) {
+		humans += slots[kSlotOccupied + i * 0x7c] == 1 ? 1 : 0;
+		ai += slots[kSlotAi + i * 0x7c] ? 1 : 0;
+	}
+	for (int i = 0; i < max && humans + ai + added < desired; i++) {
+		if (slots[kSlotOccupied + i * 0x7c] != 1 && !slots[kSlotAi + i * 0x7c]) {
+			g_slotAi(slots, (uint32_t)i);
+			added++;
+		}
+	}
+	ai += added;
+	XLS_LOG_INFO("mods: bots: host start: %d humans, %d bots (%d new), want %d of %d slots.", humans, ai, added, desired, max);
+	if (!ai) {
+		return;
+	}
+	g_botsInMatch = true;
+	if (uint8_t* message = g_netMake(kNetMessage)) {
+		memset(message + 0x1b4, 0, 0x10);
+		memset(message + 0x1d0, 0, 0x20);
+		g_netFill(message, kNetAiMask);
+		g_netSend(message);
+	}
+}
+
+void __attribute__((thiscall)) LobbyStart(uint8_t* screen)
+{
+	uint8_t* slots = g_lobbySlots ? *g_lobbySlots : nullptr;
+	if (slots && screen[kLobbyPhase] == 0 && screen[kLobbyStep] == 0 && LobbyWantsBots()) {
+		BotsFill(slots, g_matchDesired);
+	}
+	g_lobbyStartOriginal(screen);
+}
+
+// Leaving the lobby (state 0 of FUN_00e98f00) the game sets the player count (game +0x254) from the members alone. A match with
+// AI counts them too, as campaign does (FUN_0089e840: humans + game +0x50188). Message 7 marked the same slots on clients.
+void __attribute__((thiscall)) LobbyLeave(uint8_t* screen)
+{
+	bool entering = screen[kLobbyLeaveState] == 0;
+	g_lobbyLeaveOriginal(screen);
+	uint8_t* slots = g_lobbySlots ? *g_lobbySlots : nullptr;
+	if (!entering || !slots || !g_game || !*g_game) {
+		return;
+	}
+	int ai = 0, humans = 0;
+	for (int i = 0; i < 16; i++) {
+		ai += slots[kSlotAi + i * 0x7c] ? 1 : 0;
+		humans += slots[kSlotOccupied + i * 0x7c] == 1 ? 1 : 0;
+	}
+	if (ai) {
+		(*g_game)[0x254] = (uint8_t)(humans + ai);
+		*(int32_t*)(*g_game + 0x50188) = ai;
+		XLS_LOG_INFO("mods: bots: match starting with %d humans and %d bots.", humans, ai);
+	}
+}
+
+// An AI slot's character (FUN_007e3320, read by the slot setup and the player create): campaign partners uHm60 on, one per slot
+// number, unless game +0x8174 is 0 or 0xd, which gets uHm27, the AI Enemy Battle's bot. Versus sets +0x8174 to the game kind, so
+// a player match asked for the partners. Bots get the bot there too.
+// Its callers count on it leaving every register but eax alone (FUN_007f2ba0 keeps "this" in edx across the call), so this is a thunk.
+extern "C" void* g_botClassOriginal = nullptr;
+
+extern "C" int BotClassVersus()
+{
+	return g_game && *g_game && (*g_game)[0x256] != 0;
+}
+
+extern "C" void __attribute__((naked)) BotClass()
+{
+	asm("push %ecx\n"
+	    "push %edx\n"
+	    "call _BotClassVersus\n"
+	    "pop %edx\n"
+	    "pop %ecx\n"
+	    "test %eax, %eax\n"
+	    "jz 1f\n"
+	    "mov $0x27, %eax\n"
+	    "ret $4\n"
+	    "1:\n"
+	    "jmp *_g_botClassOriginal\n");
+}
+
+void BotsLobbyInstall(uint8_t* base, int build)
+{
+	static const uint32_t kBotClass[kBuildCount] = {0x7e3320, 0x7d4460, 0x7e3440, 0x7d45c0};
+	static const uint8_t kBotClassPrologue[] = {0x0f, 0xb6, 0x44, 0x24, 0x04};
+	g_botClassOriginal = Detour(base + (kBotClass[build] - 0x400000), kBotClassPrologue, sizeof(kBotClassPrologue), (void*)&BotClass);
+	if (!g_botClassOriginal) {
+		XLS_LOG_WARN("mods: bots: character type code not recognised.");
+	}
+	static const uint32_t kInput[kBuildCount] = {0xe969f0, 0xe86920, 0xe96e40, 0xe86e00};
+	static const uint32_t kPrompt[kBuildCount] = {0xe95470, 0xe853a0, 0xe958c0, 0xe85880};
+	static const uint32_t kStart[kBuildCount] = {0xe97130, 0xe87060, 0xe97580, 0xe87540};
+	static const uint32_t kLeave[kBuildCount] = {0xe98f00, 0xe88e30, 0xe991b0, 0xe89310};
+	static const uint32_t kSlotAiVa[kBuildCount] = {0x828ca0, 0x819ec0, 0x828ec0, 0x819f60};
+	static const uint32_t kMake[kBuildCount] = {0x1002d70, 0xff29d0, 0x10030a0, 0xff2ce0};
+	static const uint32_t kFill[kBuildCount] = {0x1011df0, 0x1001a30, 0x10120f0, 0x1001d40};
+	static const uint32_t kSend[kBuildCount] = {0x1002d50, 0xff29a0, 0x1003080, 0xff2cc0};
+	static const uint32_t kHost[kBuildCount] = {0x802d10, 0x7f3e60, 0x802e30, 0x7f3fb0};
+	static const uint32_t kSession[kBuildCount] = {0x1852144, 0x18420a4, 0x1853144, 0x18420a4};
+	static const uint32_t kSlotsAt[kBuildCount] = {0x1852850, 0x18427b0, 0x1853850, 0x18427b0};
+	static const uint8_t kInputPrologue[] = {0x55, 0x8b, 0x6c, 0x24, 0x08, 0x56, 0x8b, 0xf1};
+	static const uint8_t kPromptPrologue[] = {0x83, 0xec, 0x64, 0x0f, 0x57, 0xc0, 0x53, 0x55, 0x56};
+	static const uint8_t kStartPrologue[] = {0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf8};
+	static const uint8_t kLeavePrologue[] = {0x56, 0x8b, 0xf1, 0x0f, 0xb6, 0x46, 0x19};
+	g_slotAi = (SlotAiFn)(base + (kSlotAiVa[build] - 0x400000));
+	static const uint32_t kFactionPart[kBuildCount] = {0xf88a30, 0xf78a90, 0xf88eb0, 0xf78dd0};
+	static const uint8_t kSlotAiPrologue[] = {0x81, 0xec, 0x84, 0x00, 0x00, 0x00};
+	g_factionPart = (FactionPartFn)(base + (kFactionPart[build] - 0x400000));
+	g_slotAiOriginal = (SlotAiFn)Detour((uint8_t*)g_slotAi, kSlotAiPrologue, sizeof(kSlotAiPrologue), (void*)&SlotAiLook);
+	if (!g_slotAiOriginal) {
+		XLS_LOG_WARN("mods: bots: AI slot setup not recognised, bots wear the host's set.");
+		g_factionPart = nullptr;
+		g_slotAiOriginal = g_slotAi;
+	}
+	g_netMake = (NetMakeFn)(base + (kMake[build] - 0x400000));
+	g_netFill = (NetFillFn)(base + (kFill[build] - 0x400000));
+	g_netSend = (NetSendFn)(base + (kSend[build] - 0x400000));
+	g_isHost = (IsHostFn)(base + (kHost[build] - 0x400000));
+	g_lobbySession = (uint8_t**)(base + (kSession[build] - 0x400000));
+	g_lobbySlots = (uint8_t**)(base + (kSlotsAt[build] - 0x400000));
+	g_ruleSlots = g_lobbySlots;
+	g_lobbyInputOriginal = (LobbyFn)Detour(base + (kInput[build] - 0x400000), kInputPrologue, sizeof(kInputPrologue), (void*)&LobbyInput);
+	g_lobbyPromptOriginal = (LobbyFn)Detour(base + (kPrompt[build] - 0x400000), kPromptPrologue, sizeof(kPromptPrologue), (void*)&LobbyPrompt);
+	g_lobbyStartOriginal = (LobbyTickFn)Detour(base + (kStart[build] - 0x400000), kStartPrologue, sizeof(kStartPrologue), (void*)&LobbyStart);
+	g_lobbyLeaveOriginal = (LobbyTickFn)Detour(base + (kLeave[build] - 0x400000), kLeavePrologue, sizeof(kLeavePrologue), (void*)&LobbyLeave);
+	if (!g_lobbyInputOriginal || !g_lobbyPromptOriginal || !g_lobbyStartOriginal || !g_lobbyLeaveOriginal) {
+		XLS_LOG_WARN("mods: bots: lobby code not recognised: input %d, prompt %d, start %d, leave %d.", g_lobbyInputOriginal != nullptr,
+		             g_lobbyPromptOriginal != nullptr, g_lobbyStartOriginal != nullptr, g_lobbyLeaveOriginal != nullptr);
+	}
 }
 
 using PushRulesFn = void(__attribute__((thiscall)) *)(void*, uint8_t*);
@@ -2410,11 +3381,6 @@ void __attribute__((thiscall)) PushRules(void* screen, uint8_t* rules)
 		rules[kRuleKillTarget] = kKillTargetInfinite;
 		rules[kRuleRespawn] = kRespawnOn;
 	}
-	bool opening = !((uint8_t*)screen)[kCreateReady]; // a new movie: its row arrays are stock again, whatever was sent before
-	if (opening) {
-		g_sectionWindow = 1;
-	}
-	SectionsPush(screen, rules, opening);
 	g_menuLives = kLives[rules[kRuleLives]];
 	g_setNumber(screen, kDataNoKillShown, SurvivalOn(rules) ? kKillTargets + rules[kRuleLives] : rules[kRuleKillTarget]);
 	int sub = rules[kRuleSub];
@@ -2449,7 +3415,6 @@ bool PatchRowTable(uint8_t* table)
 
 using SetupFn = void(__attribute__((thiscall)) *)(uint8_t*, uint32_t);
 SetupFn g_setupOriginal = nullptr;
-uint32_t g_dataAt = 0;
 uintptr_t g_transfer = 0;
 const uint8_t kSetupPrologue[] = {0x56, 0x8b, 0xf1, 0x8b, 0x0d}; // push esi; mov esi,ecx; mov ecx,[game] (9 bytes copied)
 const size_t kSetupCopy = 9;
@@ -2459,10 +3424,71 @@ std::mutex g_supplyMutex;
 std::map<uint8_t*, int16_t> g_startOriginal; // data entry -> its original start total
 std::map<uint8_t*, std::pair<int, int>> g_pickupScale; // weapon -> new / original start total
 
+// Grenade counts. A grenade's data entries hold its start total (+0x30), magazine (+0x32) and cap (+0x34). The refill at a
+// respawn (DX11 FUN_00c3fa20) reads the start; a pickup is refused at the cap (uWp1b::vf124) and clamped to it. So the entries
+// keep the spawn count and the 10 cap while either rule is on, and a weapon set up outside a spawn (a grenade of another kind
+// picked up) starts with the pickup count just for that one setup. The originals come back when the rules are off.
+struct GrenadeEntry {
+	int16_t start, magazine, cap;
+};
+std::map<uint8_t*, GrenadeEntry> g_grenadeOriginal;
+const int16_t kGrenadeMost = 10;
+
+void GrenadeSetup(uint8_t* weapon, uint32_t arg)
+{
+	int count = g_grenadeCount, pickup = g_grenadePickup;
+	uint8_t* data = *(uint8_t**)(weapon + g_dataAt);
+	if (!data || (!count && !pickup && g_grenadeOriginal.empty())) {
+		g_setupOriginal(weapon, arg);
+		return;
+	}
+	std::lock_guard<std::mutex> lock(g_supplyMutex);
+	bool spawn = g_inSpawn != 0, on = count || pickup;
+	int16_t want[kDataEntries], keep[kDataEntries];
+	for (int k = 0; k < kDataEntries; k++) {
+		uint8_t* e = data + k * kDataEntry;
+		auto* fields = (int16_t*)(e + 0x30);
+		auto it = g_grenadeOriginal.find(e);
+		if (it == g_grenadeOriginal.end()) {
+			it = g_grenadeOriginal.emplace(e, GrenadeEntry{fields[0], fields[1], fields[2]}).first;
+		}
+		const GrenadeEntry& o = it->second;
+		int cost = GrenadeCost(e);
+		keep[k] = count ? (int16_t)((count - 1) * cost) : o.start;
+		want[k] = !spawn && pickup ? (int16_t)(pickup * cost) : !spawn ? o.start : keep[k];
+		fields[0] = want[k];
+		fields[1] = on ? (int16_t)(kGrenadeMost * cost) : o.magazine;
+		fields[2] = on ? (int16_t)(kGrenadeMost * cost) : o.cap;
+	}
+	g_setupOriginal(weapon, arg);
+	int16_t total = *(int16_t*)(weapon + g_magazine + 2);
+	const uint8_t* entry = WeaponEntry(weapon);
+	int took = entry >= data && entry < data + kDataEntries * kDataEntry ? (int)((entry - data) / kDataEntry) : 0;
+	static int logged = 0;
+	if (on && logged < 24) {
+		logged++;
+		const GrenadeEntry& o = g_grenadeOriginal[data + took * kDataEntry];
+		XLS_LOG_INFO("mods: rules: grenade setup: kind 0x%02x, spawn %d, entry %d, cost %d, stock start %d magazine %d cap %d, want %d, took %d.", weapon[0x1e], spawn, took, GrenadeCost(data + took * kDataEntry), o.start, o.magazine, o.cap, want[took], total);
+	}
+	// Only a spawn's weapon is forced. The game sets a weapon up again after its spawn (on another thread, so not "in a spawn"),
+	// which leaves its total alone; a new weapon outside a spawn already took want[] from its entry.
+	if (on && spawn && count != 0) {
+		auto* m = (int16_t*)(weapon + g_magazine);
+		m[0] = m[1] = want[took];
+	}
+	for (int k = 0; k < kDataEntries; k++) {
+		*(int16_t*)(data + k * kDataEntry + 0x30) = keep[k];
+	}
+}
+
 void __attribute__((thiscall)) Setup(uint8_t* weapon, uint32_t arg)
 {
-	if (!weapon || Grenade(weapon)) {
+	if (!weapon) {
 		g_setupOriginal(weapon, arg);
+		return;
+	}
+	if (Grenade(weapon)) {
+		GrenadeSetup(weapon, arg);
 		return;
 	}
 	int magazines = g_supply;
@@ -2501,6 +3527,9 @@ void __attribute__((thiscall)) Setup(uint8_t* weapon, uint32_t arg)
 
 uint32_t __attribute__((thiscall)) AddAmmo(uint8_t* weapon, int16_t delta)
 {
+	if (delta > 0 && weapon && g_grenadePickup != 0 && Grenade(weapon) && (uintptr_t)__builtin_return_address(0) != g_transfer) {
+		delta = (int16_t)(g_grenadePickup * GrenadeCost(WeaponEntry(weapon)));
+	}
 	// not ammo moved over from a picked-up weapon: that was given (and scaled) already
 	if (delta > 0 && weapon && g_supply != 0 && !Grenade(weapon) && (uintptr_t)__builtin_return_address(0) != g_transfer) {
 		std::lock_guard<std::mutex> lock(g_supplyMutex);
@@ -2653,13 +3682,21 @@ void RulesInstall(unsigned char* base)
 	}
 	GrappleInstall(base, build);
 	StaggerInstall(base, build);
+	RadarInstall(base, build);
+	ResupplyInstall(base, build);
 	g_pushRulesOriginal = (PushRulesFn)Detour(base + (kRulesVas[build].pushRules - 0x400000), kPushRulesPrologue, sizeof(kPushRulesPrologue), (void*)&PushRules);
 	if (g_pushRulesOriginal) {
 		PatchRowTable(base + (kRulesVas[build].rowTable - 0x400000));
 		g_createTickOriginal = (CreateTickFn)Detour(base + (kCreateTick[build] - 0x400000), kCreateTickPrologue, sizeof(kCreateTickPrologue), (void*)&CreateTick);
+		g_createRefresh = (CreateRefreshFn)(base + (kCreateRefresh[build] - 0x400000));
+		g_createHelp = (CreateTickFn)(base + (kCreateHelp[build] - 0x400000));
+		g_createArrows = (CreateTickFn)(base + (kCreateArrows[build] - 0x400000));
+		static const uint32_t kCreateCheck[kBuildCount] = {0xe8cb60, 0xe7cad0, 0xe9c950, 0xe8cab0};
+		g_createCheck = (CreateCheckFn)(base + (kCreateCheck[build] - 0x400000));
 		if (!g_createTickOriginal) {
-			XLS_LOG_WARN("mods: rules: create-match screen code not recognised, stock tabs.");
+			XLS_LOG_WARN("mods: rules: create-match screen code not recognised, the stock screen stays.");
 		}
+		BotsLobbyInstall(base, build);
 	}
 	uint8_t* setup = base + (kRulesVas[build].setup - 0x400000);
 	if (memcmp(setup, kSetupPrologue, sizeof(kSetupPrologue)) == 0) {
@@ -2934,8 +3971,21 @@ const char* RulesBattleMessage(uint32_t id)
 	return g_eliminatedText && (int)id == g_eliminatedId ? g_eliminatedText : nullptr;
 }
 
+void RulesNextCreateIsBotMatch()
+{
+	g_nextIsBotMatch = true;
+}
+
 const char* RulesMessage(uint32_t id)
 {
+	if (id == 0x105 && g_setupOpen) { // state 1's prompt, in order: 0x1a3 (W), 0x105 (Enter), 0x101 (Back)
+		static bool logged = false;
+		if (!logged) {
+			logged = true;
+			XLS_LOG_INFO("mods: game rules: prompt 0x105 was \"%s\", 0x1a3 is \"%s\".", MapsOnlineText(0x105).c_str(), MapsOnlineText(0x1a3).c_str());
+		}
+		return "<PD_DECIDE>Select"; // Enter opens the row; Begin Match starts the match. The tag is the button icon
+	}
 	if (id >= kMsgSettingsTab && id < kMsgSettingsTab + 3 && g_createTickOriginal) {
 		return g_tabText[id - kMsgSettingsTab]; // the tab clips read their labels again on each frame
 	}
@@ -2948,7 +3998,7 @@ const char* RulesMessage(uint32_t id)
 	if (id >= (uint32_t)kMsgSupply && id < (uint32_t)(kMsgSupply + kSupplyValues)) {
 		return kSupplyNames[id - kMsgSupply];
 	}
-	if (id >= (uint32_t)kMsgGrapple && id < (uint32_t)(kMsgGrapple + kGrappleValues)) {
+	if (id >= (uint32_t)kMsgGrapple && id < (uint32_t)(kMsgGrapple + 6)) {
 		return kGrappleNames[id - kMsgGrapple];
 	}
 	if (id >= (uint32_t)kMsgStagger && id < (uint32_t)(kMsgStagger + kStaggerValues)) {
@@ -3135,7 +4185,7 @@ bool FlashAddRootScript(std::vector<uint8_t>* gfx, const std::vector<uint8_t>& s
 bool RulesPatchMenuFlash(std::vector<uint8_t>* gfx)
 {
 	return InsertRootScript(gfx, RowsScript(), "create-match rows") &&
-	       InsertRootScript(gfx, Bytes(std::begin(kSectionsScript), std::end(kSectionsScript)), "create-match sub-menus");
+	       InsertRootScript(gfx, Bytes(std::begin(kSetupScript), std::end(kSetupScript)), "game setup");
 }
 
 bool RulesPatchTrainingFlash(std::vector<uint8_t>* gfx)
