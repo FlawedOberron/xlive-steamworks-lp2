@@ -1,7 +1,7 @@
 // Bot brains (lp2-tools/notes/bot-match-plan.md). Battle bots (uHm26 and its variants) bind their plan, the
 // rThinkPlanAI "tool\AI\Think\HumanBotBt" (autoArc\uHm6d.arc), as each one spawns: uHm26::vf41 -> the
 // character spec's think setter (DX9 FUN_00f7f0f0, thiscall(spec, path): resource manager get + spec->unit
-// +0xfc). With an overlay of uHm6d.arc in Mods (lp2-tools lp2brain.py builds one) we hand it the brain for the
+// +0xfc). The DLL adds our brains to that archive as the game opens it (BotsBuildBrains, from brains.h; an overlay of uHm6d.arc in Mods that has its own wins, lp2-tools lp2brain.py builds one) and we hand it the brain for the
 // match's game type instead: HumanBotBt_<mode>, mode from the game's kind byte (game +0x8174, the same
 // value the game picks its InitPos / ObjSet "-<Mode>-" files by):
 //   1-3 elim (Elimination), 4-7 and 9 team (team battles, VS, Counter), 8 post (Post Grab),
@@ -26,6 +26,8 @@
 // the brain (Improved = ours, Stock), one archetype for every bot or a mix, a difficulty that scales the traits
 // (attacker, quickness, grenade, impatient up; calm down) and how often taunts may come.
 #include "mods/lp2.h"
+#include "mods/brains.h"
+#include "mods/package.h"
 #include "mods/parts.h"
 
 #include "core/log.h"
@@ -131,6 +133,60 @@ int GameKind()
 {
 	uint8_t* game = *(uint8_t**)At(g_vas->game);
 	return game ? game[kGameKind] : -1;
+}
+
+uint32_t BrainCrc(const Bytes& data)
+{
+	uint32_t crc = 0xffffffffu;
+	for (uint8_t b : data) {
+		crc ^= b;
+		for (int i = 0; i < 8; i++) {
+			crc = crc >> 1 ^ (0xedb88320u & (0u - (crc & 1)));
+		}
+	}
+	return ~crc;
+}
+
+// The embedded brains are edits against the player's own stock file (lp2brain.py --header): varint (length << 1 | copy),
+// then a varint offset into the stock file, or that many new bytes.
+bool BrainApply(const Bytes& stock, const EmbeddedBrain& brain, Bytes* out)
+{
+	const uint8_t* p = brain.ops;
+	const uint8_t* end = p + brain.opsSize;
+	auto varint = [&](uint32_t* v) {
+		*v = 0;
+		for (int shift = 0; p < end && shift < 35; shift += 7) {
+			uint8_t b = *p++;
+			*v |= (uint32_t)(b & 0x7f) << shift;
+			if (b < 0x80) {
+				return true;
+			}
+		}
+		return false;
+	};
+	out->clear();
+	out->reserve(brain.size);
+	while (p < end) {
+		uint32_t n, at;
+		if (!varint(&n)) {
+			return false;
+		}
+		const uint32_t length = n >> 1;
+		if (n & 1) {
+			if (!varint(&at) || at > stock.size() || length > stock.size() - at) {
+				return false;
+			}
+			out->insert(out->end(), stock.begin() + at, stock.begin() + at + length);
+		}
+		else {
+			if (length > (size_t)(end - p)) {
+				return false;
+			}
+			out->insert(out->end(), p, p + length);
+			p += length;
+		}
+	}
+	return out->size() == brain.size && BrainCrc(*out) == brain.crc;
 }
 
 uint32_t __attribute__((thiscall)) ThinkSet(void* spec, const char* path)
@@ -243,6 +299,36 @@ float __attribute__((thiscall)) EvalParam(uint8_t* eval, uint8_t* unit, void* b,
 
 }
 
+bool BotsBuildBrains(std::vector<ArcEntry>* entries)
+{
+	const ArcEntry* stock = nullptr;
+	for (const ArcEntry& e : *entries) {
+		if (_stricmp(e.name.c_str(), kStockBrain) == 0) {
+			stock = &e;
+		}
+		else if (e.name.size() > strlen(kStockBrain) && _strnicmp(e.name.c_str(), kStockBrain, strlen(kStockBrain)) == 0) {
+			XLS_LOG_INFO("mods: bots: uHm6d.arc already has its own brains, using those.");
+			return false;
+		}
+	}
+	if (!stock || stock->data.size() != kBrainStockSize || BrainCrc(stock->data) != kBrainStockCrc) {
+		XLS_LOG_WARN("mods: bots: the stock brain isn't the one the Improved brains were made from: Stock brains only.");
+		return false;
+	}
+	std::vector<ArcEntry> add;
+	for (const EmbeddedBrain& brain : kEmbeddedBrains) {
+		ArcEntry e = *stock;
+		e.name = std::string(kStockBrain) + "_" + brain.mode;
+		if (!BrainApply(stock->data, brain, &e.data)) {
+			XLS_LOG_WARN("mods: bots: embedded brain %s failed its check: Stock brains only.", brain.mode);
+			return false;
+		}
+		add.push_back(std::move(e));
+	}
+	entries->insert(entries->end(), add.begin(), add.end());
+	return true;
+}
+
 void BotsInstall(unsigned char* base)
 {
 	g_base = base;
@@ -262,13 +348,12 @@ void BotsInstall(unsigned char* base)
 		XLS_LOG_WARN("mods: bots: functions not recognised, bot brains not changed.");
 		return;
 	}
-	g_brains = OverlayRedirect(ExeDirectory() + L"nativePC\\arcLp2Xml\\autoArc\\uHm6d.arc") != nullptr;
+	g_brains = true; // built when the game opens uHm6d.arc (BotsBuildBrains), or an overlay's; a missing one falls back to stock in ThinkSet
 	g_thinkOriginal = (ThinkSetFn)Detour(At(g_vas->thinkSet), kThinkPrologue, sizeof(kThinkPrologue), (void*)&ThinkSet);
 	g_filterOriginal = (FilterFn)Detour(At(g_vas->filterWeapon), kFilterPrologue, sizeof(kFilterPrologue), (void*)&FilterWeapon);
 	g_evalOriginal = (EvalFn)Detour(At(g_vas->evalParam), kEvalPrologue, sizeof(kEvalPrologue), (void*)&EvalParam);
 	g_seed = GetTickCount();
-	XLS_LOG_INFO("mods: bots: installed (%s), per-mode brains %s.", BuildName((int)(g_vas - kBotVas)),
-	             g_brains ? "on (uHm6d.arc overlaid)" : "off (no uHm6d.arc overlay)");
+	XLS_LOG_INFO("mods: bots: installed (%s).", BuildName((int)(g_vas - kBotVas)));
 }
 
 }

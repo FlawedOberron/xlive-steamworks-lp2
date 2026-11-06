@@ -16,7 +16,7 @@ function lp2BotInstall(m)
    while(i <= 5)
    {
       mm["mc_txtMenu" + i]._y = (i - 3) * 50;
-      m.mainRotationArray[i - 1] = (i - 3) * 16;
+      m.mainRotationArray[i - 1] = (3 - i) * 16; // the top row has the largest angle (stock: 24, 8, -8, -24)
       i++;
    }
    var t = mm.mc_txtMenu5;

@@ -19,7 +19,7 @@ function lp2BotRow(n, label, value)
 function lp2BotOrder(order)
 {
    var items = order.split(",");
-   var k = 2;
+   var k = 0; // the game's own rows (0 Game Type, 1 Map) scroll off too
    while(k <= lp2Last)
    {
       lp2Bot["mc_member" + k]._visible = false;

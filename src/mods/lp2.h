@@ -115,6 +115,8 @@ bool TitlePatchFlash(std::vector<uint8_t>* gfx);
 // Adds the Network entry's texts to message\msgPC\MsgOption, every language (netmenu.cpp).
 bool NetMenuPatchMessages(std::vector<uint8_t>* file);
 void NetMenuInstall(unsigned char* base);
+struct ArcEntry;
+bool BotsBuildBrains(std::vector<ArcEntry>* entries);
 void BotMatchInstall(unsigned char* base);
 void BotMatchLogSlots();
 bool BotMatchPatchFlash(std::vector<uint8_t>* gfx);

@@ -1381,6 +1381,14 @@ bool PackagesMapFile(const std::wstring& rel, std::wstring* out)
 	return false;
 }
 
+// The Improved bot brains (bots.cpp BotsBuildBrains), from the player's own uHm6d.arc. An overlay that already has them wins.
+bool GenerateBrains(const std::wstring& source, const std::wstring& out)
+{
+	Bytes file;
+	std::vector<ArcEntry> entries;
+	return ReadWholeFile(source, &file) && ArcRead(file, &entries) && BotsBuildBrains(&entries) && WriteWholeFile(out, ArcWrite(entries));
+}
+
 const std::wstring* PackagesGenerated(const std::wstring& rel, const std::wstring& source)
 {
 	PackagesLoad();
@@ -1391,7 +1399,8 @@ const std::wstring* PackagesGenerated(const std::wstring& rel, const std::wstrin
 	                                       L"nativepc\\arclp2xml\\id_title.arc", L"nativepc\\arclp2xml\\id_title_multi.arc",
 	                                       L"nativepc\\arclp2xml\\id_title_pc.arc", L"nativepc\\arcxmltmppc\\aoption.arc"};
 	bool names = rel.compare(0, prefix.size(), prefix) == 0 && rel.size() >= 7 && rel.compare(rel.size() - 7, 7, L"_pc.arc") == 0;
-	if (!names && std::find(std::begin(creates), std::end(creates), rel) == std::end(creates)) {
+	bool brains = rel == L"nativepc\\arclp2xml\\autoarc\\uhm6d.arc"; // the bots' stock brain: ours go next to it
+	if (!names && !brains && std::find(std::begin(creates), std::end(creates), rel) == std::end(creates)) {
 		return nullptr;
 	}
 	int generation = g_generation;
@@ -1402,8 +1411,8 @@ const std::wstring* PackagesGenerated(const std::wstring& rel, const std::wstrin
 		return it->second.empty() ? nullptr : &it->second; // entries are never erased: pointers stay valid
 	}
 	std::wstring out = Cfg().modCacheDir + FormatW(L"generated\\g%d_", generation) + rel.substr(rel.find_last_of(L'\\') + 1);
-	if (names ? GenerateNames(source, out) : GenerateMenus(source, out)) {
-		XLS_LOG_INFO("mods: maps: %s added to %ls.", names ? "names" : "menu rows", rel.c_str());
+	if (names ? GenerateNames(source, out) : brains ? GenerateBrains(source, out) : GenerateMenus(source, out)) {
+		XLS_LOG_INFO("mods: maps: %s added to %ls.", names ? "names" : brains ? "bot brains" : "menu rows", rel.c_str());
 		return &(g_generated[key] = out);
 	}
 	g_generated[key] = L"";

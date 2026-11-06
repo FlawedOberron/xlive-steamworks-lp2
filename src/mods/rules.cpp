@@ -1671,7 +1671,7 @@ const int kRowBots = 4, kRowDifficulty = 5, kRowBrain = 6, kRowPersona = 7, kRow
 const int kRowsMax = kRowLast + 1;
 // Up to 9 rows: the screen shows a window of kRowsVisible of them that scrolls with the cursor (g_botScroll = the
 // first shown row's index in screen order).
-const int kRowsVisible = 6;
+const int kRowsVisible = 5; // with 6 the last row could not be brought fully into view (user test)
 int g_botScroll = 0;
 int BotRowsShown(uint8_t* menu, int* rows)
 {
