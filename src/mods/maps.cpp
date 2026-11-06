@@ -571,6 +571,11 @@ const char* BrowsedName(uint32_t slot)
 
 const char* __attribute__((thiscall)) Message(void* messages, const char* file, uint32_t id, uint32_t lang)
 {
+	if (file && strcmp(file, "MsgBattle") == 0) {
+		if (const char* text = RulesBattleMessage(id)) {
+			return text;
+		}
+	}
 	if (file && strcmp(file, "MsgOnline") == 0 && RulesMessageAlias(id) != id) {
 		return g_messageOriginal(messages, file, RulesMessageAlias(id), lang);
 	}

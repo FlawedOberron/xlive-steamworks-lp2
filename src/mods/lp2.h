@@ -100,6 +100,7 @@ float ScriptValue(int sid, int setting, float base);
 // was ours), answers our MsgOnline texts, adds the rows to the menu's Flash (id221 GFx).
 int RulesStep(int rule, int key, uint8_t* value, const std::function<int()>& original); // -1 not ours, 0 unchanged, 1 changed, 2 changed by original (sound made)
 const char* RulesMessage(uint32_t id);
+const char* RulesBattleMessage(uint32_t id); // MsgBattle: the Eliminated text while a battle message is being formatted, else null
 int RulesSlotOf(const uint8_t* character); // the match slot whose body it is, -1 none (AI, akrid)
 int RulesLocalSlot();                      // the local player's match slot, -1 not known
 unsigned char* RulesBody(int slot);        // the slot's character (on foot or its VS), null none

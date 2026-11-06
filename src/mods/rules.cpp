@@ -2,7 +2,7 @@
 #include "mods/package.h"
 #include "mods/parts.h"
 #include "mods/flash/botrows.h"
-#include "mods/flash/survrows.h"
+#include "mods/flash/sections.h"
 
 #include "api/xsession.h"
 #include "core/config.h"
@@ -13,6 +13,7 @@
 #include "core/utils.h"
 
 #include <windows.h>
+#include <vector>
 
 #include <algorithm>
 #include <stdint.h>
@@ -758,6 +759,62 @@ int TeamDeaths(int team)
 		deaths += SlotTeam(slot) == team ? SlotDeaths(slot) : 0;
 	}
 	return deaths;
+}
+
+// Survival: the battle messages say Eliminated for a death with no respawn behind it. The game counts the death before
+// it raises the message, and only the template differs, so this runs on the PC showing the message and needs nothing
+// synced. The formatter asks the message lookup for the template; maps.cpp's hook on it gives ours for that one call
+// (RulesBattleMessage; a function can only carry one detour).
+struct EliminatedText {
+	int id;
+	const char* text;
+};
+const EliminatedText kEliminatedTexts[] = {
+	{0, "Eliminated\n<$DeadPlayerName>"},
+	{1, "Eliminated\n<$DeadPlayerName> (VS)"},
+	{2, "Eliminated by\n<$KillPlayerName>"},
+	{3, "Eliminated by\n<$KillPlayerName> (VS)"},
+	{4, "Self-Eliminated"},
+	{14, "Self-Eliminated"},
+	{45, "<$KillPlayerName> eliminated\n<$DeadPlayerName>"},
+	{46, "<$KillPlayerName> eliminated\n<$DeadPlayerName> (VS)"},
+	{47, "<$KillPlayerName> (VS) eliminated\n<$DeadPlayerName>"},
+	{48, "<$KillPlayerName> (VS) eliminated\n<$DeadPlayerName> (VS)"},
+	{49, "<$DeadPlayerName>\nself-eliminated"},
+	{60, "<$DeadPlayerName>\nself-eliminated"},
+};
+const uint32_t kBattleFormat[kBuildCount] = {0x8b06b0, 0x8a1000, 0x8b0a30, 0x8a1260};
+// push ebx; push esi; mov esi,[esp+0xc]; mov ebx,ecx
+const uint8_t kBattleFormatPrologue[] = {0x53, 0x56, 0x8b, 0x74, 0x24, 0x0c, 0x8b, 0xd9};
+typedef void(__attribute__((thiscall)) * BattleFormatFn)(void* self, char* out, int id, uint8_t* data);
+BattleFormatFn g_battleFormatOriginal = nullptr;
+const char* g_eliminatedText = nullptr;
+int g_eliminatedId = -1;
+
+// The death in a message's data had no respawn behind it: the type at +0x20 is 0 for a player, the slot follows.
+bool MessageEliminates(const uint8_t* data)
+{
+	if (!g_survival || g_lives <= 0 || !data || *(const int32_t*)(data + 0x20) != 0) {
+		return false;
+	}
+	int slot = *(const int32_t*)(data + 0x24);
+	if (slot < 0 || slot >= 16) {
+		return false;
+	}
+	return g_team ? TeamDeaths(SlotTeam(slot)) >= g_lives : SlotDeaths(slot) >= g_lives;
+}
+
+void __attribute__((thiscall)) BattleFormat(void* self, char* out, int id, uint8_t* data)
+{
+	for (const EliminatedText& t : kEliminatedTexts) {
+		if (t.id == id && MessageEliminates(data)) {
+			g_eliminatedId = id;
+			g_eliminatedText = t.text;
+			break;
+		}
+	}
+	g_battleFormatOriginal(self, out, id, data);
+	g_eliminatedText = nullptr;
 }
 
 // A slot worth watching: in play, alive (state 0), not out and, in Team Survival, on our team.
@@ -2066,41 +2123,254 @@ uint32_t __attribute__((thiscall)) Spawn(uint8_t* spawner, uint32_t respawn, voi
 	return r;
 }
 
-// Survival hides the stock Respawn row (rules 0x2a, Settings 3 row 1 after Start Count) of the Kills
-// categories it shares and keeps the rule On: the row table here, the Flash's rows through
-// _root.lp2SurvivalRows (flash/survrows.as).
-const int kRuleRespawn = 0x2a, kRespawnOn = 1, kRespawnRow = 1;
+// The create-match screen (DX11 FUN_00e90180) has three tabs of rows, stepped by rules offset through the row table. It stays
+// in charge of input, mouse, values and side effects; only which rows each tab holds and what the tabs are called changes.
+// Tab 1 is always Game. Tabs 2 and 3 show two sub-menus and slide over the rest: moving past one slides the window and lands on
+// the same tab. The row table (ours for all categories, as the game reads it by rule) and the Flash's row arrays
+// (flash/sections.as) are rewritten together. Rows stay wherever they apply: a category shows a row only if it had it.
+//
+// Game's rows are kept first: the screen dims Private and Fox Hunt's Time only on tab 1, from row 2 on.
+// Survival hides the Respawn row of the Kills categories it shares and keeps the rule On.
+const int kRuleRespawn = 0x2a, kRespawnOn = 1;
+const uint32_t kMsgSettingsTab = 375; // MSG_SETTINGS_01-03
 uint8_t* g_rowTable = nullptr;
+uint8_t g_stockRows[16 * 0x23];
+struct Section {
+	const char* name;
+	std::vector<uint8_t> offsets;
+};
+const std::vector<Section> kSections = {
+	{"Game", {0x1b, 0x16, 0x17, 0x0e, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x1e, 0x01, 0x12, 0x13}},
+	{"General", {0x15, 0x2a, 0x20, 0x08, 0x0f, 0x02, 0x10, 0x11, 0x29}},
+	{"Rounds", {0x26}},
+	{"Player", {0x03, 0x2e, 0x04, 0x31, 0x2f, 0x36, 0x34, 0x35, 0x27, 0x28}},
+	{"Weapons", {0x05, 0x06}},
+	{"VS", {0x07}},
+};
+const int kCategories = 16;
+const uint8_t kFallbackRow = 0x12; // in every category: what an empty tab holds, as a tab can't have no rows
+const char* g_tabText[3] = {"Game", "", ""};
+int g_sectionWindow = 1; // the sub-menu on tab 2, among the current category's
+bool g_sectionsFresh = true;
+std::string g_sectionsSent;
 
-void SurvivalRows(void* screen, bool on)
+// The screen's rule pages list the categories main 3 (Akrid Egg) and main 4 (Fox Hunt) the other way round from the row table.
+int FlashCategory(int c)
 {
-	if (g_rowTable) {
-		DWORD old = 0;
-		if (VirtualProtect(g_rowTable, 16 * 0x23, PAGE_READWRITE, &old)) {
-			for (int c = 0; c < kRowCategories && g_rowTable[c * 0x23] != 0xff; c++) {
-				uint8_t* cat = g_rowTable + c * 0x23;
-				uint8_t* page = cat + 2 + kPageSettings3 * 0xb;
-				if (cat[0] > 1 || cat[1] != kSubKills || page[0] < kRespawnRow) {
-					continue;
-				}
-				bool shown = page[1 + kRespawnRow] == kRuleRespawn;
-				if (on && shown) {
-					memmove(page + 1 + kRespawnRow, page + 2 + kRespawnRow, page[0] - kRespawnRow - 1);
-					page[page[0]--] = 0;
-				}
-				else if (!on && !shown && page[0] < 10) {
-					memmove(page + 2 + kRespawnRow, page + 1 + kRespawnRow, page[0] - kRespawnRow);
-					page[1 + kRespawnRow] = kRuleRespawn;
-					page[0]++;
-				}
+	return c == 12 ? 13 : c == 13 ? 12 : c;
+}
+
+// The stock place of a rule in a category: page and row, false if it doesn't have it.
+bool StockRow(int c, uint8_t offset, int* pageOut, int* rowOut)
+{
+	const uint8_t* cat = g_stockRows + c * 0x23;
+	for (int page = 0; page < 3; page++) {
+		const uint8_t* rows = cat + 2 + page * 0xb;
+		for (int r = 0; r < rows[0] && r < 10; r++) {
+			if (rows[1 + r] == offset) {
+				*pageOut = page;
+				*rowOut = r;
+				return true;
 			}
-			VirtualProtect(g_rowTable, 16 * 0x23, old, &old);
 		}
 	}
-	FlashArg arg = {0, 4, on ? "1" : "0"};
-	if (g_flashCall) {
-		g_flashCall((uint8_t*)screen, 0, "lp2SurvivalRows", &arg, 1);
+	return false;
+}
+
+std::vector<uint8_t> SectionRows(int c, int section, bool survival)
+{
+	std::vector<uint8_t> rows;
+	const uint8_t* cat = g_stockRows + c * 0x23;
+	int page, row;
+	for (uint8_t offset : kSections[section].offsets) {
+		bool hidden = offset == kRuleRespawn && survival && cat[0] <= 1 && cat[1] == kSubKills;
+		if (!hidden && rows.size() < 10 && StockRow(c, offset, &page, &row)) {
+			rows.push_back(offset);
+		}
 	}
+	return rows;
+}
+
+int RowCategory(const uint8_t* rules)
+{
+	for (int c = 0; c < kCategories; c++) {
+		const uint8_t* cat = g_stockRows + c * 0x23;
+		if (cat[0] == rules[kRuleMain] && (rules[kRuleMain] >= 3 || cat[1] == rules[kRuleSub])) {
+			return c;
+		}
+	}
+	return 0;
+}
+
+// The sub-menus a category has rows in.
+std::vector<int> ActiveSections(int c, bool survival)
+{
+	std::vector<int> active;
+	for (int s = 1; s < (int)kSections.size(); s++) {
+		if (!SectionRows(c, s, survival).empty()) {
+			active.push_back(s);
+		}
+	}
+	return active;
+}
+
+// Tabs 2 and 3 hold active[window - 1] and active[window]; put them, tab 1's rows and the labels in place.
+void SectionsPush(void* screen, const uint8_t* rules, bool force)
+{
+	if (!g_rowTable || !g_flashCall) {
+		return;
+	}
+	bool survival = SurvivalOn(rules);
+	std::vector<int> active = ActiveSections(RowCategory(rules), survival);
+	int count = (int)active.size();
+	g_sectionWindow = std::max(1, std::min(g_sectionWindow, std::max(count - 1, 1)));
+	int tabSection[3] = {0, g_sectionWindow - 1 < count ? active[g_sectionWindow - 1] : -1,
+	                     g_sectionWindow < count ? active[g_sectionWindow] : -1};
+	char key[64];
+	sprintf(key, "%d %d %d %d", tabSection[1], tabSection[2], survival ? 1 : 0, RowCategory(rules));
+	if (!force && g_sectionsSent == key) {
+		return;
+	}
+	g_sectionsSent = key;
+	DWORD old = 0;
+	if (!VirtualProtect(g_rowTable, sizeof(g_stockRows), PAGE_READWRITE, &old)) {
+		return;
+	}
+	for (int tab = 0; tab < 3; tab++) {
+		std::string list;
+		for (int c = 0; c < kCategories; c++) {
+			std::vector<uint8_t> rows;
+			if (tabSection[tab] >= 0) {
+				rows = SectionRows(c, tabSection[tab], survival);
+			}
+			if (rows.empty()) {
+				rows.push_back(kFallbackRow);
+			}
+			uint8_t* page = g_rowTable + c * 0x23 + 2 + tab * 0xb;
+			memset(page, 0, 0xb);
+			page[0] = (uint8_t)rows.size();
+			memcpy(page + 1, rows.data(), rows.size());
+			list += (c ? ";" : "") + std::to_string(FlashCategory(c)) + ":";
+			for (size_t i = 0; i < rows.size(); i++) {
+				int p = 0, r = 0;
+				StockRow(c, rows[i], &p, &r);
+				list += (i ? "," : "") + std::to_string(p) + "." + std::to_string(r);
+			}
+		}
+		std::string tabNo = std::to_string(tab + 1);
+		FlashArg args[2] = {{0, 4, tabNo.c_str()}, {0, 4, list.c_str()}};
+		g_flashCall((uint8_t*)screen, 0, "lp2SectionRows", args, 2);
+	}
+	VirtualProtect(g_rowTable, sizeof(g_stockRows), old, &old);
+	for (int tab = 0; tab < 3; tab++) {
+		g_tabText[tab] = tabSection[tab] >= 0 ? kSections[tabSection[tab]].name : "";
+	}
+	FlashArg tabs[3] = {{0, 4, g_tabText[0]}, {0, 4, g_tabText[1]}, {0, 4, g_tabText[2]}};
+	g_flashCall((uint8_t*)screen, 0, "lp2SectionTabs", tabs, 3);
+}
+
+// The screen's controller, each frame. Its tab step wraps over 1-3; a step here picks the tab and window, then runs the game's
+// own "previous tab" path from the tab after, so everything a tab change does still happens.
+using CreateTickFn = void(__attribute__((thiscall)) *)(uint8_t*);
+CreateTickFn g_createTickOriginal = nullptr;
+const uint32_t kCreateTick[kBuildCount] = {0xe90180, 0xe80030, 0xe90590, 0xe80550};
+const uint8_t kCreateTickPrologue[] = {0x83, 0xec, 0x28, 0x55, 0x8b, 0xe9}; // sub esp,0x28; push ebp; mov ebp,ecx
+const uint32_t kCreateReady = 0x3cd, kCreateState = 0x3b8, kCreateCursor = 0x3b0, kCreateSlot = 0x418, kCreateSlots = 0x3d0, kCreateTab = 0x3c0;
+const uint32_t kKeyTabPrev = 0x10, kKeyTabNext = 0x20;
+const int kMouseTab0 = 0x212, kMouseTabPrev = 0x21c, kMouseTabNext = 0x21d;
+
+void __attribute__((thiscall)) CreateTick(uint8_t* screen)
+{
+	if (!screen[kCreateReady]) {
+		g_sectionsFresh = true;
+		g_createTickOriginal(screen);
+		return;
+	}
+	int32_t state = *(int32_t*)(screen + kCreateState);
+	if (state != 0 && state != 1) {
+		g_createTickOriginal(screen);
+		return;
+	}
+	int slot = *(int32_t*)(screen + (state == 0 ? kCreateCursor : kCreateSlot));
+	const uint8_t* rules = *(uint8_t**)(screen + kCreateSlots + slot * 4);
+	if (!rules) {
+		g_createTickOriginal(screen);
+		return;
+	}
+	int32_t& tab = *(int32_t*)(screen + kCreateTab);
+	if (g_sectionsFresh) {
+		g_sectionsFresh = false;
+		g_sectionWindow = 1;
+		SectionsPush(screen, rules, true);
+	}
+	uint32_t& pressed = *(uint32_t*)(*g_input + kInputPressed);
+	uint32_t& click = *(uint32_t*)(screen + kMenuClick);
+	int32_t& mouse = *(int32_t*)(screen + kMenuMouse);
+	bool clicked = (click & 1) != 0;
+	int step = (pressed & kKeyTabPrev) || (clicked && mouse == kMouseTabPrev) ? -1 : (pressed & kKeyTabNext) || (clicked && mouse == kMouseTabNext) ? 1 : 0;
+	int direct = clicked && mouse >= kMouseTab0 && mouse < kMouseTab0 + 3 ? mouse - kMouseTab0 + 1 : 0;
+	if (!step && !direct) {
+		g_createTickOriginal(screen);
+		return;
+	}
+	int count = (int)ActiveSections(RowCategory(rules), SurvivalOn(rules)).size();
+	int window = g_sectionWindow, target = tab;
+	if (direct) {
+		target = direct == 3 && window + 1 > count ? tab : direct;
+	}
+	else if (step > 0) {
+		if (tab == 1) {
+			target = count ? 2 : 1;
+			window = 1;
+		}
+		else if (tab == 2) {
+			target = window + 1 <= count ? 3 : 1;
+		}
+		else if (window + 2 <= count) {
+			window++;
+		}
+		else {
+			target = 1;
+			window = 1;
+		}
+	}
+	else if (tab == 1) {
+		target = count >= 2 ? 3 : count ? 2 : 1;
+		window = std::max(count - 1, 1);
+	}
+	else if (tab == 3) {
+		target = 2;
+	}
+	else if (window > 1) {
+		window--;
+	}
+	else {
+		target = 1;
+	}
+	if (target == tab && window == g_sectionWindow) {
+		uint32_t heldPressed = pressed, heldClick = click;
+		int32_t heldMouse = mouse;
+		pressed &= ~(kKeyTabPrev | kKeyTabNext);
+		click &= ~1u;
+		mouse = 0;
+		g_createTickOriginal(screen);
+		pressed = heldPressed;
+		click = heldClick;
+		mouse = heldMouse;
+		return;
+	}
+	g_sectionWindow = window;
+	SectionsPush(screen, rules, false);
+	tab = target == 3 ? 1 : target + 1; // the game's previous-tab step lands on target
+	uint32_t heldPressed = pressed, heldClick = click;
+	int32_t heldMouse = mouse;
+	pressed = (pressed & ~kKeyTabNext) | kKeyTabPrev;
+	click &= ~1u;
+	mouse = 0;
+	g_createTickOriginal(screen);
+	pressed = heldPressed;
+	click = heldClick;
+	mouse = heldMouse;
 }
 
 using PushRulesFn = void(__attribute__((thiscall)) *)(void*, uint8_t*);
@@ -2140,7 +2410,11 @@ void __attribute__((thiscall)) PushRules(void* screen, uint8_t* rules)
 		rules[kRuleKillTarget] = kKillTargetInfinite;
 		rules[kRuleRespawn] = kRespawnOn;
 	}
-	SurvivalRows(screen, SurvivalOn(rules));
+	bool opening = !((uint8_t*)screen)[kCreateReady]; // a new movie: its row arrays are stock again, whatever was sent before
+	if (opening) {
+		g_sectionWindow = 1;
+	}
+	SectionsPush(screen, rules, opening);
 	g_menuLives = kLives[rules[kRuleLives]];
 	g_setNumber(screen, kDataNoKillShown, SurvivalOn(rules) ? kKillTargets + rules[kRuleLives] : rules[kRuleKillTarget]);
 	int sub = rules[kRuleSub];
@@ -2167,6 +2441,7 @@ bool PatchRowTable(uint8_t* table)
 		}
 		patched++;
 	}
+	memcpy(g_stockRows, table, sizeof(g_stockRows));
 	VirtualProtect(table, 16 * 0x23, old, &old);
 	XLS_LOG_INFO("mods: rules: %d create-match categories got the rule rows.", patched);
 	return patched > 0;
@@ -2352,6 +2627,10 @@ void RulesInstall(unsigned char* base)
 		XLS_LOG_WARN("mods: rules: add-ammo code not recognised, unlimited ammo / grenades unavailable.");
 		return;
 	}
+	g_battleFormatOriginal = (BattleFormatFn)Detour(base + (kBattleFormat[build] - 0x400000), kBattleFormatPrologue, sizeof(kBattleFormatPrologue), (void*)&BattleFormat);
+	if (!g_battleFormatOriginal) {
+		XLS_LOG_WARN("mods: rules: battle message code not recognised, no Eliminated messages.");
+	}
 	g_magazine = kRulesVas[build].magazine;
 	g_addAmmoOriginal = (AddAmmoFn)Detour(base + (kRulesVas[build].addAmmo - 0x400000), kAddAmmoPrologue, sizeof(kAddAmmoPrologue), (void*)&AddAmmo);
 	g_reserveOriginal = (ReserveFn)Detour(base + (kRulesVas[build].reserve - 0x400000), kReservePrologue, sizeof(kReservePrologue), (void*)&Reserve);
@@ -2377,6 +2656,10 @@ void RulesInstall(unsigned char* base)
 	g_pushRulesOriginal = (PushRulesFn)Detour(base + (kRulesVas[build].pushRules - 0x400000), kPushRulesPrologue, sizeof(kPushRulesPrologue), (void*)&PushRules);
 	if (g_pushRulesOriginal) {
 		PatchRowTable(base + (kRulesVas[build].rowTable - 0x400000));
+		g_createTickOriginal = (CreateTickFn)Detour(base + (kCreateTick[build] - 0x400000), kCreateTickPrologue, sizeof(kCreateTickPrologue), (void*)&CreateTick);
+		if (!g_createTickOriginal) {
+			XLS_LOG_WARN("mods: rules: create-match screen code not recognised, stock tabs.");
+		}
 	}
 	uint8_t* setup = base + (kRulesVas[build].setup - 0x400000);
 	if (memcmp(setup, kSetupPrologue, sizeof(kSetupPrologue)) == 0) {
@@ -2646,8 +2929,16 @@ int RulesLocalSlot()
 	return g_localIndex;
 }
 
+const char* RulesBattleMessage(uint32_t id)
+{
+	return g_eliminatedText && (int)id == g_eliminatedId ? g_eliminatedText : nullptr;
+}
+
 const char* RulesMessage(uint32_t id)
 {
+	if (id >= kMsgSettingsTab && id < kMsgSettingsTab + 3 && g_createTickOriginal) {
+		return g_tabText[id - kMsgSettingsTab]; // the tab clips read their labels again on each frame
+	}
 	if (id >= (uint32_t)kMsgSecondary && id < (uint32_t)(kMsgSecondary + kSecondaryValues)) {
 		return kSecondaryNames[id - kMsgSecondary];
 	}
@@ -2844,7 +3135,7 @@ bool FlashAddRootScript(std::vector<uint8_t>* gfx, const std::vector<uint8_t>& s
 bool RulesPatchMenuFlash(std::vector<uint8_t>* gfx)
 {
 	return InsertRootScript(gfx, RowsScript(), "create-match rows") &&
-	       InsertRootScript(gfx, Bytes(std::begin(kSurvRowsScript), std::end(kSurvRowsScript)), "Survival rows");
+	       InsertRootScript(gfx, Bytes(std::begin(kSectionsScript), std::end(kSectionsScript)), "create-match sub-menus");
 }
 
 bool RulesPatchTrainingFlash(std::vector<uint8_t>* gfx)
