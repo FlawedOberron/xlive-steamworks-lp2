@@ -1,10 +1,12 @@
 #include "mods/lp2.h"
+#include "mods/package.h"
 #include "mods/packages.h"
 
 #include "api/xsession.h"
 #include "core/json.h"
 #include "core/log.h"
 #include "core/steam.h"
+#include "core/utils.h"
 
 #include <windows.h>
 
@@ -1613,6 +1615,66 @@ DWORD WINAPI SyncThread(LPVOID)
 
 // ---------------------------------------------------------------- game modes: the API (lp2.h)
 
+// A mode package: GameModes\<name>.zip (lp2mode.py --package, the editor's save) with mode.json (manifest: name, format,
+// graph, settings, requires, content) and the compiled mode (mode.json "graph", mode.lp2mode). Found by file name, else by
+// the manifest's name (case-insensitive). Later: the manifest's content (pickups, weapons, vehicles, nativePC files).
+bool ModeFromPackage(const std::string& dir, const std::string& name, std::string* file, std::string* text)
+{
+	auto widen = [](const std::string& t) { // the game folder and mode.txt are ANSI, as fopen reads them
+		std::wstring w(t.size() + 1, L'\0');
+		w.resize(MultiByteToWideChar(CP_ACP, 0, t.c_str(), (int)t.size(), &w[0], (int)w.size()));
+		return w;
+	};
+	auto lower = [](std::string t) {
+		for (char& c : t) {
+			c = (char)tolower((unsigned char)c);
+		}
+		return t;
+	};
+	std::wstring wdir = widen(dir) + L"GameModes\\";
+	std::vector<std::wstring> zips;
+	std::wstring direct = wdir + widen(name) + L".zip";
+	if (GetFileAttributesW(direct.c_str()) != INVALID_FILE_ATTRIBUTES) {
+		zips.push_back(direct);
+	}
+	WIN32_FIND_DATAW fd;
+	HANDLE h = FindFirstFileW((wdir + L"*.zip").c_str(), &fd);
+	if (h != INVALID_HANDLE_VALUE) {
+		do {
+			if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && wdir + fd.cFileName != direct) {
+				zips.push_back(wdir + fd.cFileName);
+			}
+		} while (FindNextFileW(h, &fd));
+		FindClose(h);
+	}
+	for (size_t i = 0; i < zips.size(); i++) {
+		Zip zip;
+		Bytes data;
+		const ZipEntry* m = zip.Open(zips[i]) ? zip.Find("mode.json") : nullptr;
+		Json manifest;
+		if (!m || !zip.Read(*m, &data) || !Json::Parse(std::string(data.begin(), data.end()), manifest, nullptr)) {
+			if (i == 0 && zips[0] == direct) {
+				XLS_LOG_WARN("mods: mode: %ls isn't a mode package (no readable mode.json).", zips[i].c_str());
+			}
+			continue;
+		}
+		if (zips[i] != direct && lower(manifest["name"].GetString("")) != lower(name)) {
+			continue;
+		}
+		std::string graph = manifest["graph"].GetString("mode.lp2mode");
+		const ZipEntry* g = zip.Find(graph);
+		if (!g || !zip.Read(*g, &data)) {
+			XLS_LOG_WARN("mods: mode: %ls has no %s.", zips[i].c_str(), graph.c_str());
+			continue;
+		}
+		text->assign(data.begin(), data.end());
+		*file = WideToUtf8(zips[i].c_str());
+		XLS_LOG_INFO("mods: mode: package %ls (format %d).", zips[i].c_str(), (int)manifest["format"].GetInt(0));
+		return true;
+	}
+	return false;
+}
+
 void ModeLoad()
 {
 	// mode.txt in the game folder: the mode's name (Modes\<name>.lp2mode), then "setting = value" lines
@@ -1670,14 +1732,17 @@ void ModeLoad()
 		g_modeName.clear();
 		return;
 	}
-	std::string file = dir + "Modes\\" + name + ".lp2mode", text;
-	if (FILE* f = fopen(file.c_str(), "rb")) {
-		char buf[65536];
-		size_t got;
-		while ((got = fread(buf, 1, sizeof buf, f)) > 0) {
-			text.append(buf, got);
+	std::string file, text;
+	if (!ModeFromPackage(dir, name, &file, &text)) {
+		file = dir + "Modes\\" + name + ".lp2mode";
+		if (FILE* f = fopen(file.c_str(), "rb")) {
+			char buf[65536];
+			size_t got;
+			while ((got = fread(buf, 1, sizeof buf, f)) > 0) {
+				text.append(buf, got);
+			}
+			fclose(f);
 		}
-		fclose(f);
 	}
 	Json root;
 	std::string error;
