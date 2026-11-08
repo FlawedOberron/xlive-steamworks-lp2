@@ -2,6 +2,7 @@
 #include "mods/packages.h"
 
 #include "api/xsession.h"
+#include "core/json.h"
 #include "core/log.h"
 #include "core/steam.h"
 
@@ -53,7 +54,7 @@ namespace {
 const int kMaxVolumes = 256;
 const int kSteps = 1000;             // nodes one pulse chain may run through (for each: lists of 16 players)
 const int kChannel = 0x10002;        // after net.cpp's control (0x10000) and transfer.cpp's (0x10001)
-enum : uint8_t { kTrigger = 1, kState = 2, kVitals = 3, kAct = 4, kSpawn = 5 };
+enum : uint8_t { kTrigger = 1, kState = 2, kVitals = 3, kAct = 4, kSpawn = 5, kMode = 6 };
 const int kSlots = 16;
 
 struct Delay {
@@ -125,6 +126,32 @@ CharacterVitals g_self;              // a player: its own, to report
 int g_selfSlot = -1;
 std::deque<Act> g_local, g_send;     // actions to apply here (on the slot's character update) / to send (host)
 std::deque<Spawn> g_spawnHere, g_spawnSend; // spawns to make here (on any character update) / to send (host)
+
+// Game modes (<game>\Modes\<name>.lp2mode "compiled", picked by mode.txt): a second graph, run by the host (offline:
+// here) on the game thread (ModeFrame). Its holds / eliminations / releases / texts go to the players as kMode messages.
+enum : uint8_t { kModeHold = 0, kModeElim = 1, kModeRelease = 2, kModeText = 3, kModeMasks = 4 };
+State* g_mode = nullptr;              // under g_lock
+std::string g_modeName;
+std::vector<ScriptMarker> g_mapMarkers; // the map's script markers (a mode's markers too)
+struct ModeEv {
+	int kind, a, b;
+};
+std::mutex g_modeEvLock;
+std::vector<ModeEv> g_modeEvents;
+int g_modeDeaths[kSlots] = {};        // this round
+int g_modeLives = 0;                  // respawn rules: deaths allowed per round (0: no limit)
+bool g_modeManual = false;            // respawn rules: back only by Spawn player
+struct ModeEnd {
+	bool pending = false, match = false, team = false;
+	int side = -1;                    // a slot or a team; -1 by score
+};
+ModeEnd g_modeEnd;
+double g_modeLastFrame = 0.0;
+std::deque<std::vector<uint8_t>> g_modeSend; // under g_lock: messages for the players
+template <typename T>
+void Put(std::vector<uint8_t>* m, T v);
+template <typename T>
+bool Take(const uint8_t*& p, const uint8_t* end, T* v);
 
 double Now()
 {
@@ -457,7 +484,13 @@ std::string Format(const State& s, const std::string& text)
 			char buf[64];
 			int slot = PlayerIn(s, var);
 			if (Kind(s, var) == kVarPlayer) {
-				snprintf(buf, sizeof(buf), slot >= 0 ? "player %d" : "nobody", slot + 1);
+				std::string name = slot >= 0 ? LivesName(slot) : std::string();
+				if (!name.empty()) {
+					snprintf(buf, sizeof(buf), "%s", name.c_str());
+				}
+				else {
+					snprintf(buf, sizeof(buf), slot >= 0 ? "player %d" : "nobody", slot + 1);
+				}
 			}
 			else if (Kind(s, var) == kVarList || Kind(s, var) == kVarMarkers) {
 				snprintf(buf, sizeof(buf), Kind(s, var) == kVarList ? "%u player(s)" : "%u marker(s)", var < (int)s.lists.size() ? (unsigned)s.lists[var].size() : 0u);
@@ -489,6 +522,59 @@ std::string Format(const State& s, const std::string& text)
 }
 
 void Fire(State& s, int node, int in, double now);
+
+// ---------------------------------------------------------------- game modes
+
+void ModeSendSlot(uint8_t op, int slot, const float* pos = nullptr, float yaw = NAN)
+{
+	std::vector<uint8_t> m;
+	Put<uint8_t>(&m, kMode);
+	Put<uint8_t>(&m, op);
+	Put<uint8_t>(&m, (uint8_t)slot);
+	Put<uint8_t>(&m, pos ? 1 : 0);
+	for (int i = 0; i < 3; i++) {
+		Put<float>(&m, pos ? pos[i] : 0.0f);
+	}
+	Put<float>(&m, yaw);
+	g_modeSend.push_back(std::move(m));
+}
+
+// showTo 0 everyone, 1 the slot, 2 the team
+void ModeShowHere(const std::string& text, int style, uint32_t rgb, float seconds, int showTo, int who)
+{
+	int self = RulesLocalSlot();
+	bool here = showTo == 0 || (showTo == 1 && who == self) || (showTo == 2 && self >= 0 && RulesTeamOf(self) == who);
+	if (here) {
+		LivesMessage(text.c_str(), style, rgb, seconds > 0.0f ? seconds : 3.0f);
+	}
+}
+
+void ModeText(const std::string& text, int style, uint32_t rgb, float seconds, int showTo, int who)
+{
+	ModeShowHere(text, style, rgb, seconds, showTo, who);
+	std::vector<uint8_t> m;
+	Put<uint8_t>(&m, kMode);
+	Put<uint8_t>(&m, kModeText);
+	Put<uint8_t>(&m, (uint8_t)style);
+	Put<uint32_t>(&m, rgb);
+	Put<float>(&m, seconds);
+	Put<uint8_t>(&m, (uint8_t)showTo);
+	Put<int8_t>(&m, (int8_t)who);
+	Put<uint16_t>(&m, (uint16_t)std::min<size_t>(text.size(), 400));
+	m.insert(m.end(), text.begin(), text.begin() + std::min<size_t>(text.size(), 400));
+	g_modeSend.push_back(std::move(m));
+}
+
+void ModeHold(int slot, bool eliminate)
+{
+	if (eliminate) {
+		RulesEliminate(slot, true);
+	}
+	else {
+		RulesHold(slot, true);
+	}
+	ModeSendSlot(eliminate ? kModeElim : kModeHold, slot);
+}
 
 void Out(State& s, int node, int port, double now)
 {
@@ -804,6 +890,137 @@ void Fire(State& s, int node, int in, double now)
 		Out(s, node, 0, now);
 		break;
 	}
+	case kModeMatchStart:
+	case kModeRoundStart:
+	case kModeRoundEnd:
+	case kModeWorldUpdate:
+	case kModeOnKill:
+	case kModeOnDeath:
+	case kModeOnSpawn:
+		Out(s, node, 0, now);   // events: ModeDispatch fires them
+		break;
+	case kModeSpawnPlayer: {
+		int slot = PlayerIn(s, n.player), k = MarkerIn(s, n.marker);
+		if (slot < 0 || !RulesInPlay(slot)) {
+			Out(s, node, 1, now);
+			break;
+		}
+		float pos[3], yaw = NAN;
+		const float* at = nullptr;
+		if (k >= 0) {
+			MarkerPoint(s.graph.markers[k], n.random, pos);
+			yaw = n.face ? s.graph.markers[k].yaw : NAN;
+			at = pos;
+		}
+		RulesEliminate(slot, false);
+		RulesRelease(slot, at, yaw);
+		ModeSendSlot(kModeRelease, slot, at, yaw);
+		Out(s, node, 0, now);
+		break;
+	}
+	case kModeHoldPlayer:
+	case kModeEliminate: {
+		int slot = PlayerIn(s, n.player);
+		if (slot >= 0) {
+			ModeHold(slot, n.type == kModeEliminate);
+		}
+		Out(s, node, 0, now);
+		break;
+	}
+	case kModeRespawnRules:
+		g_modeManual = n.manual;
+		g_modeLives = std::max(0, (int)lrintf(Get(s, n.b)));
+		XLS_LOG_INFO("mods: mode: respawns %s, %d li%s a round.", g_modeManual ? "only by Spawn player" : "automatic", g_modeLives,
+		             g_modeLives == 1 ? "fe" : "ves");
+		Out(s, node, 0, now);
+		break;
+	case kModeQueue: {
+		std::vector<int>* q = ListIn(s, n.list);
+		int slot = PlayerIn(s, n.player);
+		bool empty = false;
+		if (q) {
+			auto it = std::find(q->begin(), q->end(), slot);
+			if ((in == 0 || in == 1) && slot >= 0 && it == q->end()) {
+				q->insert(in == 0 ? q->end() : q->begin(), slot);
+			}
+			else if (in == 2) {
+				empty = q->empty();
+				SetVar(s, n.player, empty ? -1.0f : (float)q->front());
+				if (!empty) {
+					q->erase(q->begin());
+				}
+			}
+			else if (in == 3 && it != q->end()) {
+				q->erase(it);
+			}
+			else if (in == 4) {
+				q->clear();
+			}
+		}
+		Out(s, node, empty ? 1 : 0, now);
+		break;
+	}
+	case kModeScore: {
+		static bool told = false;
+		if (!told) {
+			told = true;
+			XLS_LOG_INFO("mods: mode: the Score node does nothing yet.");
+		}
+		Out(s, node, 0, now);
+		break;
+	}
+	case kModePlayerInfo: {
+		int slot = PlayerIn(s, n.player);
+		float v = 0.0f;
+		if (slot >= 0) {
+			v = n.info == 0 ? (float)RulesTeamOf(slot) : n.info == 3 ? (float)g_modeDeaths[slot]
+				: n.info == 4 ? (g_modeLives > 0 ? (float)std::max(0, g_modeLives - g_modeDeaths[slot]) : -1.0f) : 0.0f;
+		}
+		SetVar(s, n.var, v);
+		Out(s, node, 0, now);
+		break;
+	}
+	case kModeTeamList: {
+		std::vector<int>* q = ListIn(s, n.list);
+		int slot = PlayerIn(s, n.player), team = slot >= 0 ? RulesTeamOf(slot) : -1;
+		if (q) {
+			q->clear();
+			for (int k = 0; k < kSlots; k++) {
+				if (RulesInPlay(k) && (!RulesTeams() || slot < 0 || RulesTeamOf(k) == team) && (!n.alive || !RulesHeld(k))) {
+					q->push_back(k);
+				}
+			}
+		}
+		Out(s, node, 0, now);
+		break;
+	}
+	case kModeEndRound:
+	case kModeEndMatch: {
+		if (!g_modeEnd.pending) {
+			int slot = PlayerIn(s, n.player);
+			ModeEnd e;
+			e.pending = true;
+			e.match = n.type == kModeEndMatch;
+			if (slot >= 0 && n.scoreOf == 0) {
+				e.side = slot;
+			}
+			else if (slot >= 0) {
+				int t = RulesTeamOf(slot);
+				e.team = true;
+				e.side = n.scoreOf == 2 ? (t == 0 ? 1 : 0) : t;
+			}
+			g_modeEnd = e;
+			XLS_LOG_INFO("mods: mode: end %s, won by %s %d.", e.match ? "match" : "round", e.team ? "team" : "player", e.side);
+		}
+		break;
+	}
+	case kModeShowText: {
+		int slot = PlayerIn(s, n.player);
+		int who = n.showTo == 1 ? slot : n.showTo == 2 ? (slot >= 0 ? RulesTeamOf(slot) : -1) : -1;
+		ModeText(Format(s, n.text), n.style, n.rgb, n.seconds, n.showTo, who);
+		Out(s, node, 0, now);
+		break;
+	}
 	case kScriptChance:
 		Out(s, node, std::uniform_real_distribution<float>(0.0f, 100.0f)(g_random) < Get(s, n.a) ? 0 : 1, now);
 		break;
@@ -901,6 +1118,108 @@ void Tick(State& s, double now)
 		else {
 			++it;
 		}
+	}
+}
+
+State* NewState(const ScriptGraph& graph)
+{
+	State* s = new State();
+	s->graph = graph;
+	size_t n = s->graph.nodes.size();
+	s->vars.assign(s->graph.vars > 0 ? s->graph.vars : 0, 0.0f);
+	s->lists.assign(s->vars.size(), std::vector<int>());
+	s->vecs.assign(s->vars.size(), kNoVec);
+	for (size_t v = 0; v < s->vars.size(); v++) {
+		if (Kind(*s, (int)v) == kVarPlayer || Kind(*s, (int)v) == kVarMarker) {
+			s->vars[v] = -1.0f;   // nobody / none
+		}
+	}
+	for (const auto& [v, value] : s->graph.varInit) {
+		SetVar(*s, v, value);
+	}
+	s->timerAt.assign(n, 0.0);
+	s->flip.assign(n, 0);
+	s->lastAt.assign(n, 0.0);
+	for (size_t i = 0; i < n; i++) {
+		if (s->graph.nodes[i].type == kScriptGate) {
+			s->flip[i] = s->graph.nodes[i].autostart ? 1 : 0;
+		}
+	}
+	s->count.assign(n, 0);
+	return s;
+}
+
+// A mode event into its nodes: the event's values into their variables, then their output
+void ModeDispatch(State& s, int type, int a, int b, float x, double now)
+{
+	for (size_t i = 0; i < s.graph.nodes.size(); i++) {
+		const ScriptNode& n = s.graph.nodes[i];
+		if (n.type != type) {
+			continue;
+		}
+		if (type == kModeRoundStart || type == kModeRoundEnd) {
+			SetVar(s, n.var, (float)a);
+		}
+		else if (type == kModeWorldUpdate) {
+			SetVar(s, n.var, x);
+		}
+		else if (type == kModeOnKill) {
+			SetVar(s, n.player, (float)a);
+			SetVar(s, n.victim, (float)b);
+		}
+		else if (type == kModeOnDeath || type == kModeOnSpawn) {
+			SetVar(s, n.player, (float)a);
+		}
+		s.steps = 0;
+		Out(s, (int)i, 0, now);
+	}
+}
+
+void ModeApply(const uint8_t* p, const uint8_t* end)
+{
+	uint8_t op;
+	if (!Take(p, end, &op)) {
+		return;
+	}
+	if (op == kModeText) {
+		uint8_t style, showTo;
+		uint32_t rgb;
+		float seconds;
+		int8_t who;
+		uint16_t len;
+		if (Take(p, end, &style) && Take(p, end, &rgb) && Take(p, end, &seconds) && Take(p, end, &showTo) && Take(p, end, &who) && Take(p, end, &len) && end - p >= len) {
+			ModeShowHere(std::string((const char*)p, len), style, rgb, seconds, showTo, who);
+		}
+		return;
+	}
+	if (op == kModeMasks) {
+		uint32_t held, out;
+		if (Take(p, end, &held) && Take(p, end, &out)) {
+			for (int k = 0; k < kSlots; k++) {
+				if (((out >> k) & 1) != RulesEliminated(k)) {
+					RulesEliminate(k, (out >> k) & 1);
+				}
+				if (!((out >> k) & 1) && ((held >> k) & 1) != RulesHeld(k) && ((held >> k) & 1)) {
+					RulesHold(k, true);   // releases come as their own messages (the spawn)
+				}
+			}
+		}
+		return;
+	}
+	uint8_t slot, has;
+	float pos[3], yaw;
+	if (!Take(p, end, &slot) || !Take(p, end, &has) || !Take(p, end, &pos[0]) || !Take(p, end, &pos[1]) || !Take(p, end, &pos[2]) || !Take(p, end, &yaw) || slot >= kSlots) {
+		return;
+	}
+	if (op == kModeHold) {
+		RulesHold(slot, true);
+	}
+	else if (op == kModeElim) {
+		RulesEliminate(slot, true);
+	}
+	else if (op == kModeRelease) {
+		RulesEliminate(slot, false);
+		RulesRelease(slot, has ? pos : nullptr, yaw);
 	}
 }
 
@@ -1070,6 +1389,9 @@ void OnMessage(const uint8_t* p, size_t size, uint32_t key, int volumes, double 
 			LeaveCriticalSection(&g_lock);
 		}
 	}
+	else if (type == kMode && follow) {
+		ModeApply(p, end);
+	}
 	else if (type == kAct && follow) {
 		uint32_t k;
 		uint8_t slot, action;
@@ -1131,10 +1453,36 @@ DWORD WINAPI SyncThread(LPVOID)
 			SteamNetworkingMessage_t* in[32];
 			int count = SteamNetworkingMessages()->ReceiveMessagesOnChannel(kChannel, in, 32);
 			for (int i = 0; i < count; i++) {
-				if (key) {
-					OnMessage((const uint8_t*)in[i]->m_pData, (size_t)in[i]->m_cbSize, key, volumes, now, follow);
-				}
+				OnMessage((const uint8_t*)in[i]->m_pData, (size_t)in[i]->m_cbSize, key, volumes, now, follow);   // checks the key itself
 				in[i]->Release();
+			}
+		}
+		if (!follow) {   // the game mode's messages (any map, scripted or not)
+			std::deque<std::vector<uint8_t>> modeOut;
+			bool modeOn = false;
+			EnterCriticalSection(&g_lock);
+			modeOut.swap(g_modeSend);
+			modeOn = g_mode != nullptr;
+			LeaveCriticalSection(&g_lock);
+			static double lastMasks = 0.0;
+			if (modeOn && now - lastMasks > 2.0) {   // late joiners, lost packets
+				lastMasks = now;
+				std::vector<uint8_t> m;
+				Put<uint8_t>(&m, kMode);
+				Put<uint8_t>(&m, kModeMasks);
+				uint32_t held = 0, out = 0;
+				for (int k = 0; k < kSlots; k++) {
+					held |= RulesHeld(k) ? 1u << k : 0;
+					out |= RulesEliminated(k) ? 1u << k : 0;
+				}
+				Put<uint32_t>(&m, held);
+				Put<uint32_t>(&m, out);
+				modeOut.push_back(std::move(m));
+			}
+			for (const auto& m : modeOut) {
+				for (uint64_t peer : members) {
+					SendTo(peer, m);
+				}
 			}
 		}
 		if (!key) {
@@ -1206,6 +1554,188 @@ DWORD WINAPI SyncThread(LPVOID)
 
 }
 
+// ---------------------------------------------------------------- game modes: the API (lp2.h)
+
+void ModeLoad()
+{
+	// mode.txt in the game folder: the mode's name (Modes\<name>.lp2mode), then "setting = value" lines
+	char path[MAX_PATH] = {};
+	GetModuleFileNameA(nullptr, path, MAX_PATH);
+	char* slash = strrchr(path, '\\');
+	std::string dir(path, slash ? slash + 1 : path);
+	std::string name;
+	std::vector<std::pair<std::string, float>> overrides;
+	if (FILE* f = fopen((dir + "mode.txt").c_str(), "r")) {
+		char line[256];
+		while (fgets(line, sizeof line, f)) {
+			std::string t(line);
+			while (!t.empty() && (t.back() == '\n' || t.back() == '\r' || t.back() == ' ')) {
+				t.pop_back();
+			}
+			size_t eq = t.find('=');
+			if (name.empty() && eq == std::string::npos) {
+				name = t;
+			}
+			else if (eq != std::string::npos) {
+				std::string k = t.substr(0, eq);
+				while (!k.empty() && k.back() == ' ') {
+					k.pop_back();
+				}
+				for (char& c : k) {
+					c = (char)tolower((unsigned char)c);
+				}
+				overrides.emplace_back(k, (float)atof(t.c_str() + eq + 1));
+			}
+		}
+		fclose(f);
+	}
+	ScriptsInit();
+	EnterCriticalSection(&g_lock);
+	delete g_mode;
+	g_mode = nullptr;
+	g_modeEnd = ModeEnd();
+	g_modeLives = 0;
+	g_modeManual = false;
+	memset(g_modeDeaths, 0, sizeof g_modeDeaths);
+	LeaveCriticalSection(&g_lock);
+	{
+		std::lock_guard<std::mutex> lock(g_modeEvLock);
+		g_modeEvents.clear();
+	}
+	if (name.empty()) {
+		if (!g_modeName.empty()) {
+			XLS_LOG_INFO("mods: mode: none (no mode.txt): the lobby's game type as it is.");
+		}
+		g_modeName.clear();
+		return;
+	}
+	std::string file = dir + "Modes\\" + name + ".lp2mode", text;
+	if (FILE* f = fopen(file.c_str(), "rb")) {
+		char buf[65536];
+		size_t got;
+		while ((got = fread(buf, 1, sizeof buf, f)) > 0) {
+			text.append(buf, got);
+		}
+		fclose(f);
+	}
+	Json root;
+	std::string error;
+	if (text.empty() || !Json::Parse(text, root, &error)) {
+		XLS_LOG_WARN("mods: mode: can't read %s%s%s.", file.c_str(), error.empty() ? "" : ": ", error.c_str());
+		return;
+	}
+	if (!root["compiled"].IsObject()) {
+		XLS_LOG_WARN("mods: mode: %s has no compiled graph: save it in the editor's Game Mode window.", name.c_str());
+		return;
+	}
+	ScriptGraph graph;
+	ParseScriptGraph(root["compiled"], std::wstring(name.begin(), name.end()), &graph);
+	graph.markers = g_mapMarkers;
+	for (const auto& [k, v] : overrides) {
+		for (size_t i = 0; i < graph.varNames.size(); i++) {
+			if (graph.varNames[i] == k) {
+				graph.varInit.emplace_back((int)i, v);
+				XLS_LOG_INFO("mods: mode: setting %s = %g (mode.txt).", k.c_str(), v);
+			}
+		}
+	}
+	EnterCriticalSection(&g_lock);
+	g_mode = NewState(graph);
+	g_mode->started = true;   // its Start is Match start (ModeEvent)
+	LeaveCriticalSection(&g_lock);
+	g_modeName = name;
+	XLS_LOG_INFO("mods: mode: %s, %u node(s), %d variable(s).", name.c_str(), (unsigned)graph.nodes.size(), graph.vars);
+}
+
+void ModeEvent(int kind, int a, int b)
+{
+	std::lock_guard<std::mutex> lock(g_modeEvLock);
+	if (g_modeEvents.size() < 256) {
+		g_modeEvents.push_back({kind, a, b});
+	}
+}
+
+void ModeFrame()
+{
+	if (!g_lockReady || g_follow) {   // the host runs the mode; players get its messages
+		return;
+	}
+	std::vector<ModeEv> events;
+	{
+		std::lock_guard<std::mutex> lock(g_modeEvLock);
+		events.swap(g_modeEvents);
+	}
+	double now = Now();
+	EnterCriticalSection(&g_lock);
+	State* s = g_mode;
+	if (s) {
+		for (const ModeEv& e : events) {
+			switch (e.kind) {
+			case kEvMatchStart:
+				ModeDispatch(*s, kModeMatchStart, 0, 0, 0.0f, now);
+				break;
+			case kEvRoundStart:
+				memset(g_modeDeaths, 0, sizeof g_modeDeaths);
+				g_modeEnd = ModeEnd();
+				ModeDispatch(*s, kModeRoundStart, e.a, 0, 0.0f, now);
+				break;
+			case kEvRoundEnd:
+				ModeDispatch(*s, kModeRoundEnd, e.a, 0, 0.0f, now);
+				break;
+			case kEvDeath:
+				if (e.a >= 0 && e.a < kSlots) {
+					g_modeDeaths[e.a]++;
+					if (g_modeManual) {
+						ModeHold(e.a, false);
+					}
+					else if (g_modeLives > 0 && g_modeDeaths[e.a] >= g_modeLives) {
+						ModeHold(e.a, true);
+						XLS_LOG_INFO("mods: mode: player %d out of lives (%d deaths).", e.a, g_modeDeaths[e.a]);
+					}
+				}
+				ModeDispatch(*s, kModeOnDeath, e.a, 0, 0.0f, now);
+				break;
+			case kEvKill:
+				ModeDispatch(*s, kModeOnKill, e.a, e.b, 0.0f, now);
+				break;
+			case kEvSpawn:
+				ModeDispatch(*s, kModeOnSpawn, e.a, 0, 0.0f, now);
+				break;
+			}
+		}
+		float dt = g_modeLastFrame > 0.0 ? (float)std::min(now - g_modeLastFrame, 0.25) : 0.0f;
+		g_modeLastFrame = now;
+		ModeDispatch(*s, kModeWorldUpdate, 0, 0, dt, now);
+		Tick(*s, now);   // timers, delays
+	}
+	LeaveCriticalSection(&g_lock);
+}
+
+bool ModeActive()
+{
+	return g_mode != nullptr;
+}
+
+bool ModeEndPending(int* side, bool* team, bool* match)
+{
+	if (!g_lockReady) {
+		return false;
+	}
+	EnterCriticalSection(&g_lock);
+	ModeEnd e = g_mode ? g_modeEnd : ModeEnd();
+	LeaveCriticalSection(&g_lock);
+	if (side) {
+		*side = e.side;
+	}
+	if (team) {
+		*team = e.team;
+	}
+	if (match) {
+		*match = e.match;
+	}
+	return e.pending;
+}
+
 void ScriptsInit()
 {
 	if (!g_lockReady) {
@@ -1266,27 +1796,13 @@ void ScriptSetMap(const MapPhysics* physics)
 		}
 	}
 	ReleaseSRWLockExclusive(&g_valueLock);
+	g_mapMarkers = physics ? physics->script.markers : std::vector<ScriptMarker>();
+	if (g_mode) {
+		g_mode->graph.markers = g_mapMarkers;
+	}
 	if (physics && !physics->script.nodes.empty()) {
-		State* s = new State();
-		s->graph = physics->script;
+		State* s = NewState(physics->script);
 		size_t n = s->graph.nodes.size();
-		s->vars.assign(s->graph.vars > 0 ? s->graph.vars : 0, 0.0f);
-		s->lists.assign(s->vars.size(), std::vector<int>());
-		s->vecs.assign(s->vars.size(), kNoVec);
-		for (size_t v = 0; v < s->vars.size(); v++) {
-			if (Kind(*s, (int)v) == kVarPlayer || Kind(*s, (int)v) == kVarMarker) {
-				s->vars[v] = -1.0f;   // nobody / none
-			}
-		}
-		s->timerAt.assign(n, 0.0);
-		s->flip.assign(n, 0);
-		s->lastAt.assign(n, 0.0);
-		for (size_t i = 0; i < n; i++) {
-			if (s->graph.nodes[i].type == kScriptGate) {
-				s->flip[i] = s->graph.nodes[i].autostart ? 1 : 0;
-			}
-		}
-		s->count.assign(n, 0);
 		for (int sid : s->graph.startOff) {
 			if (sid >= 0 && sid < kMaxVolumes) {
 				g_on[sid] = 0;

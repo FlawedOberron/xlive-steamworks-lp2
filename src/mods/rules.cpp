@@ -290,6 +290,8 @@ std::atomic<bool> g_menuSurvival{false};
 std::atomic<int> g_lives{0};
 std::atomic<int> g_menuLives{0};
 std::atomic<bool> g_team{false};
+std::atomic<bool> g_survivalDropped{false};
+std::atomic<uint32_t> g_elimMask{0}; // a game mode's eliminated players (held too)
 std::atomic<bool> g_menuTeam{false};
 uint32_t g_magazine = 0;
 uint8_t** g_ruleSlots = nullptr;
@@ -743,7 +745,10 @@ DWORD WINAPI SyncThread(LPVOID)
 		g_grenades = r.grenades;
 		g_secondary = r.secondary;
 		g_supply = r.supply;
-		g_survival = r.survival;
+		if (r.survival && !g_survival.load() && !g_survivalDropped.exchange(true)) {
+			XLS_LOG_INFO("mods: rules: the Survival row is ignored now: Survival is a game mode (Modes\\Survival.lp2mode via mode.txt).");
+		}
+		g_survival = false;   // was r.survival: the stock rules' Survival is replaced by the Survival game mode
 		g_lives = r.lives;
 		HarmonizerSet(r.harmonizer);
 		g_grapple = r.grapple;
@@ -1126,6 +1131,28 @@ bool RulesHeld(int slot)
 	return slot >= 0 && slot < 16 && ((g_heldMask >> slot) & 1);
 }
 
+void RulesEliminate(int slot, bool out)
+{
+	if (slot < 0 || slot >= 16) {
+		return;
+	}
+	uint32_t bit = 1u << slot;
+	uint32_t was = out ? g_elimMask.fetch_or(bit) : g_elimMask.fetch_and(~bit);
+	if (((was & bit) != 0) != out) {
+		XLS_LOG_INFO("mods: rules: player %d %s.", slot, out ? "eliminated" : "back in the match");
+	}
+	if (out) {
+		RulesHold(slot, true);
+	}
+}
+
+bool RulesEliminated(int slot)
+{
+	return slot >= 0 && slot < 16 && ((g_elimMask >> slot) & 1);
+}
+
+
+
 void RulesRelease(int slot, const float* pos, float yaw)
 {
 	if (slot < 0 || slot >= 16) {
@@ -1502,13 +1529,14 @@ void DeathProbe(uint8_t* ctl);
 std::atomic<DWORD> g_hudSeenAt{0}; // the battle HUD's last update: our overlay's HUD shows only while it runs
 void ReportLife(int slot);
 bool InPlay(int slot);
+bool TeamGame();
 
 void __attribute__((thiscall)) HudUpdate(uint8_t* hud)
 {
 	g_hudSeenAt = GetTickCount();
 	int self = g_localIndex;
 	HeldTick();
-	LivesMatch(self, g_survival && g_lives > 0, g_team);
+	LivesMatch(self, g_survival && g_lives > 0, TeamGame());
 	// every slot, every frame: the controller update only runs while a player is dead
 	for (int slot = 0; slot < 16; slot++) {
 		if (InPlay(slot)) {
@@ -1516,6 +1544,7 @@ void __attribute__((thiscall)) HudUpdate(uint8_t* hud)
 		}
 	}
 	LivesTick();
+	ModeFrame();
 	uint8_t** entry = (uint8_t**)(hud + kHudEntry);
 	uint8_t* own = *entry;
 	bool out = self >= 0 && self < 16 && own && own == g_controllers[self] && ((g_survival && SlotOut(self)) || RulesHeld(self));
@@ -1765,12 +1794,15 @@ void ReportLife(int slot)
 	uint8_t* body = Body(slot);
 	uint8_t st = g_slotState[slot];
 	bool out = g_survival && g_lives > 0 && SlotOut(slot);
-	LifeState state = RulesHeld(slot) ? LifeState::Held : out && (st != 0 || !body) ? LifeState::Out : st != 0 || !body ? LifeState::Dead : LifeState::Alive;
+	LifeState state = RulesEliminated(slot) ? LifeState::Out : RulesHeld(slot) ? LifeState::Held : out && (st != 0 || !body) ? LifeState::Out : st != 0 || !body ? LifeState::Dead : LifeState::Alive;
 	int team = state == LifeState::Alive ? UnitTeam(slot) : -1;
 	if (team < 0 && LivesTeam(slot) < 0) {
 		team = SlotTeam(slot);
 	}
 	int left = -1;
+	if (ModeActive()) {
+		left = -2;   // the mode's: lives.cpp shows none of its own
+	}
 	if (g_survival && g_lives > 0) {
 		int pending = st != 0 ? 1 : 0;
 		left = std::max(g_lives - 1 - (g_team ? TeamDeaths(SlotTeam(slot)) : SlotDeaths(slot)) - pending, 0);
@@ -1901,6 +1933,21 @@ const uint32_t kNetHostSlot = 0xa1f8, kNetLocalSlot = 0xa1fc;
 const int kRuleTraining = 1, kRuleElimination = 2, kRuleTeamElimination = 4, kRuleTeamKills = 5;
 const uint32_t kRankList = 0x74, kRankEntry = 0xc, kRankCount = 0x134; // {rank, slot or team, score}
 
+// A team game type: the lobby's rule byte (slots +0x74: 0 Elimination, the rest are team types), a training bot match's
+// screen (0 Elimination, 1 Team Elimination)
+bool TeamGame()
+{
+	if (g_offline && g_botArmed) {
+		return g_botRule == 1;
+	}
+	int8_t rule = -1;
+	uint8_t* slots = nullptr;
+	if (g_ruleSlots && ReadGame(g_ruleSlots, &slots) && slots && ReadGame(slots + 0x74, &rule) && rule >= 0) {
+		return rule >= 1;
+	}
+	return g_team;
+}
+
 bool InPlay(int slot)
 {
 	uint8_t* setup = *g_matchSetup;
@@ -1940,6 +1987,14 @@ bool __attribute__((fastcall)) EndCheck(void* flow)
 		return true;
 	}
 	uint8_t* setup = *g_matchSetup;
+	if (setup && Host() && ModeEndPending(nullptr, nullptr, nullptr)) {
+		static DWORD logged = 0;
+		if (GetTickCount() - logged > 5000) {
+			logged = GetTickCount();
+			XLS_LOG_INFO("mods: rules: the game mode ends the round.");
+		}
+		return true;
+	}
 	if (!g_survival || g_lives <= 0 || !setup || !Host()) {
 		return false;
 	}
@@ -2037,6 +2092,21 @@ void __attribute__((thiscall)) Ranking(uint8_t* flow, int arg)
 			}
 		}
 	}
+	int modeSide = -1;
+	bool modeTeam = false;
+	if (ModeEndPending(&modeSide, &modeTeam, nullptr) && modeSide >= 0) { // the mode's winner tops the round
+		bool teamIds = TeamGame();   // the ranking's ids: teams in team types, players otherwise
+		for (int i = 0; i < count; i++) {
+			int id = list[i][1];
+			bool win = teamIds == modeTeam ? id == modeSide : modeTeam ? (id >= 0 && id < 16 && SlotTeam(id) == modeSide) : SlotTeam(modeSide) == id;
+			if (win) {
+				list[i][2] = std::min(list[i][2], 999999) + 1000000;
+				if (rounds && id >= 0 && id < 16) {
+					g_roundScore[id] = std::min(g_roundScore[id], 999999) + 1000000;
+				}
+			}
+		}
+	}
 	if (rounds) { // rounds won first
 		for (int i = 0; i < count; i++) {
 			int id = list[i][1];
@@ -2059,6 +2129,7 @@ void __attribute__((thiscall)) Ranking(uint8_t* flow, int arg)
 void RoundEnd()
 {
 	uint8_t* slots = *g_matchSetup;
+	ModeEvent(kEvRoundEnd, g_round + 1);
 	if (!RoundsOn() || !slots) {
 		g_roundEndOriginal();
 		return;
@@ -2090,7 +2161,9 @@ void RoundEnd()
 		most = std::max(most, g_roundWins[id]);
 	}
 	bool bestOf = g_rounds >= 10;
-	bool over = g_round >= total || (bestOf && most > total / 2);
+	bool modeMatch = false;
+	ModeEndPending(nullptr, nullptr, &modeMatch);
+	bool over = g_round >= total || (bestOf && most > total / 2) || modeMatch;
 	XLS_LOG_INFO("mods: rules: rounds: round %d of %s%d over, %s %d (round score %d)%s; %s.", g_round, bestOf ? "best of " : "", total,
 	             winner >= 0 ? "won by" : "drawn, top", best, bestScore, winner >= 0 ? FormatA(", %d wins", g_roundWins[winner]).c_str() : "",
 	             over ? "match over" : "next round");
@@ -2099,14 +2172,15 @@ void RoundEnd()
 	}
 	{ // the round's result on screen (this runs where the match flow does: the host)
 		int self = g_localIndex;
-		int own = self >= 0 && self < 16 ? (g_team ? SlotTeam(self) : self) : -1;
+		bool teamGame = TeamGame();
+		int own = self >= 0 && self < 16 ? (teamGame ? SlotTeam(self) : self) : -1;
 		uint8_t* setupNames = g_matchSetup ? *g_matchSetup : nullptr;
 		std::string text;
 		uint32_t colour = 0xffffff;
 		if (winner < 0) {
 			text = FormatA("ROUND %d DRAWN", g_round);
 		}
-		else if (g_team) {
+		else if (teamGame) {
 			text = FormatA(winner == own ? "YOUR TEAM WINS ROUND %d" : "ENEMY TEAM WINS ROUND %d", g_round);
 			colour = winner == own ? 0x4c9cff : 0xff4848;
 		}
@@ -2149,7 +2223,8 @@ void RoundTime()
 		g_roundTimeOriginal();
 		return;
 	}
-	if (!g_roundBreak || GetTickCount() - g_roundBreakAt > 180000) { // a new match
+	bool newMatch = !g_roundBreak || GetTickCount() - g_roundBreakAt > 180000;
+	if (newMatch) { // a new match
 		g_round = 0;
 		memset(g_roundWins, 0, sizeof(g_roundWins));
 		memset(g_roundBase, 0, sizeof(g_roundBase));
@@ -2166,6 +2241,13 @@ void RoundTime()
 		g_roundDead = 0;
 	}
 	LivesReset(); // every round starts with everyone in play again (re-reported every frame)
+	g_heldMask = 0; // the round's start spawns everyone: nobody held or eliminated
+	g_elimMask = 0;
+	if (newMatch) {
+		ModeLoad();
+		ModeEvent(kEvMatchStart);
+	}
+	ModeEvent(kEvRoundStart, g_round + 1);
 	if (g_roundBreak && g_rounds > 0) {
 		LivesMessage(FormatA("ROUND %d", g_round + 1).c_str(), 0, 0xffffff, 2.5f);
 	}
@@ -2188,7 +2270,7 @@ void RoundCounter(float width, float height)
 	int total = RoundsTotal(g_rounds), self = g_localIndex;
 	bool bestOf = g_rounds >= 10;
 	int round = std::min(g_round + (g_roundBreak ? 0 : 1), total);
-	int own = self >= 0 && self < 16 ? (g_team ? SlotTeam(self) : self) : -1;
+	int own = self >= 0 && self < 16 ? (TeamGame() ? SlotTeam(self) : self) : -1;
 	int ownWins = own >= 0 && own < 16 ? g_roundWins[own] : 0, otherWins = 0;
 	for (int id = 0; id < 16; id++) {
 		if (id != own) {
@@ -4803,6 +4885,21 @@ bool RulesPatchTrainingFlash(std::vector<uint8_t>* gfx)
 float RulesGrappleRange()
 {
 	return kGrappleStock * kGrappleScales[g_grapple % kGrappleValues];
+}
+
+bool RulesInPlay(int slot)
+{
+	return slot >= 0 && slot < 16 && InPlay(slot);
+}
+
+int RulesTeamOf(int slot)
+{
+	return SlotTeam(slot);
+}
+
+bool RulesTeams()
+{
+	return TeamGame();
 }
 
 }

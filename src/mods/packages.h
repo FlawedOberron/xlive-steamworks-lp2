@@ -10,6 +10,10 @@
 #include <unordered_map>
 #include <vector>
 
+namespace xls {
+class Json;
+}
+
 namespace xls::mods {
 
 // A volume's box turned about its centre by its map.json "yaw" (degrees: the editor's turn about y, game axes):
@@ -91,8 +95,12 @@ enum ScriptType { kScriptStart, kScriptEnter, kScriptTimer, kScriptDelay, kScrip
 	kScriptList, kScriptListRemove, kScriptListGet, kScriptListCount, kScriptForEach, kScriptPlayerCheck, kScriptPlayerGet,
 	kScriptPlayerAct, kScriptLoop, kScriptFindMarkers, kScriptGetMarker, kScriptSpawn,
 	kScriptTeleport, kScriptGetPos, kScriptVector, kScriptSwitch, kScriptSequence, kScriptGate, kScriptOnce, kScriptBranch,
-	kScriptChance, kScriptCooldown, kScriptZoneOutline, kScriptTypes };
-const int kScriptIns = 4, kScriptOuts = 8;
+	kScriptChance, kScriptCooldown, kScriptZoneOutline,
+	// game modes (.lp2mode, modes.cpp / scripts.cpp ModeEvent): events, then actions and data
+	kModeMatchStart, kModeRoundStart, kModeRoundEnd, kModeWorldUpdate, kModeOnKill, kModeOnDeath, kModeOnSpawn,
+	kModeSpawnPlayer, kModeHoldPlayer, kModeEliminate, kModeRespawnRules, kModeQueue, kModeScore, kModePlayerInfo,
+	kModeTeamList, kModeEndRound, kModeEndMatch, kModeShowText, kScriptTypes };
+const int kScriptIns = 5, kScriptOuts = 8;
 struct ScriptTypeInfo {
 	const char* name;
 	const char* ins[kScriptIns];   // input ports, by number (null: none)
@@ -137,6 +145,24 @@ inline const ScriptTypeInfo kScriptTypeInfo[kScriptTypes] = {
 	{"chance", {"in"}, {"yes", "no"}},
 	{"cooldown", {"in", "reset"}, {"then", "blocked"}},
 	{"zoneoutline", {"show", "hide"}, {"then"}},
+	{"matchstart", {}, {"then"}},
+	{"roundstart", {}, {"then"}},
+	{"roundend", {}, {"then"}},
+	{"worldupdate", {}, {"tick"}},
+	{"onkill", {}, {"then"}},
+	{"ondeath", {}, {"then"}},
+	{"onspawn", {}, {"then"}},
+	{"spawnplayer", {"in"}, {"spawned", "skipped"}},
+	{"holdplayer", {"in"}, {"then"}},
+	{"eliminate", {"in"}, {"then"}},
+	{"respawnrules", {"in"}, {"then"}},
+	{"queue", {"push", "push front", "pop", "remove", "clear"}, {"then", "empty"}},
+	{"score", {"add", "set"}, {"then"}},
+	{"playerinfo", {"in"}, {"then"}},
+	{"teamlist", {"in"}, {"then"}},
+	{"endround", {"in"}, {}},
+	{"endmatch", {"in"}, {}},
+	{"showtext", {"in"}, {"then"}},
 };
 // Variables' kinds ("var_kinds"): a number; a player (its match slot, -1 nobody); a list of players; a script marker
 // (its number in "script_markers", -1 none); a list of markers.
@@ -203,7 +229,15 @@ struct ScriptNode {
 	float seconds = 1.0f;  // timer / delay / cooldown; setvalue: fade
 	float maxSeconds = 0.0f; // timer / delay: above seconds: a random time between them
 	bool repeat = false, autostart = false; // timer; gate: autostart = starts open
-	uint32_t rgb = 0xffcc33; // zoneoutline: "colour" (rrggbb)
+	uint32_t rgb = 0xffcc33; // zoneoutline / showtext: "colour" (rrggbb)
+	int victim = -1;       // onkill: the victim's player variable (player: the killer)
+	bool alive = false;    // teamlist: only those in play (not held / eliminated)
+	int info = 0;          // playerinfo: 0 team, 1 score, 2 kills, 3 deaths (this round), 4 lives left
+	int scoreOf = 1;       // score / endround / endmatch: 0 the player, 1 their team, 2 their opponents (endround)
+	int showTo = 0;        // showtext: 0 all, 1 the player, 2 their team
+	int style = 0;         // showtext: 0 banner, 1 top, 2 hud
+	bool manual = false;   // respawnrules: only by Spawn player
+	std::string font;      // showtext
 	std::string text;      // log ({name}: a variable's value); findmarkers / getmarker: the name (* and ? wildcards)
 	std::vector<float> cases; // switch: the value of each case port (1..6)
 	std::vector<ScriptLink> out[kScriptOuts]; // by output port number
@@ -226,8 +260,10 @@ struct ScriptGraph {
 	std::vector<std::string> varNames;
 	std::vector<int> varKinds;      // ScriptVarKind per variable
 	std::vector<ScriptMarker> markers;
+	std::vector<std::pair<int, float>> varInit; // a game mode's settings: variable, value
 	int volumes = 0, vars = 0;
 };
+void ParseScriptGraph(const Json& js, const std::wstring& label, ScriptGraph* out);
 
 // The bots' zones and links (map.json "nav_zones", lp2navmap.zones_and_links): bots.cpp routes zone to zone.
 enum NavKind { kNavWalk, kNavJump, kNavDrop, kNavGrapple, kNavLaunch };

@@ -100,6 +100,21 @@ void ForceUnit(unsigned char* unit, int kind);
 void ForceSetMap(const MapPhysics* physics);
 // zones.cpp: bot zone outlines drawn as fences on the overlay (script node zoneoutline). ZonesShow: every zone whose
 // name or tag matches the pattern (* ?), rgb rrggbb, height cm, seconds (0: until hidden); host side, sent to all
+// scripts.cpp: game modes (<game>\Modes\<name>.lp2mode "compiled"; mode.txt in the game folder names the one to run:
+// its name, then "setting = value" lines). The host (offline: this PC) runs it; players get its holds and texts.
+enum ModeEventKind { kEvMatchStart, kEvRoundStart, kEvRoundEnd, kEvDeath, kEvKill, kEvSpawn };
+void ModeLoad();                     // a new match: (re)reads mode.txt
+void ModeEvent(int kind, int a = -1, int b = -1); // any thread: queued for ModeFrame
+void ModeFrame();                    // the game thread, every frame (HudUpdate)
+bool ModeActive();
+bool ModeEndPending(int* side, bool* team, bool* match); // End round / End match fired this round
+std::string LivesName(int slot);     // lives.cpp: the player's name ("" unknown)
+// rules.cpp, for modes
+void RulesEliminate(int slot, bool out); // out of the match until the next round: held, shown as eliminated
+bool RulesEliminated(int slot);
+bool RulesInPlay(int slot);
+int RulesTeamOf(int slot);           // the lobby's team (0 / 1), -1 none
+bool RulesTeams();                   // a team game type
 void ZonesSetMap(const struct MapPhysics* physics);
 int ZonesShow(const char* pattern, bool show, uint32_t rgb, float height, float seconds);
 void ZonesPack(std::vector<uint8_t>* m);

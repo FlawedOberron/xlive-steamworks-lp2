@@ -255,6 +255,168 @@ bool Unpack(const Zip& zip, const MapPackage& map, int slot, const std::wstring&
 	return files > 0;
 }
 
+} // ParseScriptGraph is packages.h's (scripts.cpp loads game modes with it)
+
+// A compiled graph (map.json "script", a game mode's "compiled": lp2mapc.script_manifest) into sc
+void ParseScriptGraph(const Json& js, const std::wstring& label, ScriptGraph* out)
+{
+	ScriptGraph& sc = *out;
+	sc.volumes = (int)js["volumes"].GetInt(0);
+	sc.vars = (int)js["vars"].GetInt(0);
+	for (const Json& e : js["start_off"].Elements()) {
+		sc.startOff.push_back((int)e.GetInt(-1));
+	}
+	for (const Json& e : js["var_names"].Elements()) {
+		sc.varNames.push_back(e.GetString(std::string()));
+	}
+	for (const Json& e : js["var_kinds"].Elements()) {
+		std::string k = e.GetString(std::string());
+		sc.varKinds.push_back(k == "player" ? kVarPlayer : k == "list" ? kVarList : k == "marker" ? kVarMarker
+			: k == "markers" ? kVarMarkers : k == "vector" ? kVarVector : kVarNumber);
+	}
+	auto operand = [](const Json& j) {
+		ScriptOperand o;
+		if (j.IsObject()) {
+			o.var = (int)j["var"].GetInt(-1);
+		}
+		else {
+			o.num = (float)j.GetNumber(0.0);
+		}
+		return o;
+	};
+	std::vector<std::vector<std::pair<int, std::string>>> ins; // per node, per output port: (target, its input name)
+	for (const Json& e : js["nodes"].Elements()) {
+		ScriptNode n;
+		std::string type = e["type"].GetString(std::string());
+		n.type = -1;
+		for (int t = 0; t < kScriptTypes; t++) {
+			if (type == kScriptTypeInfo[t].name) {
+				n.type = t;
+			}
+		}
+		if (n.type < 0) {
+			XLS_LOG_WARN("mods: map %ls: script node type \"%s\" unknown (a newer editor?): it does nothing.", label.c_str(), type.c_str());
+			n.type = kScriptLog;
+		}
+		n.sid = (int)e["sid"].GetInt(-1);
+		std::string who = e["who"].GetString("any");
+		n.who = who == "player" ? 1 : who == "vs" ? 2 : 0;
+		n.var = (int)e["var"].GetInt(-1);
+		n.toggle = e["toggle"].GetBool(false);
+		if (n.type == kScriptSet && !e.Has("a") && !n.toggle) {   // older maps: "value" on / off / toggle
+			std::string value = e["value"].GetString("toggle");
+			n.toggle = value == "toggle";
+			n.a.num = value == "on" ? 1.0f : 0.0f;
+		}
+		n.a = e.Has("a") ? operand(e["a"]) : n.a;
+		n.b = operand(e["b"]);
+		std::string op = e["op"].GetString("+");
+		for (int k = 0; k < kOps; k++) {
+			if (op == kScriptOps[k]) {
+				n.op = k;
+			}
+		}
+		std::string setting = e["setting"].GetString(std::string());
+		for (int k = 0; k < kSettings; k++) {
+			if (setting == kScriptSettings[k]) {
+				n.setting = k;
+			}
+		}
+		n.integer = e["integer"].GetBool(false);
+		n.player = (int)e["player"].GetInt(-1);
+		n.list = (int)e["list"].GetInt(-1);
+		n.random = e["random"].GetBool(false);
+		n.spawnKind = e["kind"].GetString("weapon") == "vs" ? 2 : 4;
+		n.marker = (int)e["marker"].GetInt(-1);
+		n.face = e["face"].GetBool(true);
+		for (const Json& c : e["cases"].Elements()) {
+			n.cases.push_back((float)c.GetNumber(0.0));
+		}
+		for (const Json& k : e["items"].Elements()) {
+			n.items.push_back((int)k.GetInt(-1));
+		}
+		auto pick = [](const std::string& v, const char* const* names, int count, int fallback) {
+			for (int k = 0; k < count; k++) {
+				if (v == names[k]) {
+					return k;
+				}
+			}
+			return fallback;
+		};
+		n.check = pick(e["check"].GetString(std::string()), kScriptChecks, kChecks, kCheckGone);
+		n.stat = pick(e["stat"].GetString(std::string()), kScriptStats, kStats, kStatHealth);
+		n.action = pick(e["action"].GetString(std::string()), kScriptActions, kActions, kActDamage);
+		n.vec = (int)e["vec"].GetInt(-1);
+		n.fromMarker = e["from"].GetString("player") == "marker";
+		n.vecOp = pick(e["vecop"].GetString(std::string()), kScriptVecOps, kVecOps, kVecAdd);
+		n.target = (int)e["target"].GetInt(1);
+		n.seconds = (float)e["seconds"].GetNumber(n.type == kScriptSetValue || n.type == kScriptZoneOutline ? 0.0 : 1.0);
+		n.rgb = (uint32_t)strtoul(e["colour"].GetString("ffcc33").c_str(), nullptr, 16) & 0xffffff;
+		n.maxSeconds = (float)e["max_seconds"].GetNumber(0.0);
+		n.repeat = e["repeat"].GetBool(false);
+		n.autostart = e["autostart"].GetBool(false);
+		n.text = e["text"].GetString(std::string());
+		n.victim = (int)e["victim"].GetInt(-1);
+		n.alive = e["alive"].GetBool(false);
+		std::string info = e["info"].GetString("team");
+		n.info = info == "score" ? 1 : info == "kills" ? 2 : info == "deaths" ? 3 : info == "lives" ? 4 : 0;
+		std::string scoreof = e["scoreof"].GetString("team");
+		n.scoreOf = scoreof == "player" ? 0 : scoreof == "against" ? 2 : 1;
+		std::string showto = e["showto"].GetString("all");
+		n.showTo = showto == "player" ? 1 : showto == "team" ? 2 : 0;
+		std::string style = e["style"].GetString("banner");
+		n.style = style == "top" ? 1 : style == "hud" ? 2 : 0;
+		n.manual = e["respawn"].GetString("auto") == "manual";
+		n.font = e["font"].GetString(std::string());
+		ins.emplace_back();
+		for (const auto& port : e["out"].Items()) {
+			for (int k = 0; k < kScriptOuts; k++) {
+				const char* name = kScriptTypeInfo[n.type].outs[k];
+				if (!name || port.first != name) {
+					continue;
+				}
+				for (const Json& l : port.second.Elements()) {
+					n.out[k].push_back({(int)l.At(0).GetInt(-1), -1});
+					ins.back().emplace_back(k, l.At(1).GetString(std::string()));
+				}
+			}
+		}
+		sc.nodes.push_back(n);
+	}
+	// links' input ports by name, from their target's type
+	for (size_t i = 0; i < sc.nodes.size(); i++) {
+		ScriptNode& n = sc.nodes[i];
+		std::vector<ScriptLink> out[kScriptOuts];
+		size_t at[kScriptOuts] = {};
+		for (const auto& in : ins[i]) {
+			ScriptLink link = n.out[in.first][at[in.first]++];
+			if (link.node < 0 || link.node >= (int)sc.nodes.size()) {
+				continue;
+			}
+			const ScriptTypeInfo& t = kScriptTypeInfo[sc.nodes[link.node].type];
+			for (int k = 0; k < kScriptIns; k++) {
+				if (t.ins[k] && in.second == t.ins[k]) {
+					link.in = k;
+				}
+			}
+			if (link.in >= 0) {
+				out[in.first].push_back(link);
+			}
+		}
+		for (int k = 0; k < kScriptOuts; k++) {
+			n.out[k] = out[k];
+		}
+	}
+	for (const auto& v : js["var_init"].Items()) {   // a game mode's settings: their values
+		int k = atoi(v.first.c_str());
+		if (k >= 0 && k < sc.vars) {
+			sc.varInit.emplace_back(k, (float)v.second.GetNumber(0.0));
+		}
+	}
+}
+
+namespace {
+
 // map.json of a zip into map (name, base, number, size). false = not a map package.
 bool ReadManifest(const Zip& zip, const std::wstring& label, MapPackage* map)
 {
@@ -442,142 +604,8 @@ bool ReadManifest(const Zip& zip, const std::wstring& label, MapPackage* map)
 			map->physics.post.push_back(v);
 		}
 	}
+	ParseScriptGraph(root["script"], label, &map->physics.script);
 	ScriptGraph& sc = map->physics.script;
-	const Json& js = root["script"];
-	sc.volumes = (int)js["volumes"].GetInt(0);
-	sc.vars = (int)js["vars"].GetInt(0);
-	for (const Json& e : js["start_off"].Elements()) {
-		sc.startOff.push_back((int)e.GetInt(-1));
-	}
-	for (const Json& e : js["var_names"].Elements()) {
-		sc.varNames.push_back(e.GetString(std::string()));
-	}
-	for (const Json& e : js["var_kinds"].Elements()) {
-		std::string k = e.GetString(std::string());
-		sc.varKinds.push_back(k == "player" ? kVarPlayer : k == "list" ? kVarList : k == "marker" ? kVarMarker
-			: k == "markers" ? kVarMarkers : k == "vector" ? kVarVector : kVarNumber);
-	}
-	auto operand = [](const Json& j) {
-		ScriptOperand o;
-		if (j.IsObject()) {
-			o.var = (int)j["var"].GetInt(-1);
-		}
-		else {
-			o.num = (float)j.GetNumber(0.0);
-		}
-		return o;
-	};
-	std::vector<std::vector<std::pair<int, std::string>>> ins; // per node, per output port: (target, its input name)
-	for (const Json& e : js["nodes"].Elements()) {
-		ScriptNode n;
-		std::string type = e["type"].GetString(std::string());
-		n.type = -1;
-		for (int t = 0; t < kScriptTypes; t++) {
-			if (type == kScriptTypeInfo[t].name) {
-				n.type = t;
-			}
-		}
-		if (n.type < 0) {
-			XLS_LOG_WARN("mods: map %ls: script node type \"%s\" unknown (a newer editor?): it does nothing.", label.c_str(), type.c_str());
-			n.type = kScriptLog;
-		}
-		n.sid = (int)e["sid"].GetInt(-1);
-		std::string who = e["who"].GetString("any");
-		n.who = who == "player" ? 1 : who == "vs" ? 2 : 0;
-		n.var = (int)e["var"].GetInt(-1);
-		n.toggle = e["toggle"].GetBool(false);
-		if (n.type == kScriptSet && !e.Has("a") && !n.toggle) {   // older maps: "value" on / off / toggle
-			std::string value = e["value"].GetString("toggle");
-			n.toggle = value == "toggle";
-			n.a.num = value == "on" ? 1.0f : 0.0f;
-		}
-		n.a = e.Has("a") ? operand(e["a"]) : n.a;
-		n.b = operand(e["b"]);
-		std::string op = e["op"].GetString("+");
-		for (int k = 0; k < kOps; k++) {
-			if (op == kScriptOps[k]) {
-				n.op = k;
-			}
-		}
-		std::string setting = e["setting"].GetString(std::string());
-		for (int k = 0; k < kSettings; k++) {
-			if (setting == kScriptSettings[k]) {
-				n.setting = k;
-			}
-		}
-		n.integer = e["integer"].GetBool(false);
-		n.player = (int)e["player"].GetInt(-1);
-		n.list = (int)e["list"].GetInt(-1);
-		n.random = e["random"].GetBool(false);
-		n.spawnKind = e["kind"].GetString("weapon") == "vs" ? 2 : 4;
-		n.marker = (int)e["marker"].GetInt(-1);
-		n.face = e["face"].GetBool(true);
-		for (const Json& c : e["cases"].Elements()) {
-			n.cases.push_back((float)c.GetNumber(0.0));
-		}
-		for (const Json& k : e["items"].Elements()) {
-			n.items.push_back((int)k.GetInt(-1));
-		}
-		auto pick = [](const std::string& v, const char* const* names, int count, int fallback) {
-			for (int k = 0; k < count; k++) {
-				if (v == names[k]) {
-					return k;
-				}
-			}
-			return fallback;
-		};
-		n.check = pick(e["check"].GetString(std::string()), kScriptChecks, kChecks, kCheckGone);
-		n.stat = pick(e["stat"].GetString(std::string()), kScriptStats, kStats, kStatHealth);
-		n.action = pick(e["action"].GetString(std::string()), kScriptActions, kActions, kActDamage);
-		n.vec = (int)e["vec"].GetInt(-1);
-		n.fromMarker = e["from"].GetString("player") == "marker";
-		n.vecOp = pick(e["vecop"].GetString(std::string()), kScriptVecOps, kVecOps, kVecAdd);
-		n.target = (int)e["target"].GetInt(1);
-		n.seconds = (float)e["seconds"].GetNumber(n.type == kScriptSetValue || n.type == kScriptZoneOutline ? 0.0 : 1.0);
-		n.rgb = (uint32_t)strtoul(e["colour"].GetString("ffcc33").c_str(), nullptr, 16) & 0xffffff;
-		n.maxSeconds = (float)e["max_seconds"].GetNumber(0.0);
-		n.repeat = e["repeat"].GetBool(false);
-		n.autostart = e["autostart"].GetBool(false);
-		n.text = e["text"].GetString(std::string());
-		ins.emplace_back();
-		for (const auto& port : e["out"].Items()) {
-			for (int k = 0; k < kScriptOuts; k++) {
-				const char* name = kScriptTypeInfo[n.type].outs[k];
-				if (!name || port.first != name) {
-					continue;
-				}
-				for (const Json& l : port.second.Elements()) {
-					n.out[k].push_back({(int)l.At(0).GetInt(-1), -1});
-					ins.back().emplace_back(k, l.At(1).GetString(std::string()));
-				}
-			}
-		}
-		sc.nodes.push_back(n);
-	}
-	// links' input ports by name, from their target's type
-	for (size_t i = 0; i < sc.nodes.size(); i++) {
-		ScriptNode& n = sc.nodes[i];
-		std::vector<ScriptLink> out[kScriptOuts];
-		size_t at[kScriptOuts] = {};
-		for (const auto& in : ins[i]) {
-			ScriptLink link = n.out[in.first][at[in.first]++];
-			if (link.node < 0 || link.node >= (int)sc.nodes.size()) {
-				continue;
-			}
-			const ScriptTypeInfo& t = kScriptTypeInfo[sc.nodes[link.node].type];
-			for (int k = 0; k < kScriptIns; k++) {
-				if (t.ins[k] && in.second == t.ins[k]) {
-					link.in = k;
-				}
-			}
-			if (link.in >= 0) {
-				out[in.first].push_back(link);
-			}
-		}
-		for (int k = 0; k < kScriptOuts; k++) {
-			n.out[k] = out[k];
-		}
-	}
 	for (const Json& e : root["script_volumes"].Elements()) {
 		ScriptBox b;
 		bool ok = e["min"].Elements().size() == 3 && e["max"].Elements().size() == 3;

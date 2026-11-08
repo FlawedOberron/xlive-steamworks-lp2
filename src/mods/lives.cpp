@@ -215,6 +215,13 @@ void LivesReport(int slot, LifeState state, int team, int respawnsLeft, const ch
 	Slot& s = g_slots[slot];
 	if (s.state != state) {
 		XLS_LOG_INFO("mods: lives: player %d %s -> %s (team %d, respawns left %d).", slot, StateName(s.state), StateName(state), team, respawnsLeft);
+		// the game mode's events: a death (in play -> down), a spawn (back in play)
+		if (s.state == LifeState::Alive && (state == LifeState::Dead || state == LifeState::Out)) {
+			ModeEvent(kEvDeath, slot);
+		}
+		else if (state == LifeState::Alive && s.state != LifeState::None) {
+			ModeEvent(kEvSpawn, slot);
+		}
 	}
 	s.state = state;
 	if (team >= 0) {
@@ -391,6 +398,15 @@ void LivesWatching(int slot)
 	if (was != slot) {
 		XLS_LOG_INFO("mods: lives: watching player %d (was %d).", slot, was);
 	}
+}
+
+std::string LivesName(int slot)
+{
+	if (slot < 0 || slot >= 16) {
+		return std::string();
+	}
+	std::lock_guard<std::mutex> lock(g_mutex);
+	return g_slots[slot].name;
 }
 
 void LivesInstall()
