@@ -640,12 +640,18 @@ void GrappleInstall(uint8_t* base, int build)
 // standing; called by the hit handlers with a negative delta), and at 0 the character flinches and refills. Ours
 // scales the negative deltas; refills (positive) pass as they are. VS rules only, so the Campaign's Akrid keep theirs.
 using StaggerAddFn = bool(__attribute__((thiscall)) *)(void*, uint32_t, uint32_t);
-StaggerAddFn g_staggerAddOriginal = nullptr;
+// Three point pools a hit takes from (uCharacterBase::vf151, DX11 0x9d4210): shrink (+0xc, FUN_009b72a0: flag d7c 0x10),
+// blown (+0x12, FUN_009b7350: flag d7c 0x20), and a third (+0x18, FUN_009b7400: FUN_009b8bb0). Which one makes a
+// rifle hit flinch a human isn't known yet, so the Hit Stagger scale goes on all three and the log says which ran out.
+StaggerAddFn g_staggerOriginal[3] = {};
 const uint32_t kStaggerAdd[kBuildCount] = {0x9b72a0, 0x9a7a20, 0x9b75c0, 0x9a7b70};
+const uint32_t kStaggerPoolOffset[3] = {0, 0xb0, 0x160};
+const char* const kStaggerPools[3] = {"shrink", "blown", "third"};
 
+template <int Pool>
 bool __attribute__((thiscall)) StaggerAdd(void* character, uint32_t delta, uint32_t b)
 {
-	int16_t points = (int16_t)delta;
+	int16_t points = (int16_t)delta, before = points;
 	float scale = kStaggerScales[g_stagger % kStaggerValues];
 	if (points < 0 && scale != 1.0f) {
 		points = (int16_t)(points * scale);
@@ -654,16 +660,29 @@ bool __attribute__((thiscall)) StaggerAdd(void* character, uint32_t delta, uint3
 			return true; // nothing taken off: still standing
 		}
 	}
-	return g_staggerAddOriginal(character, delta, b);
+	bool standing = g_staggerOriginal[Pool](character, delta, b);
+	if (!standing && points < 0) {
+		static LONG logged = 0;
+		if (InterlockedIncrement(&logged) <= 60) {
+			XLS_LOG_INFO("mods: rules: hit stagger: %s points ran out on %p (kind %u, hit %d, scaled %d, scale %.2f).", kStaggerPools[Pool],
+			             character, (unsigned)((uint8_t*)character)[0x1f], before, points, scale);
+		}
+	}
+	return standing;
 }
 
 void StaggerInstall(uint8_t* base, int build)
 {
 	bool dx9 = build == 1 || build == 3;
 	const uint8_t prologue[] = {0x56, 0x8b, 0xf1, 0x8b, 0x8e, (uint8_t)(dx9 ? 0xb4 : 0xc4), 0x0c, 0x00, 0x00}; // push esi; mov esi,ecx; mov ecx,[esi+0xcc4]
-	g_staggerAddOriginal = (StaggerAddFn)Detour(base + (kStaggerAdd[build] - 0x400000), prologue, sizeof(prologue), (void*)&StaggerAdd);
-	if (!g_staggerAddOriginal) {
-		XLS_LOG_WARN("mods: rules: stagger add not hooked, the Hit Stagger row has no effect.");
+	const uint8_t third[] = {0x56, 0x8b, 0xf1, 0x83, 0xbe, (uint8_t)(dx9 ? 0xe0 : 0xf0), 0x17, 0x00, 0x00, 0x00}; // push esi; mov esi,ecx; cmp [esi+0x17f0],0
+	void* hooks[3] = {(void*)&StaggerAdd<0>, (void*)&StaggerAdd<1>, (void*)&StaggerAdd<2>};
+	for (int i = 0; i < 3; i++) {
+		uint8_t* at = base + (kStaggerAdd[build] + kStaggerPoolOffset[i] - 0x400000);
+		g_staggerOriginal[i] = i == 2 ? (StaggerAddFn)Detour(at, third, sizeof(third), hooks[i]) : (StaggerAddFn)Detour(at, prologue, sizeof(prologue), hooks[i]);
+		if (!g_staggerOriginal[i]) {
+			XLS_LOG_WARN("mods: rules: stagger %s add not hooked, the Hit Stagger row doesn't cover it.", kStaggerPools[i]);
+		}
 	}
 }
 
