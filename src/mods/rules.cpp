@@ -27,6 +27,8 @@
 #include <mutex>
 #include <string>
 
+#include "third-party/imgui/imgui.h"
+
 // Extra match rules the stock game doesn't have. The host's rules hold in its lobby: each player
 // publishes its own as member data "rules" ("ammo=1;grenades=0"), and everyone applies the lobby
 // owner's (outside lobbies, their own). Each player's weapons run on its own PC, so every player
@@ -1004,31 +1006,6 @@ int UnitTeam(int slot)
 	return slot >= 0 && slot < 16 ? g_selfTeam[slot] : -1;
 }
 
-bool SameTeam(int slot, int self)
-{
-	int a = UnitTeam(slot), b = UnitTeam(self);
-	return a >= 0 && b >= 0 ? a == b : SlotTeam(slot) == SlotTeam(self);
-}
-
-// A slot worth watching: in play, alive (state 0), not out and, in Team Survival, on our team.
-bool Watchable(int slot, int self)
-{
-	return slot != self && Body(slot) && g_slotState[slot] == 0 && !SlotOut(slot) && (!g_team || SameTeam(slot, self));
-}
-
-// The next watchable slot after (dir 1) or before (dir -1) the watched one, -1 for none.
-int NextWatchable(int self, int dir)
-{
-	int from = g_watched < 0 ? self : g_watched;
-	for (int i = 1; i <= 16; i++) {
-		int slot = (from + dir * i + 32) % 16;
-		if (Watchable(slot, self)) {
-			return slot;
-		}
-	}
-	return -1;
-}
-
 // The slot's entry is its pad too: actions held at +0x3b8 (fire 0x100 watches the next player, zoom 0x100000 the previous).
 const uint32_t kPadHeld = 0x3b8;
 const uint64_t kActFire = 0x100, kActZoom = 0x100000;
@@ -1043,17 +1020,18 @@ void Spectate(uint8_t* entry, int self, bool force)
 	uint64_t pad = *(uint64_t*)(entry + kPadHeld), pressed = pad & ~g_padWas;
 	g_padWas = pad;
 	int dir = pressed & kActFire ? 1 : pressed & kActZoom ? -1 : 0;
-	if (dir || g_watched < 0 || !Watchable(g_watched, self)) {
-		int next = NextWatchable(self, dir ? dir : 1);
+	int keep = LivesPickWatch(self, g_watched, 0);
+	if (dir || g_watched < 0 || keep != g_watched) {
+		int next = LivesPickWatch(self, g_watched, dir ? dir : 1);
 		if (next < 0 && g_watched >= 0 && Body(g_watched)) {
 			next = g_watched; // the only one left, or the last one standing: stay on them
 		}
 		if (next != g_watched) {
-			XLS_LOG_INFO("mods: rules: survival: spectating player %d (teams: setup %d/%d, body %d/%d).", next, next >= 0 ? SlotTeam(next) : -1,
-			             SlotTeam(self), next >= 0 ? UnitTeam(next) : -1, UnitTeam(self));
+			XLS_LOG_INFO("mods: rules: survival: spectating player %d (team %d, own %d).", next, LivesTeam(next), LivesTeam(self));
 		}
 		g_watched = next;
 	}
+	LivesWatching(g_watched);
 	uint8_t* body = g_watched >= 0 ? Body(g_watched) : nullptr;
 	if (body && (force || *(uint8_t**)(cam + kCameraBody) != body)) { // forced after a held respawn: its pick view takes the camera
 		g_follow(cam, body, 0xff, *g_followArg, 0.0f);
@@ -1304,21 +1282,6 @@ void TeamRows(uint8_t* list)
 	}
 }
 
-// Spectating (Survival, out of lives): the controls, under the list (the game has no prompt for them).
-void SpectateHint(uint8_t* list)
-{
-	if (!g_survival || !g_hudHidden || !g_text || !*g_textCtx) {
-		return;
-	}
-	uint32_t style[16];
-	ListTextStyle(style);
-	const char* const lines[] = {"SPECTATING", "Fire: next player", "Zoom: previous player"};
-	for (int i = 0; i < 3; i++) {
-		int32_t rect[4] = {g_teamRowsX, g_teamRowsY + (17 + i) * g_teamRowsGap, 12, 12};
-		g_text(*g_textCtx, list, lines[i], rect, 0, 0xffffffff, style, 0, 1.0f);
-	}
-}
-
 // Survival hides the team gauge bar: its update (which shows it for Team Elimination) is skipped, the
 // match start's reset hides it.
 ListDrawFn g_teamBarOriginal = nullptr;
@@ -1383,7 +1346,6 @@ void __attribute__((thiscall)) ListDraw(uint8_t* list)
 	if (!CountersOurs()) { // the team counters show the respawns when hooked
 		TeamRows(list);
 	}
-	SpectateHint(list);
 	static bool hidden = false;
 	static DWORD applied = 0;
 	bool hide = g_survival && g_hudHidden;
@@ -1407,9 +1369,13 @@ extern std::atomic<DWORD> g_localSeen;
 
 void DeathProbe(uint8_t* ctl);
 
+std::atomic<DWORD> g_hudSeenAt{0}; // the battle HUD's last update: our overlay's HUD shows only while it runs
+
 void __attribute__((thiscall)) HudUpdate(uint8_t* hud)
 {
+	g_hudSeenAt = GetTickCount();
 	int self = g_localIndex;
+	LivesMatch(self, g_survival && g_lives > 0, g_team);
 	uint8_t** entry = (uint8_t**)(hud + kHudEntry);
 	uint8_t* own = *entry;
 	bool out = g_survival && self >= 0 && self < 16 && own && own == g_controllers[self] && SlotOut(self);
@@ -1651,6 +1617,30 @@ void DeathProbeWrite(uint8_t* ctl)
 	}
 }
 
+// What the lives core is told about a slot (lives.cpp): its state, its team while alive, respawns left. The death only
+// counts once the death view's countdown ends, so one in the death view is taken off here.
+void ReportLife(int slot)
+{
+	uint8_t* setup = g_matchSetup ? *g_matchSetup : nullptr;
+	uint8_t* body = Body(slot);
+	uint8_t st = g_slotState[slot];
+	bool out = g_survival && g_lives > 0 && SlotOut(slot);
+	LifeState state = out && (st != 0 || !body) ? LifeState::Out : st != 0 || !body ? LifeState::Dead : LifeState::Alive;
+	int team = state == LifeState::Alive ? UnitTeam(slot) : -1;
+	if (team < 0 && LivesTeam(slot) < 0) {
+		team = SlotTeam(slot);
+	}
+	int left = -1;
+	if (g_survival && g_lives > 0) {
+		int pending = st == kStateDeath ? 1 : 0;
+		left = std::max(g_lives - 1 - (g_team ? TeamDeaths(SlotTeam(slot)) : SlotDeaths(slot)) - pending, 0);
+		if (out) {
+			left = 0;
+		}
+	}
+	LivesReport(slot, state, team, left, setup ? (const char*)setup + (slot + 3) * 0x7c : nullptr);
+}
+
 void __attribute__((thiscall)) ControlUpdate(uint8_t* ctl)
 {
 	if (g_localSlot && *g_net) { // on the game thread, where the game asks it too
@@ -1699,6 +1689,7 @@ void __attribute__((thiscall)) ControlUpdate(uint8_t* ctl)
 	g_ctlUpdateOriginal(ctl);
 	if (ctl && ctl[kCtlSlot] < 16) {
 		g_slotState[ctl[kCtlSlot]] = ctl[kCtlState];
+		ReportLife(ctl[kCtlSlot]);
 	}
 	// once its body is removed the out player gets no update of its own (see HudUpdate)
 	if (local) {
@@ -2005,6 +1996,7 @@ void RoundTime()
 		memset(g_roundScore, 0, sizeof(g_roundScore));
 		memset(g_rawScore, 0, sizeof(g_rawScore));
 		memset(g_roundSeen, 0, sizeof(g_roundSeen));
+		LivesReset();
 		if (g_rounds > 0) {
 			XLS_LOG_INFO("mods: rules: rounds: new match, %s%d rounds, sides switch %s.", g_rounds >= 10 ? "best of " : "", RoundsTotal(g_rounds),
 			             g_switchEvery ? FormatA("every %d", g_switchEvery.load()).c_str() : "never");
@@ -2018,6 +2010,56 @@ void RoundTime()
 	slots[kSlotsHalftime] = 0; // the full time for every round
 	g_roundTimeOriginal();
 	slots[kSlotsHalftime] = g_rounds > 0 ? 1 : 0; // our Rounds row stands in for the stock Halftime one
+}
+
+// The round counter (ui.cpp layer): top centre during a match with Rounds on. "ROUND n" and the rounds format, then the
+// rounds won, own side first in blue, the leading other side in red. Team modes go by team (the round's ranking ids are
+// teams there), free for all by player.
+void RoundCounter(float width, float height)
+{
+	uint8_t* slots = g_matchSetup ? *g_matchSetup : nullptr;
+	if (!slots || !RoundsOn() || g_rounds <= 0 || GetTickCount() - g_hudSeenAt > 500) {
+		return;
+	}
+	int total = RoundsTotal(g_rounds), self = g_localIndex;
+	bool bestOf = g_rounds >= 10;
+	int round = std::min(g_round + (g_roundBreak ? 0 : 1), total);
+	int own = self >= 0 && self < 16 ? (g_team ? SlotTeam(self) : self) : -1;
+	int ownWins = own >= 0 && own < 16 ? g_roundWins[own] : 0, otherWins = 0;
+	for (int id = 0; id < 16; id++) {
+		if (id != own) {
+			otherWins = std::max(otherWins, g_roundWins[id]);
+		}
+	}
+	float scale = height / 720.0f;
+	char title[48], format[48], score[32];
+	snprintf(title, sizeof title, g_roundBreak ? "ROUND %d OVER" : "ROUND %d", round);
+	snprintf(format, sizeof format, bestOf ? "BEST OF %d" : "OF %d", total);
+	ImFont* big = UiFont(true);
+	ImFont* small = UiFont(false);
+	if (!big || !small) {
+		return;
+	}
+	ImVec2 t = big->CalcTextSizeA(big->FontSize, FLT_MAX, 0, title);
+	ImVec2 f = small->CalcTextSizeA(small->FontSize, FLT_MAX, 0, format);
+	snprintf(score, sizeof score, "%d", ownWins);
+	ImVec2 s1 = big->CalcTextSizeA(big->FontSize, FLT_MAX, 0, score);
+	char score2[16];
+	snprintf(score2, sizeof score2, "%d", otherWins);
+	ImVec2 s2 = big->CalcTextSizeA(big->FontSize, FLT_MAX, 0, score2);
+	float pad = 10 * scale, gap = 18 * scale;
+	float midW = std::max(t.x, f.x);
+	float w = s1.x + gap + midW + gap + s2.x + pad * 2, h = t.y + f.y + pad * 1.5f;
+	float x = (width - w) / 2, y = 10 * scale;
+	ImDrawList* dl = ImGui::GetForegroundDrawList();
+	dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + h), IM_COL32(8, 20, 32, 170), 6 * scale);
+	dl->AddRect(ImVec2(x, y), ImVec2(x + w, y + h), IM_COL32(120, 200, 230, 120), 6 * scale, 0, 1.5f * scale);
+	float cx = x + pad + s1.x + gap;
+	dl->AddText(big, big->FontSize, ImVec2(cx + (midW - t.x) / 2, y + pad * 0.5f), IM_COL32(235, 248, 255, 255), title);
+	dl->AddText(small, small->FontSize, ImVec2(cx + (midW - f.x) / 2, y + pad * 0.5f + t.y), IM_COL32(150, 210, 230, 255), format);
+	float sy = y + (h - s1.y) / 2;
+	dl->AddText(big, big->FontSize, ImVec2(x + pad, sy), IM_COL32(76, 156, 255, 255), score);
+	dl->AddText(big, big->FontSize, ImVec2(x + w - pad - s2.x, sy), IM_COL32(255, 72, 72, 255), score2);
 }
 
 // Training's AI Enemy Battle screen (flash\training\id300: Map and Game Type rows, mc_BOT) gets two
@@ -3989,6 +4031,7 @@ DWORD WINAPI ScoreThread(LPVOID)
 
 void RulesInstall(unsigned char* base)
 {
+	LivesInstall();
 	int build = -1;
 	for (int b = 0; b < kBuildCount && build < 0; b++) {
 		if (GameBuild() >= 0 && b != GameBuild()) {
@@ -4210,6 +4253,9 @@ void RulesInstall(unsigned char* base)
 		if (!g_nextRoundOriginal) {
 			XLS_LOG_WARN("mods: rules: rounds not hooked, the Rounds rows have no effect.");
 		}
+		else {
+			UiAddLayer("round counter", RoundCounter);
+		}
 	}
 	g_ctlUpdateOriginal = (ControlUpdateFn)Detour(base + (kRulesVas[build].ctlUpdate - 0x400000), kCtlUpdatePrologue, sizeof(kCtlUpdatePrologue), (void*)&ControlUpdate);
 	if (!g_ctlUpdateOriginal) {
@@ -4347,7 +4393,7 @@ const char* RulesBattleMessage(uint32_t id)
 	bool noneLeft = g_survival && g_lives > 0 && self >= 0 && self < 16 &&
 	                (g_out || (g_team ? TeamDeaths(SlotTeam(self)) + pending >= g_lives : SlotDeaths(self) + pending >= g_lives)); // the thread's flag lags
 	if ((id == 21 || id == 22) && noneLeft) { // "Respawn in <#RespornTime> seconds" / "second": no respawn coming
-		return "Eliminated";
+		return " "; // the overlay says Eliminated (lives.cpp)
 	}
 	return g_eliminatedText && (int)id == g_eliminatedId ? g_eliminatedText : nullptr;
 }

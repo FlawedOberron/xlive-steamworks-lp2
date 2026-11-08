@@ -62,6 +62,7 @@ DWORD WINAPI Worker(LPVOID)
 		// The game has called XLiveInitialize, so all of its code is decrypted.
 		MapsPatchPickers(base);
 		RulesInstall(base);
+		UiInstall(GameBuild());
 		GravityInstall(base);
 		PostInstall(base);
 		WaterInstall(base);

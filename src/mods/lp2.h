@@ -7,6 +7,8 @@
 #include <functional>
 #include <vector>
 
+struct ImFont; // Dear ImGui (ui.cpp)
+
 namespace xls::mods {
 
 // Called from DllMain. Starts a worker that loads the plugin mods and waits for SteamStub to
@@ -24,6 +26,24 @@ void CrashLogInstall(); // logs faults (module + offset, registers, call trail) 
 // Hooks the game's file opens so files in enabled mod folders replace the game's own
 // (mods/<name>/nativePC/... overrides <game>/nativePC/...). Called from DllMain.
 void OverlayInstall();
+// ui.cpp: our own UI drawn over the game each frame (Dear ImGui). A layer draws with ImGui (width, height = the back
+// buffer); none draws anything unless it chooses to. UiFont: our normal and large fonts (nullptr before the first frame).
+using UiDrawFn = void (*)(float width, float height);
+void UiInstall(int build);
+void UiAddLayer(const char* name, UiDrawFn draw);
+::ImFont* UiFont(bool large);
+// lives.cpp: each match slot's life state, as rules.cpp reports it, and what follows from it (who an out player watches,
+// what the overlay tells the player). LivesMatch: called every battle HUD frame. LivesPickWatch: dir 0 keeps a still
+// watchable current one; -1 / 1 step; -1 for nobody.
+enum class LifeState { None, Alive, Dead, Out };
+void LivesInstall();
+void LivesReport(int slot, LifeState state, int team, int respawnsLeft, const char* name);
+void LivesMatch(int local, bool survival, bool teams);
+void LivesReset();
+LifeState LivesState(int slot);
+int LivesTeam(int slot);
+int LivesPickWatch(int self, int current, int dir);
+void LivesWatching(int slot);
 // Extra online map slots declared by mod.json files (maps.cpp). MapsWanted loads them;
 // MapsTryInstall patches the game once its code is decrypted and returns true when done.
 bool MapsWanted();
