@@ -935,6 +935,15 @@ const float* Waypoint(const float* from, const float* goal, int* hopFrom, int* h
 }
 
 // Caller holds g_goalLock.
+// A roaming bot (no target: it isn't fighting) marks its area swept as it goes, so gunfire in an area that a teammate
+// roamed through after the shot was checked: nobody was found there, so it no longer draws the team in (noise goals and
+// the fight pass both skip it). Fresh shots there count again.
+const DWORD kCheckedAfter = 1000;
+bool Checked(const Area& a, int team, DWORD shotAt)
+{
+	return a.swept[team] && (int)(a.swept[team] - shotAt) > (int)kCheckedAfter;
+}
+
 bool RoamPoint(uint8_t* unit, const float* from, RoamGoal& g)
 {
 	AreasBuild();
@@ -963,7 +972,7 @@ bool RoamPoint(uint8_t* unit, const float* from, RoamGoal& g)
 	bool fight = false;
 	for (size_t i = 0; i < g_areas.size(); i++) { // fresh fighting: metres away plus 2 per second old, a little chance
 		const Area& a = g_areas[i];
-		if ((int)i == here || !a.fight[team] || now - a.fight[team] > kFightFor) {
+		if ((int)i == here || !a.fight[team] || now - a.fight[team] > kFightFor || Checked(a, team, a.fight[team])) {
 			continue;
 		}
 		float score = sqrtf(Distance2(from, a.pos)) / 100.0f + (now - a.fight[team]) / 500.0f + Rand() % 15;
@@ -1044,6 +1053,10 @@ void GoalUpdate(uint8_t* unit, RoamGoal& g, DWORD now)
 		const float* heard = nullptr;
 		for (int i = 0; i < n; i++) {
 			float d = Distance2(here, shots[i].pos);
+			int sa = AreaAt(shots[i].pos);
+			if (sa >= 0 && Checked(g_areas[sa], unit[g_vas->team] & 15, shots[i].at)) {
+				continue;   // a teammate (or itself) has been there since: nothing found
+			}
 			if (shots[i].who != unit && (everyone || shots[i].team != unit[g_vas->team]) && d < nearest && d > kArrive * kArrive) {
 				nearest = d;
 				heard = shots[i].pos;
@@ -1072,6 +1085,13 @@ void GoalUpdate(uint8_t* unit, RoamGoal& g, DWORD now)
 		if (d < kArrive || (g.noise && now - g.set > kNoiseLasts)) {
 			if (g.noise) {
 				g.rest = now + kNoiseRest; // it's seen what there was to see
+				int na = AreaAt(g.pos);
+				if (na >= 0) {
+					g_areas[na].swept[unit[g_vas->team] & 15] = now;
+				}
+				if (BotLogOn()) {
+					XLS_LOG_INFO("mods: bots: %p checked the noise: nobody, moving on.", unit);
+				}
 			}
 			renew = true;
 		}
