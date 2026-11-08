@@ -521,8 +521,27 @@ HmActionFn g_hmActionOriginal = nullptr;
 const uint32_t kDodgeVas[kBuildCount] = {0x99b390, 0x98bb40, 0x99b6b0, 0x98be70};
 const uint32_t kPadDodge = 0x1cc, kPadSetDir = 0x14c;
 
+// pad buttons (+0x1c8): pick up 0x2000 (pad action 12), change weapon 0x8 (action 14); the plan's weapon target +0x88c
+const uint32_t kPlanWeapon = 0x88c, kPadButtons = 0x1c8, kPadPickUp = 0x2000, kPadChange = 0x8;
+const int kPadActionPickUp = 0xc;
+bool SwapBeforePickUp(uint8_t* unit, uint8_t* plan);
+
 uint32_t __attribute__((thiscall)) HmAction(uint8_t* move, uint8_t* unit, uint8_t* plan, uint8_t* pad)
 {
+	if (move && move[4] == kPadActionPickUp && unit && plan && pad && BotMenuOptions().improved) {
+		uint32_t& buttons = *(uint32_t*)(pad + kPadButtons);
+		bool pressed = buttons & kPadPickUp;
+		uint32_t r = g_hmActionOriginal(move, unit, plan, pad);
+		if (!pressed && (buttons & kPadPickUp) && SwapBeforePickUp(unit, plan)) {
+			buttons = (buttons & ~kPadPickUp) | kPadChange;
+			static DWORD logged = 0;
+			if (BotLogOn() && GetTickCount() - logged > 3000) {
+				logged = GetTickCount();
+				XLS_LOG_INFO("mods: bots: %p switches to its worse weapon before picking up.", unit);
+			}
+		}
+		return r;
+	}
 	bool dodge = move && move[4] == 4 && pad;
 	bool before = dodge && (*(uint32_t*)(pad + kPadDodge) >> 31);
 	uint32_t r = g_hmActionOriginal(move, unit, plan, pad);
@@ -1227,6 +1246,175 @@ bool BotsBuildBrains(std::vector<ArcEntry>* entries)
 	return true;
 }
 
+
+namespace {
+
+// Weapon pickups (Improved brains). The AI's weapon target (plan +0x88c, resolved by target type 17) comes from the game's
+// nearest-takeable-weapon search, cdecl (character, float* dist, 0, 0, 1, plan's skip list +0x5a8, its count +0x5a4)
+// (DX11 FUN_009af7d0): nearest only, whatever it is. Its two AI callers (the plan's target update FUN_00917b50 and
+// FUN_0091b520) call ours instead: the nearest few, each scored by how much better it is than the worse of the bot's two
+// weapons (class value, personality, an empty one counts as nothing), minus a point a metre; none better: no target.
+// Picking up drops the HELD weapon, so HmAction turns the pickup press into a weapon change while the held one is the better.
+typedef uint8_t*(__cdecl* WeaponSearchFn)(uint8_t*, float*, uint32_t, uint32_t, uint32_t, uint8_t**, uint32_t);
+WeaponSearchFn g_weaponSearch = nullptr;
+struct WeaponVas {
+	uint32_t search, call1, call2;
+};
+const WeaponVas kWeaponVas[kBuildCount] = {
+	{0x9af7d0, 0x917bf1, 0x91b644}, // DX11
+	{0x99fff0, 0x908261, 0x90bcb4}, // DX9
+	{0x9afad0, 0x917dd1, 0x91b8d4}, // DX11 1.1
+	{0x9a0180, 0x908371, 0x90be74}, // DX9 1.1
+};
+
+int WeaponKind(const uint8_t* w)
+{
+	return w ? w[0x1e] : -1;
+}
+
+// what a weapon is worth to this bot (0..~110): rockets and heavies, then shotguns, long, standard, support, handguns
+float WeaponValue(const uint8_t* w, int archetype)
+{
+	if (!w) {
+		return 0.0f;
+	}
+	enum { kStandard, kShort, kLong, kHeavy, kSupport, kHand, kOther };
+	int k = WeaponKind(w), c;
+	switch (k) {
+	case 0x30: c = kStandard; break;
+	case 0x31: case 0x05: case 0x44: c = kShort; break;
+	case 0x32: case 0x02: case 0x42: c = kLong; break;
+	case 0x33: case 0x04: case 0x41: case 0x43: case 0x45: case 0x46: case 0x47: c = kHeavy; break;
+	case 0x34: c = kSupport; break;
+	case 0x0c: c = kHand; break;
+	case 0x01: case 0x03: case 0x06: case 0x07: c = kStandard; break;
+	default: c = kOther; break;
+	}
+	static const float kBase[] = {60.0f, 78.0f, 68.0f, 88.0f, 50.0f, 20.0f, 40.0f};
+	// aggressor, tactician, cautious, show-off, grenadier: standard, short, long, heavy, support, handgun, other
+	static const float kLean[5][7] = {
+		{1.0f, 1.25f, 0.8f, 1.1f, 0.8f, 1.0f, 1.0f},
+		{1.1f, 1.0f, 1.15f, 1.0f, 1.0f, 1.0f, 1.0f},
+		{1.0f, 0.85f, 1.25f, 0.95f, 1.35f, 1.0f, 1.0f},
+		{0.95f, 1.1f, 1.0f, 1.2f, 0.9f, 1.0f, 1.0f},
+		{1.0f, 1.0f, 0.9f, 1.25f, 1.0f, 1.0f, 1.0f},
+	};
+	float v = kBase[c] * (archetype >= 0 && archetype < 5 ? kLean[archetype][c] : 1.0f);
+	return v;
+}
+
+// a carried weapon's worth: nothing once it's empty (rounds loaded and in reserve, the held weapon's fields)
+float CarriedValue(const uint8_t* w, int archetype)
+{
+	if (!w) {
+		return 0.0f;
+	}
+	const uint32_t d = g_vas->held == 0x1688 ? 0 : 0x10;
+	int16_t loaded = *(const int16_t*)(w + 0x20fc - d), reserve = *(const int16_t*)(w + 0x20fe - d);
+	return loaded <= 0 && reserve <= 0 ? 0.0f : WeaponValue(w, archetype);
+}
+
+bool SameWeapon(const uint8_t* a, const uint8_t* b)
+{
+	return a && b && (*(const uint32_t*)(a + 0x1c) >> 8) == (*(const uint32_t*)(b + 0x1c) >> 8);
+}
+
+uint8_t* __cdecl WeaponSearch(uint8_t* ch, float* dist, uint32_t a, uint32_t b, uint32_t c, uint8_t** list, uint32_t count)
+{
+	uint8_t* nearest = g_weaponSearch(ch, dist, a, b, c, list, count); // with the plan's own list: it also clears taken ones
+	uint8_t* game = *(uint8_t**)At(g_vas->game);
+	if (!nearest || !ch || ch[0x1f] != 1 || !BotWorld(game) || !BotMenuOptions().improved) {
+		return nearest;
+	}
+	count &= 0xffff;
+	const int kMax = 6;
+	uint8_t* skip[64];
+	uint32_t n = 0;
+	for (uint32_t i = 0; list && i < count && n < 56; i++) {
+		skip[n++] = list[i];
+	}
+	uint8_t* found[kMax];
+	float away[kMax];
+	int m = 0;
+	found[m] = nearest;
+	away[m++] = *dist;
+	while (m < kMax) {
+		skip[n++] = found[m - 1];
+		float d = 0.0f;
+		uint8_t* w = g_weaponSearch(ch, &d, a, b, c, skip, n);
+		if (!w) {
+			break;
+		}
+		found[m] = w;
+		away[m++] = d;
+	}
+	int arch = Personality(ch);
+	uint8_t* held = *(uint8_t**)(ch + g_vas->held);
+	uint8_t* other = *(uint8_t**)(ch + g_vas->other);
+	float worst = std::min(CarriedValue(held, arch), CarriedValue(other, arch));
+	int best = -1;
+	float bestScore = 0.0f, bestGain = 0.0f;
+	for (int i = 0; i < m; i++) {
+		float gain;
+		if (SameWeapon(found[i], held) || SameWeapon(found[i], other)) { // ammo for one it has: only when that one runs dry
+			const uint8_t* mine = SameWeapon(found[i], held) ? held : other;
+			gain = CarriedValue(mine, arch) <= 0.0f ? 30.0f : -1.0f;
+		}
+		else {
+			gain = WeaponValue(found[i], arch) - worst;
+		}
+		float score = gain - away[i] / 100.0f;
+		if (gain > 0.0f && (best < 0 || score > bestScore)) {
+			best = i;
+			bestScore = score;
+			bestGain = gain;
+		}
+	}
+	static DWORD logged = 0;
+	if (BotLogOn() && GetTickCount() - logged > 3000) {
+		logged = GetTickCount();
+		XLS_LOG_INFO("mods: bots: %p weapons near: %d, carries %02x / %02x; %s %02x %.0f m away (gain %.0f), nearest %02x.", ch, m,
+		             WeaponKind(held), WeaponKind(other), best >= 0 ? "goes for" : "none worth it, skips", best >= 0 ? WeaponKind(found[best]) : 0,
+		             best >= 0 ? away[best] / 100.0f : 0.0f, bestGain, WeaponKind(nearest));
+	}
+	if (best < 0) {
+		return nullptr;
+	}
+	*dist = away[best];
+	return found[best];
+}
+
+bool PatchCall(uint8_t* at, uint8_t* expect, void* to)
+{
+	if (at[0] != 0xe8 || at + 5 + *(int32_t*)(at + 1) != expect) {
+		return false;
+	}
+	int32_t rel = (int32_t)((uint8_t*)to - (at + 5));
+	DWORD old;
+	if (!VirtualProtect(at + 1, 4, PAGE_EXECUTE_READWRITE, &old)) {
+		return false;
+	}
+	memcpy(at + 1, &rel, 4);
+	VirtualProtect(at + 1, 4, old, &old);
+	FlushInstructionCache(GetCurrentProcess(), at, 5);
+	return true;
+}
+
+// the pickup press, when the bot holds the better of its two weapons: switch first so the worse one is dropped
+bool SwapBeforePickUp(uint8_t* unit, uint8_t* plan)
+{
+	uint8_t* w = *(uint8_t**)(plan + kPlanWeapon);
+	uint8_t* held = *(uint8_t**)(unit + g_vas->held);
+	uint8_t* other = *(uint8_t**)(unit + g_vas->other);
+	if (!w || !held || !other || SameWeapon(w, held) || SameWeapon(w, other) || WeaponKind(held) == 0x0c || WeaponKind(other) == 0x0c) {
+		return false;
+	}
+	int arch = Personality(unit);
+	return CarriedValue(held, arch) > CarriedValue(other, arch) + 2.0f;
+}
+
+}
+
 void BotsInstall(unsigned char* base)
 {
 	g_base = base;
@@ -1266,6 +1454,19 @@ void BotsInstall(unsigned char* base)
 	g_resolveOriginal = (ResolveFn)Detour(At(g_vas->resolve), kResolvePrologue, sizeof(kResolvePrologue), (void*)&Resolve);
 	if (!g_resolveOriginal) {
 		XLS_LOG_WARN("mods: bots: target code not recognised, bots won't roam.");
+	}
+	if (GameBuild() >= 0) {
+		const WeaponVas& w = kWeaponVas[GameBuild()];
+		static const uint8_t kSearchPrologue[] = {0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf0, 0x83, 0xec, 0x14, 0x53, 0x56, 0x57};
+		if (memcmp(At(w.search), kSearchPrologue, sizeof(kSearchPrologue)) == 0) {
+			g_weaponSearch = (WeaponSearchFn)At(w.search);
+			bool one = PatchCall(At(w.call1), At(w.search), (void*)&WeaponSearch);
+			bool two = PatchCall(At(w.call2), At(w.search), (void*)&WeaponSearch);
+			XLS_LOG_INFO("mods: bots: weapon pickups ranked (%s%s).", one ? "plan" : "", two ? (one ? " + target" : "target") : "");
+		}
+		else {
+			XLS_LOG_WARN("mods: bots: weapon search not recognised, bots take the nearest weapon.");
+		}
 	}
 	g_seed = GetTickCount();
 	XLS_LOG_INFO("mods: bots: installed (%s).", BuildName((int)(g_vas - kBotVas)));
