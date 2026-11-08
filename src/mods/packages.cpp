@@ -353,6 +353,36 @@ bool ReadManifest(const Zip& zip, const std::wstring& label, MapPackage* map)
 			map->physics.oneway.push_back(v);
 		}
 	}
+	{
+		const Json& nz = root["nav_zones"];
+		auto vec3 = [](const Json& j, float* out) {
+			bool ok = j.Elements().size() == 3;
+			for (int i = 0; i < 3; i++) {
+				out[i] = ok ? (float)j.Elements()[i].GetNumber(0.0) : 0.0f;
+			}
+			return ok;
+		};
+		for (const Json& e : nz["zones"].Elements()) {
+			NavZone z;
+			z.name = e["name"].GetString("");
+			if (vec3(e["pos"], z.pos)) {
+				vec3(e["size"], z.size);
+				map->physics.nav.zones.push_back(z);
+			}
+		}
+		int count = (int)map->physics.nav.zones.size();
+		for (const Json& e : nz["links"].Elements()) {
+			NavLink l;
+			l.from = (int)e["from"].GetInt(-1);
+			l.to = (int)e["to"].GetInt(-1);
+			const std::string kind = e["kind"].GetString("walk");
+			l.kind = kind == "jump" ? kNavJump : kind == "drop" ? kNavDrop : kind == "grapple" ? kNavGrapple : kind == "launch" ? kNavLaunch : kNavWalk;
+			l.length = (float)e["length"].GetNumber(0.0);
+			if (l.from >= 0 && l.from < count && l.to >= 0 && l.to < count && vec3(e["a"], l.a) && vec3(e["b"], l.b)) {
+				map->physics.nav.links.push_back(l);
+			}
+		}
+	}
 	for (const Json& e : root["force_volumes"].Elements()) {
 		ForceVolume v;
 		bool ok = e["min"].Elements().size() == 3 && e["max"].Elements().size() == 3 && e["force"].Elements().size() == 3;

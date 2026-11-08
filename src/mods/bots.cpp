@@ -26,6 +26,7 @@
 // the brain (Improved = ours, Stock), one archetype for every bot or a mix, a difficulty that scales the traits
 // (attacker, quickness, grenade, impatient up; calm down) and how often taunts may come.
 #include "mods/lp2.h"
+#include "mods/packages.h"
 #include "mods/brains.h"
 #include "mods/package.h"
 #include "mods/parts.h"
@@ -36,6 +37,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <math.h>
 
@@ -659,14 +661,25 @@ float Distance2(const float* a, const float* b)
 const float kAreaCell = 2500.0f, kAreaLevel = 500.0f, kStep = 4500.0f, kStepUp = 600.0f, kLevelWeight = 4.0f;
 const DWORD kHopStuck = 5000, kBlockedFor = 120000;
 const DWORD kSweptFor = 120000, kFightFor = 30000;
+// A map package's zones (lp2navmap) replace the start point areas: links then have a kind and where they start and end.
+struct Hop {
+	int to;
+	int kind; // NavKind
+	float a[3], b[3];
+	float length;
+};
+const bool kBotsGrapple = false; // grapple links are routed over once bots can fire the anchor (RE: the bot pad's action 10)
 struct Area {
 	float pos[3] = {0, 0, 0};
 	std::vector<int> links; // areas a bot can run to in one go (the game's path gives up on long runs)
+	std::vector<Hop> hops;  // zones: the links with how they're crossed
 	DWORD swept[16] = {}, fight[16] = {};
 };
 std::vector<Area> g_areas;
 std::vector<const float*> g_points; // the start points (not base markers)
-std::unordered_map<int64_t, DWORD> g_blocked; // link from * 1024 + to -> when a bot got stuck on it
+std::unordered_map<int64_t, DWORD> g_blocked; // link from * 4096 + to -> when a bot got stuck on it
+NavZones g_nav;      // the map package's (under g_goalLock)
+int g_navVersion = 0, g_navBuilt = -1;
 std::unordered_map<int64_t, int> g_areaCells;
 const void* g_areaSet = nullptr;
 uint32_t g_areaCount = 0;
@@ -691,13 +704,41 @@ void AreasBuild()
 	uint8_t* set = game ? *(uint8_t**)(game + kInitPosSet) : nullptr;
 	uint32_t count = set ? *(uint32_t*)(set + kSetCount) : 0;
 	uint8_t** records = set ? *(uint8_t***)(set + kSetArray) : nullptr;
-	if (set == g_areaSet && count == g_areaCount) {
+	if (set == g_areaSet && count == g_areaCount && g_navBuilt == g_navVersion) {
 		return;
 	}
 	g_areaSet = set;
 	g_areaCount = count;
+	g_navBuilt = g_navVersion;
 	g_areas.clear();
 	g_areaCells.clear();
+	if (!g_nav.zones.empty()) { // the package's zones
+		g_points.clear();
+		for (uint32_t i = 0; records && i < count && count <= 256; i++) {
+			if (records[i] && records[i][kRecKind] <= 5) {
+				g_points.push_back((const float*)(records[i] + kRecPos));
+			}
+		}
+		for (const NavZone& z : g_nav.zones) {
+			Area a;
+			memcpy(a.pos, z.pos, sizeof(a.pos));
+			g_areas.push_back(a);
+		}
+		int kinds[5] = {};
+		for (const NavLink& l : g_nav.links) {
+			Hop h = {l.to, l.kind, {l.a[0], l.a[1], l.a[2]}, {l.b[0], l.b[1], l.b[2]}, l.length};
+			g_areas[l.from].hops.push_back(h);
+			if (std::find(g_areas[l.from].links.begin(), g_areas[l.from].links.end(), l.to) == g_areas[l.from].links.end()) {
+				g_areas[l.from].links.push_back(l.to);
+			}
+			kinds[l.kind % 5]++;
+		}
+		g_blocked.clear();
+		XLS_LOG_INFO("mods: bots: the map's %u zones, links: %d walk, %d jump, %d drop, %d grapple (%s), %d launch.", (unsigned)g_areas.size(),
+		             kinds[kNavWalk], kinds[kNavJump], kinds[kNavDrop], kinds[kNavGrapple], kBotsGrapple ? "used within the anchor range" : "not used yet",
+		             kinds[kNavLaunch]);
+		return;
+	}
 	g_points.clear();
 	if (!records || !count || count > 256) {
 		return;
@@ -777,14 +818,83 @@ int AreaAt(const float* p)
 	return best;
 }
 
+// Zone routes: a link's cost is its run plus what crossing it takes (a jump or a drop a little, a launch less than its
+// distance: it's quick, a grapple a lot: only where walking is much longer). Grapples beyond the match's anchor range
+// aren't links at all. The point to run to: across a walk link, the next zone; else the link's start, then its end once
+// there (a ledge to drop off, a launch volume to walk into: force.cpp throws the bot, a grapple's firing spot).
+const float kHopAt = 250.0f;
+
+const float* ZoneWaypoint(const float* from, const float* goal, int start, int end, int* hopFrom, int* hopTo)
+{
+	int n = (int)g_areas.size();
+	DWORD now = GetTickCount();
+	float range = RulesGrappleRange();
+	std::vector<float> cost(n, 1e30f);
+	std::vector<int> prev(n, -1);
+	std::vector<const Hop*> via(n, nullptr);
+	std::vector<bool> done(n, false);
+	cost[start] = 0;
+	for (;;) {
+		int u = -1;
+		for (int i = 0; i < n; i++) {
+			if (!done[i] && cost[i] < 1e29f && (u < 0 || cost[i] < cost[u])) {
+				u = i;
+			}
+		}
+		if (u < 0 || u == end) {
+			break;
+		}
+		done[u] = true;
+		for (const Hop& h : g_areas[u].hops) {
+			if (h.kind == kNavGrapple && (!kBotsGrapple || h.length > range)) {
+				continue;
+			}
+			float run = sqrtf(Distance2(g_areas[u].pos, h.a)) + sqrtf(Distance2(h.b, g_areas[h.to].pos));
+			float cross = h.kind == kNavWalk ? 0.0f : h.kind == kNavJump ? 300.0f : h.kind == kNavDrop ? 200.0f : h.kind == kNavLaunch ? 150.0f : 1500.0f;
+			cross += h.kind == kNavLaunch ? sqrtf(Distance2(h.a, h.b)) * 0.3f : sqrtf(Distance2(h.a, h.b));
+			auto it = g_blocked.find((int64_t)u * 4096 + h.to);
+			bool blocked = it != g_blocked.end() && now - it->second < kBlockedFor;
+			float c = cost[u] + run + cross + (blocked ? 1e6f : 0.0f);
+			if (c < cost[h.to]) {
+				cost[h.to] = c;
+				prev[h.to] = u;
+				via[h.to] = &h;
+			}
+		}
+	}
+	if (prev[end] < 0) {
+		return goal;
+	}
+	int hop = end;
+	while (prev[hop] != start) {
+		hop = prev[hop];
+	}
+	*hopFrom = start;
+	*hopTo = hop;
+	const Hop* h = via[hop];
+	if (!h || h->kind == kNavWalk) {
+		return hop == end ? goal : g_areas[hop].pos;
+	}
+	static DWORD logged = 0;
+	if (GetTickCount() - logged > 3000) {
+		logged = GetTickCount();
+		static const char* const kKinds[] = {"walk", "jump", "drop", "grapple", "launch"};
+		XLS_LOG_INFO("mods: bots: route from zone %d to %d by %s (%.0f m to its start).", start, hop, kKinds[h->kind % 5], sqrtf(Distance2(from, h->a)) / 100.0f);
+	}
+	return Distance2(from, h->a) > kHopAt * kHopAt ? h->a : h->b;
+}
+
 // Caller holds g_goalLock. Where to run now for a goal: in the goal's area, the goal; else the next area on the shortest route
 // over the links (Dijkstra; a blocked link costs a lot, so routes go round it while there's another way). -1 hop: the goal.
 const float* Waypoint(const float* from, const float* goal, int* hopFrom, int* hopTo)
 {
 	*hopFrom = *hopTo = -1;
 	int start = AreaAt(from), end = AreaAt(goal), n = (int)g_areas.size();
-	if (start < 0 || end < 0 || start == end || n > 1024) {
+	if (start < 0 || end < 0 || start == end || n > 4096) {
 		return goal;
+	}
+	if (!g_nav.zones.empty()) {
+		return ZoneWaypoint(from, goal, start, end, hopFrom, hopTo);
 	}
 	DWORD now = GetTickCount();
 	std::vector<float> cost(n, 1e30f);
@@ -803,7 +913,7 @@ const float* Waypoint(const float* from, const float* goal, int* hopFrom, int* h
 		}
 		done[u] = true;
 		for (int v : g_areas[u].links) {
-			auto it = g_blocked.find((int64_t)u * 1024 + v);
+			auto it = g_blocked.find((int64_t)u * 4096 + v);
 			bool blocked = it != g_blocked.end() && now - it->second < kBlockedFor;
 			float c = cost[u] + sqrtf(Distance2(g_areas[u].pos, g_areas[v].pos)) + (blocked ? 1e6f : 0.0f);
 			if (c < cost[v]) {
@@ -1041,7 +1151,7 @@ char __attribute__((thiscall)) Resolve(void* self, uint8_t* unit, uint8_t* plan,
 		g.hopProgress = now;
 	}
 	else if (hopFrom >= 0 && now - g.hopProgress > kHopStuck) { // no closer in a while: that link doesn't work for now
-		g_blocked[(int64_t)hopFrom * 1024 + hopTo] = now;
+		g_blocked[(int64_t)hopFrom * 4096 + hopTo] = now;
 		g.hopProgress = now;
 		if (BotLogOn()) {
 			XLS_LOG_INFO("mods: bots: %p stuck going from area %d to %d (%.0f m left): link blocked for a while.", unit, hopFrom, hopTo, left / 100.0f);
@@ -1139,6 +1249,16 @@ void BotsInstall(unsigned char* base)
 	}
 	g_seed = GetTickCount();
 	XLS_LOG_INFO("mods: bots: installed (%s).", BuildName((int)(g_vas - kBotVas)));
+}
+
+void BotsSetMap(const MapPhysics* physics)
+{
+	std::lock_guard<std::mutex> lock(g_goalLock);
+	g_nav = physics ? physics->nav : NavZones();
+	g_navVersion++;
+	if (!g_nav.zones.empty()) {
+		XLS_LOG_INFO("mods: bots: map package has %u bot zones, %u links.", (unsigned)g_nav.zones.size(), (unsigned)g_nav.links.size());
+	}
 }
 
 }

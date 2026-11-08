@@ -98,6 +98,8 @@ void OnewayInstall(unsigned char* base);
 void ForceInstall(unsigned char* base);
 void ForceUnit(unsigned char* unit, int kind);
 void ForceSetMap(const MapPhysics* physics);
+void BotsSetMap(const MapPhysics* physics); // the package's bot zones (none: areas from the start points)
+float RulesGrappleRange(); // the match's anchor reach, cm (0: grappling off)
 
 // Game versions that may play together (sessions.compatible_versions; versions.cpp).
 void VersionsInstall(unsigned char* base);

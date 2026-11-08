@@ -225,6 +225,25 @@ struct ScriptGraph {
 	int volumes = 0, vars = 0;
 };
 
+// The bots' zones and links (map.json "nav_zones", lp2navmap.zones_and_links): bots.cpp routes zone to zone.
+enum NavKind { kNavWalk, kNavJump, kNavDrop, kNavGrapple, kNavLaunch };
+struct NavZone {
+	std::string name;
+	float pos[3];  // a spot on the walkable surface near its middle, cm
+	float size[3]; // its bounds' size, cm
+};
+struct NavLink {
+	int from, to;
+	int kind;      // NavKind
+	float a[3];    // where it starts (the ledge, the grapple's firing spot, the launch volume's floor centre), cm
+	float b[3];    // where it ends (the landing, the grapple's lip)
+	float length;  // the grapple's reach needed, cm (0 for the others)
+};
+struct NavZones {
+	std::vector<NavZone> zones;
+	std::vector<NavLink> links;
+};
+
 struct MapPhysics {
 	bool jumpPacks = false;   // "jump_packs": NEOS's stage flag (the air boost, the AI's rules) without its x0.3
 	                          // gravity; older "low_gravity" = jump packs and "gravity" x0.3
@@ -237,6 +256,7 @@ struct MapPhysics {
 	std::vector<OnewayVolume> oneway;   // "oneway_volumes": [{"min", "max", "players", "vs", "bullets", "grenades", "akrid"}] (oneway.cpp)
 	std::vector<ForceVolume> force;     // "force_volumes": [{"min", "max", "mode", "force": [x,y,z], flags as oneway's}] (force.cpp)
 	ScriptGraph script;                 // "script", "script_volumes" (scripts.cpp)
+	NavZones nav;                       // "nav_zones" (bots.cpp)
 };
 
 struct MapPackage {

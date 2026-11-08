@@ -4784,4 +4784,9 @@ bool RulesPatchTrainingFlash(std::vector<uint8_t>* gfx)
 	return InsertRootScript(gfx, Bytes(std::begin(kBotRowsScript), std::end(kBotRowsScript)), "AI Enemy Battle rows");
 }
 
+float RulesGrappleRange()
+{
+	return kGrappleStock * kGrappleScales[g_grapple % kGrappleValues];
+}
+
 }
