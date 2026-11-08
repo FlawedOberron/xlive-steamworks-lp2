@@ -26,6 +26,14 @@
 //   A shot: FUN_00c7ce40, weapon's "spend a round", holder at weapon +0x2194 (DX9 -0x10). Called from each weapon's fire code with
 //   no check for whose it is. Whether it runs for other machines' players needs a two-account test: see the log line below.
 //   A grappling player reels faster than the run pace, so needs no case of its own; one hanging still counts as still.
+//
+// Team colours: the game draws blips itself (the radar Flash only has the frame). FUN_00ed8aa0 adds one, thiscall(radar, kind,
+// a, flags, float* pos, sub, b) -> slot index, into entry buffer +0x1bac (0x32 entries of 0x30 at radar+0x370 + buf*0x960:
+// +0 kind, +2 flags, +3 sub, +0x10 pos). FUN_00edd730 reads the other buffer into the draw list (radar+0x1634, 0x1c each, count
+// +0x1c0c: +0 code, +4 sub, +0x14/+0x18 the entry's pos x/z), sorted. FUN_00ed8fb0 draws one, thiscall(radar, ctx, code, sub,
+// ...): code -> sprite + colour, then FUN_00ecc050 (sprite draw, colour its 7th argument). Players and VS (kinds 1-4) are codes
+// 5-7, all one green. Here: each add notes its unit's side by slot; after the list is built a player entry gets the side in
+// its sub (unused for those codes), matched back to its entry by position; the draw passes our colour to the sprite draw.
 
 namespace xls::mods {
 
@@ -42,12 +50,13 @@ const uint32_t kUnitPos = 0xd0, kUnitKind = 0x1f, kUnitSub = 0x1e;
 struct Vas {
 	uint32_t check, update, blip, shot, game, viewer, team, holder;
 	uint8_t shotHead[5];
+	uint32_t add, draw, sprite, setup;
 };
 const Vas kVas[kBuildCount] = {
-	{0xf74980, 0xedd730, 0x9bde40, 0xc7ce40, 0x18520c0, 0x1852078, 0xce2, 0x2194, {0xa1, 0xac, 0x08, 0x8d, 0x01}},
-	{0xf64b20, 0xecd920, 0x9ae4d0, 0xc6d230, 0x1842020, 0x1841fd8, 0xcd2, 0x2184, {0xa1, 0x0c, 0x08, 0x8c, 0x01}},
-	{0xf74e10, 0xeddb00, 0x9bdda0, 0xc7ce60, 0x18530c0, 0x1853078, 0xce2, 0x2194, {0xa1, 0xac, 0x18, 0x8d, 0x01}},
-	{0xf64e00, 0xecd9c0, 0x9ae250, 0xc6ce20, 0x1842020, 0x1841fd8, 0xcd2, 0x2184, {0xa1, 0x0c, 0x08, 0x8c, 0x01}},
+	{0xf74980, 0xedd730, 0x9bde40, 0xc7ce40, 0x18520c0, 0x1852078, 0xce2, 0x2194, {0xa1, 0xac, 0x08, 0x8d, 0x01}, 0xed8aa0, 0xed8fb0, 0xecc050, 0x1852850},
+	{0xf64b20, 0xecd920, 0x9ae4d0, 0xc6d230, 0x1842020, 0x1841fd8, 0xcd2, 0x2184, {0xa1, 0x0c, 0x08, 0x8c, 0x01}, 0xec8c90, 0xec91a0, 0xebc250, 0x18427b0},
+	{0xf74e10, 0xeddb00, 0x9bdda0, 0xc7ce60, 0x18530c0, 0x1853078, 0xce2, 0x2194, {0xa1, 0xac, 0x18, 0x8d, 0x01}, 0xed8e70, 0xed9380, 0xecc420, 0x1853850},
+	{0xf64e00, 0xecd9c0, 0x9ae250, 0xc6ce20, 0x1842020, 0x1841fd8, 0xcd2, 0x2184, {0xa1, 0x0c, 0x08, 0x8c, 0x01}, 0xec8d30, 0xec9240, 0xebc2f0, 0x18427b0},
 };
 const uint8_t kFramePrologue[] = {0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf0};
 
@@ -61,7 +70,19 @@ const Vas* g_vas = nullptr;
 uint8_t** g_game = nullptr;
 uint8_t** g_viewer = nullptr;
 
-std::atomic<int> g_mode{kRadarNear}, g_players{kShowAlways}, g_vs{kShowAlways};
+std::atomic<int> g_mode{kRadarNear}, g_players{kShowAlways}, g_vs{kShowAlways}, g_team{1};
+
+enum { kSideNone, kSideOwn, kSideEnemy };
+const uint32_t kColourOwn = 0xff4c9cff, kColourEnemy = 0xffff4848; // ARGB: blue, red
+const uint32_t kSideMark = 0x5a00; // in a draw entry's sub: kSideMark + side
+using AddFn = int(__attribute__((thiscall)) *)(uint8_t*, uint32_t, uint32_t, uint32_t, float*, uint32_t, uint32_t);
+using DrawFn = void(__attribute__((thiscall)) *)(uint8_t*, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
+AddFn g_addOriginal = nullptr;
+DrawFn g_drawOriginal = nullptr, g_spriteOriginal = nullptr;
+uint8_t** g_setup = nullptr;
+thread_local int t_side = kSideNone;      // the unit whose blip is being added (Blip)
+thread_local uint32_t t_colour = 0;        // the colour for the sprite being drawn (Draw)
+uint8_t g_sides[2][0x32];                   // per entry buffer and slot
 
 struct Seen {
 	float pos[3] = {0, 0, 0};
@@ -106,6 +127,8 @@ int Category(const uint8_t* unit)
 	}
 }
 
+void MarkSides(uint8_t* radar, int read);
+
 uint32_t __attribute__((thiscall)) Check(void* posts, float* pos)
 {
 	if (g_mode == kRadarAlways && Versus()) {
@@ -116,7 +139,11 @@ uint32_t __attribute__((thiscall)) Check(void* posts, float* pos)
 
 void __attribute__((thiscall)) Update(void* cockpit, char on, int a, void* b)
 {
+	int read = 1 - (((uint8_t*)cockpit)[0x1bac] & 1); // the entry buffer it builds the draw list from
 	g_updateOriginal(cockpit, g_mode == kRadarHidden && Versus() ? 0 : on, a, b);
+	if (g_drawOriginal && g_spriteOriginal && g_team) {
+		MarkSides((uint8_t*)cockpit, read);
+	}
 }
 
 Seen& Track(uint8_t* unit, DWORD now)
@@ -155,11 +182,31 @@ bool Detected(int rule, const Seen& s, DWORD now)
 	}
 }
 
+// Own team or enemy, seen from the viewer; free-for-all rules (setup +0x28 1-3) make everyone else an enemy.
+int Side(uint8_t* unit)
+{
+	uint8_t* viewer = g_team && Versus() ? Viewer() : nullptr;
+	if (!viewer || !unit || unit == viewer) {
+		return kSideNone;
+	}
+	uint8_t* setup = g_setup ? *g_setup : nullptr;
+	int32_t rule = setup ? *(int32_t*)(setup + 0x28) : 0;
+	bool ffa = rule >= 1 && rule <= 3;
+	return !ffa && unit[g_vas->team] == viewer[g_vas->team] ? kSideOwn : kSideEnemy;
+}
+
+void BlipAdd(uint8_t* unit)
+{
+	t_side = Side(unit);
+	g_blipOriginal(unit);
+	t_side = kSideNone;
+}
+
 void __attribute__((thiscall)) Blip(uint8_t* unit)
 {
 	int players = g_players, vs = g_vs;
 	if ((players == kShowAlways && vs == kShowAlways) || !Versus()) {
-		g_blipOriginal(unit);
+		BlipAdd(unit);
 		return;
 	}
 	DWORD now = GetTickCount();
@@ -181,7 +228,65 @@ void __attribute__((thiscall)) Blip(uint8_t* unit)
 	if (rule != kShowAlways && enemy && !Detected(rule, s, now)) {
 		return;
 	}
-	g_blipOriginal(unit);
+	BlipAdd(unit);
+}
+
+int __attribute__((thiscall)) Add(uint8_t* radar, uint32_t kind, uint32_t a, uint32_t flags, float* pos, uint32_t sub, uint32_t b)
+{
+	int slot = g_addOriginal(radar, kind, a, flags, pos, sub, b);
+	if (slot >= 0 && slot < 0x32) {
+		g_sides[radar[0x1bac] & 1][slot] = (uint8_t)t_side;
+		static bool logged[16];
+		uint8_t k = (uint8_t)kind;
+		if (t_side != kSideNone && k < 16 && !logged[k]) { // which kinds own team and enemies use
+			logged[k] = true;
+			XLS_LOG_INFO("mods: radar: blip kind %u for %s.", (unsigned)k, t_side == kSideOwn ? "own team" : "an enemy");
+		}
+	}
+	return slot;
+}
+
+// After the draw list is built: a player / VS entry (codes 5-7) gets its unit's side, found by position in the buffer it came from.
+void MarkSides(uint8_t* radar, int read)
+{
+	int count = *(int32_t*)(radar + 0x1c0c);
+	int entries = *(int16_t*)(radar + 0x1630 + read * 2);
+	if (count <= 0 || count > 0x32 || entries <= 0 || entries > 0x32) {
+		return;
+	}
+	for (int i = 0; i < count; i++) {
+		uint8_t* d = radar + 0x1634 + i * 0x1c;
+		int code = d[0] & 0x7f;
+		if (code < 5 || code > 7) {
+			continue;
+		}
+		float x = *(float*)(d + 0x14), z = *(float*)(d + 0x18);
+		for (int j = 0; j < entries; j++) {
+			uint8_t* e = radar + 0x370 + (read * 0x32 + j) * 0x30;
+			if (e[0] >= 1 && e[0] <= 4 && *(float*)(e + 0x10) == x && *(float*)(e + 0x18) == z) {
+				if (g_sides[read][j] != kSideNone) {
+					*(uint32_t*)(d + 4) = kSideMark + g_sides[read][j];
+				}
+				break;
+			}
+		}
+	}
+}
+
+void __attribute__((thiscall)) Draw(uint8_t* radar, uint32_t ctx, uint32_t code, uint32_t sub, uint32_t a, uint32_t x, uint32_t y, uint32_t b, uint32_t scale)
+{
+	if (code >= 5 && code <= 7 && (sub == kSideMark + kSideOwn || sub == kSideMark + kSideEnemy)) {
+		t_colour = sub == kSideMark + kSideOwn ? kColourOwn : kColourEnemy;
+		g_drawOriginal(radar, ctx, code, 0, a, x, y, b, scale);
+		t_colour = 0;
+		return;
+	}
+	g_drawOriginal(radar, ctx, code, sub, a, x, y, b, scale);
+}
+
+void __attribute__((thiscall)) Sprite(uint8_t* self, uint32_t ctx, uint32_t sprite, uint32_t a, uint32_t x, uint32_t y, uint32_t b, uint32_t colour, uint32_t scale)
+{
+	g_spriteOriginal(self, ctx, sprite, a, x, y, b, t_colour ? t_colour : colour, scale);
 }
 
 // Recent gunfire, for bots to hear (bots.cpp).
@@ -232,8 +337,9 @@ int RadarRecentShots(RadarShotInfo* out, int max, DWORD age)
 	return n;
 }
 
-void RadarRulesSet(int mode, int players, int vs)
+void RadarRulesSet(int mode, int players, int vs, int team)
 {
+	g_team = team;
 	g_mode = mode;
 	g_players = players;
 	g_vs = vs;
@@ -249,6 +355,20 @@ void RadarInstall(uint8_t* base, int build)
 	g_updateOriginal = (UpdateFn)Detour(base + (v.update - 0x400000), kFramePrologue, sizeof(kFramePrologue), (void*)&Update);
 	g_blipOriginal = (UnitFn)Detour(base + (v.blip - 0x400000), kFramePrologue, sizeof(kFramePrologue), (void*)&Blip);
 	g_shotOriginal = (UnitFn)Detour(base + (v.shot - 0x400000), v.shotHead, sizeof(v.shotHead), (void*)&Shot);
+	g_setup = (uint8_t**)(base + (v.setup - 0x400000));
+	// the draw: push ebx; push ebp; push esi; mov esi,[a global] (the address differs per build)
+	uint8_t* draw = base + (v.draw - 0x400000);
+	uint8_t drawHead[9];
+	memcpy(drawHead, draw, sizeof(drawHead));
+	const uint8_t kDrawStart[] = {0x53, 0x55, 0x56, 0x8b, 0x35};
+	if (memcmp(drawHead, kDrawStart, sizeof(kDrawStart)) == 0) {
+		g_spriteOriginal = (DrawFn)Detour(base + (v.sprite - 0x400000), kFramePrologue, sizeof(kFramePrologue), (void*)&Sprite);
+		g_drawOriginal = g_spriteOriginal ? (DrawFn)Detour(draw, drawHead, sizeof(drawHead), (void*)&Draw) : nullptr;
+		g_addOriginal = g_drawOriginal ? (AddFn)Detour(base + (v.add - 0x400000), kFramePrologue, sizeof(kFramePrologue), (void*)&Add) : nullptr;
+	}
+	if (!g_addOriginal) {
+		XLS_LOG_WARN("mods: radar: blip draw not hooked, no team colours.");
+	}
 	if (!g_checkOriginal || !g_updateOriginal || !g_blipOriginal || !g_shotOriginal) {
 		XLS_LOG_WARN("mods: radar: not all hooked: check %d, update %d, blip %d, shot %d.", g_checkOriginal != nullptr,
 		             g_updateOriginal != nullptr, g_blipOriginal != nullptr, g_shotOriginal != nullptr);

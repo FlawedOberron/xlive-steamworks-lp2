@@ -246,10 +246,12 @@ struct Rules {
 	int anchorSpeed = kAnchorSpeedDefault; // the same, less Off
 	int fall = 0; // kFallScales index
 	int stagger = 0; // kStaggerScales index
-	int radar = 1, detectPlayers = 0, detectVs = 0; // radar.cpp
+	int radar = 1, detectPlayers = 0, detectVs = 0, radarTeam = 1; // radar.cpp
 	int grenadeCount = 0;  // 0 the game's amounts, else 1 + the count (so 1 is none)
 	int grenadePickup = 0; // 0 the game's amounts, else the count
 	int quickResupply = 0; // running over a carried weapon takes its ammo (resupply.cpp)
+	int rounds = 0;        // RoundsTotal index: 0-9 = 1-10 rounds, 10-13 = Best of 3/5/7/9
+	int switchEvery = 1;   // sides swap every this many rounds, 0 never
 };
 const int kSlotSecond = 7;
 const DWORD kContextRichMode = 0; // the SPA presence context naming the mode (Campaign, Online...)
@@ -272,8 +274,10 @@ std::atomic<int> g_botLives{3}, g_botRule{0}; // index into kLives; the screen's
 std::atomic<int> g_botCount{15};
 std::atomic<int> g_botDifficulty{1}, g_botBrain{1}, g_botPersona{0}, g_botTaunts{2};
 std::atomic<bool> g_matchBots{false}, g_botsInMatch{false};
+std::atomic<int> g_roundsRule{0}, g_switchRule{1}, g_rounds{0}, g_switchEvery{1};
 std::atomic<int> g_quickResupplyRule{0}, g_grenadeCountRule{0}, g_grenadePickupRule{0}, g_grenadeCount{0}, g_grenadePickup{0};
 thread_local int g_inSpawn = 0; // weapons set up during a spawn are the player's own, any other is a pickup
+std::atomic<int> g_radarTeamRule{1};
 std::atomic<int> g_radarMode{1}, g_radarPlayers{0}, g_radarVs{0}, g_anchorRangeRule{kGrappleDefault}, g_anchorSpeedRule{kAnchorSpeedDefault}, g_fallRule{0};
 const char* const kDifficultyNames[] = {"Easy", "Normal", "Hard", "Veteran"};
 const char* const kBrainNames[] = {"Stock", "Improved"};
@@ -307,7 +311,7 @@ const uint8_t* WeaponEntry(const uint8_t* weapon)
 
 std::string Format(const Rules& r)
 {
-	return FormatA("ammo=%d;grenades=%d;secondary=%d;magazines=%d;survival=%d;lives=%d;team=%d;harmonizer=%d;grapple=%d;stagger=%d;radar=%d;detectp=%d;detectv=%d;anchor=%d;fall=%d;gcount=%d;gpick=%d;qres=%d", r.ammo, r.grenades, r.secondary, r.supply, r.survival, r.lives, r.team, r.harmonizer, r.grapple, r.stagger, r.radar, r.detectPlayers, r.detectVs, r.anchorSpeed, r.fall, r.grenadeCount, r.grenadePickup, r.quickResupply);
+	return FormatA("ammo=%d;grenades=%d;secondary=%d;magazines=%d;survival=%d;lives=%d;team=%d;harmonizer=%d;grapple=%d;stagger=%d;radar=%d;detectp=%d;detectv=%d;anchor=%d;fall=%d;gcount=%d;gpick=%d;qres=%d;rnd=%d;sw=%d;rteam=%d", r.ammo, r.grenades, r.secondary, r.supply, r.survival, r.lives, r.team, r.harmonizer, r.grapple, r.stagger, r.radar, r.detectPlayers, r.detectVs, r.anchorSpeed, r.fall, r.grenadeCount, r.grenadePickup, r.quickResupply, r.rounds, r.switchEvery, r.radarTeam);
 }
 
 Rules Parse(const std::string& s)
@@ -336,8 +340,11 @@ Rules Parse(const std::string& s)
 	r.grenadeCount = small("gcount=", 12, 0);
 	r.grenadePickup = small("gpick=", 11, 0);
 	r.quickResupply = small("qres=", 2, 0);
+	r.rounds = small("rnd=", 14, 0);
+	r.switchEvery = small("sw=", 11, 1);
 	r.detectPlayers = small("detectp=", 4, 0);
 	r.detectVs = small("detectv=", 4, 0);
+	r.radarTeam = small("rteam=", 2, 1);
 	size_t livesAt = s.find("lives=");
 	r.lives = livesAt == std::string::npos ? 0 : atoi(s.c_str() + livesAt + 6);
 	at = s.find("magazines=");
@@ -357,12 +364,15 @@ Rules Own()
 	r.radar = g_radarMode;
 	r.detectPlayers = g_radarPlayers;
 	r.detectVs = g_radarVs;
+	r.radarTeam = g_radarTeamRule;
 	r.grapple = g_anchorRangeRule;
 	r.anchorSpeed = g_anchorSpeedRule;
 	r.fall = g_fallRule;
 	r.grenadeCount = g_grenadeCountRule;
 	r.grenadePickup = g_grenadePickupRule;
 	r.quickResupply = g_quickResupplyRule;
+	r.rounds = g_roundsRule;
+	r.switchEvery = g_switchRule;
 	if (g_menuSeen) {
 		r.ammo = (g_menu[kRowInfinite] & kInfiniteAmmo) != 0;
 		r.grenades = (g_menu[kRowInfinite] & kInfiniteGrenades) != 0;
@@ -741,8 +751,10 @@ DWORD WINAPI SyncThread(LPVOID)
 		g_stagger = r.stagger;
 		g_grenadeCount = r.grenades ? 0 : r.grenadeCount; // infinite grenades: the counts are hidden and mean nothing
 		g_grenadePickup = r.grenades ? 0 : r.grenadePickup;
-		RadarRulesSet(r.radar, r.detectPlayers, r.detectVs);
+		RadarRulesSet(r.radar, r.detectPlayers, r.detectVs, r.radarTeam);
 		ResupplySet(r.quickResupply != 0);
+		g_rounds = r.rounds;
+		g_switchEvery = r.switchEvery;
 		g_team = r.team;
 		std::string now = Format(r);
 		if (now != logged) {
@@ -841,12 +853,19 @@ using ControlUpdateFn = void(__attribute__((thiscall)) *)(uint8_t*);
 ControlUpdateFn g_ctlUpdateOriginal = nullptr;
 const uint8_t kCtlUpdatePrologue[] = {0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf0, 0x81, 0xec, 0xa4, 0x00, 0x00, 0x00};
 const int kCtlState = 0x19, kCtlSlot = 0xb0, kCtlDeathTimers = 0xfc, kStateDeath = 1, kStateRespawn = 5;
+// Rounds: controllers dead or held out when a round ended (bit per slot), put back in play when the next round starts;
+// left alone the death view carries on into the new round, counts down and respawns, which costs a death.
+std::atomic<uint32_t> g_roundDead{0};
+std::atomic<DWORD> g_roundStartAt{0};
 
 // Spectating: controller +0x480 is the player (active when its +4 & 7 is 1 or 2), whose +0x40 is
 // the body the camera follows; +0x484 the camera (only the local player's), following the body at
 // +0x200 once told through follow (as the respawn does).
 using FollowFn = void(__attribute__((thiscall)) *)(uint8_t*, uint8_t*, int, float, float);
 FollowFn g_follow = nullptr;
+using CameraSnapFn = void(__attribute__((thiscall)) *)(uint8_t*, uint8_t*);
+CameraSnapFn g_cameraSnap = nullptr; // places the camera on what it follows at once (the respawn calls it after the follow; DX11 FUN_008f0810)
+const uint32_t kCameraSnap[4] = {0x8f0810, 0x8e0eb0, 0x8f0af0, 0x8e1060};
 const float* g_followArg = nullptr;
 uint8_t** g_controllers = nullptr;
 const uint32_t kCtlPlayer = 0x480, kCtlCamera = 0x484, kPlayerBody = 0x40, kCameraBody = 0x200;
@@ -941,10 +960,18 @@ bool MessageEliminates(const uint8_t* data)
 	return g_team ? TeamDeaths(SlotTeam(slot)) >= g_lives : SlotDeaths(slot) >= g_lives;
 }
 
+extern bool g_roundBreak;
+extern DWORD g_roundBegan;
+
 void __attribute__((thiscall)) BattleFormat(void* self, char* out, int id, uint8_t* data)
 {
+	// Rounds: deaths from the break and the reload (the deaths count until the reload clears them) are no eliminations
+	bool between = g_roundBreak || (g_roundBegan && GetTickCount() - g_roundBegan < 8000);
+	if (between) {
+		XLS_LOG_INFO("mods: rules: rounds: battle message %d between rounds (slot %d).", id, data ? *(const int32_t*)(data + 0x24) : -1);
+	}
 	for (const EliminatedText& t : kEliminatedTexts) {
-		if (t.id == id && MessageEliminates(data)) {
+		if (!between && t.id == id && MessageEliminates(data)) {
 			g_eliminatedId = id;
 			g_eliminatedText = t.text;
 			break;
@@ -954,10 +981,39 @@ void __attribute__((thiscall)) BattleFormat(void* self, char* out, int id, uint8
 	g_eliminatedText = nullptr;
 }
 
+// The team byte on a slot's body (the one the game fights by; radar.cpp's team), -1 with no body. The out player's own
+// body is gone, so its last one seen is kept.
+const uint32_t kUnitTeam[4] = {0xce2, 0xcd2, 0xce2, 0xcd2};
+uint32_t g_unitTeam = 0;
+int g_selfTeam[16];
+bool g_selfTeamSet = false;
+
+int UnitTeam(int slot)
+{
+	uint8_t* body = g_unitTeam ? Body(slot) : nullptr;
+	int team = body ? body[g_unitTeam] : -1;
+	if (!g_selfTeamSet) {
+		g_selfTeamSet = true;
+		for (int& t : g_selfTeam) {
+			t = -1;
+		}
+	}
+	if (slot >= 0 && slot < 16 && team >= 0 && g_slotState[slot] == 0) { // a dead body's byte is no team to go by
+		g_selfTeam[slot] = team;
+	}
+	return slot >= 0 && slot < 16 ? g_selfTeam[slot] : -1;
+}
+
+bool SameTeam(int slot, int self)
+{
+	int a = UnitTeam(slot), b = UnitTeam(self);
+	return a >= 0 && b >= 0 ? a == b : SlotTeam(slot) == SlotTeam(self);
+}
+
 // A slot worth watching: in play, alive (state 0), not out and, in Team Survival, on our team.
 bool Watchable(int slot, int self)
 {
-	return slot != self && Body(slot) && g_slotState[slot] == 0 && !SlotOut(slot) && (!g_team || SlotTeam(slot) == SlotTeam(self));
+	return slot != self && Body(slot) && g_slotState[slot] == 0 && !SlotOut(slot) && (!g_team || SameTeam(slot, self));
 }
 
 // The next watchable slot after (dir 1) or before (dir -1) the watched one, -1 for none.
@@ -993,13 +1049,17 @@ void Spectate(uint8_t* entry, int self, bool force)
 			next = g_watched; // the only one left, or the last one standing: stay on them
 		}
 		if (next != g_watched) {
-			XLS_LOG_INFO("mods: rules: survival: spectating player %d.", next);
+			XLS_LOG_INFO("mods: rules: survival: spectating player %d (teams: setup %d/%d, body %d/%d).", next, next >= 0 ? SlotTeam(next) : -1,
+			             SlotTeam(self), next >= 0 ? UnitTeam(next) : -1, UnitTeam(self));
 		}
 		g_watched = next;
 	}
 	uint8_t* body = g_watched >= 0 ? Body(g_watched) : nullptr;
 	if (body && (force || *(uint8_t**)(cam + kCameraBody) != body)) { // forced after a held respawn: its pick view takes the camera
 		g_follow(cam, body, 0xff, *g_followArg, 0.0f);
+		if (g_cameraSnap) {
+			g_cameraSnap(cam, nullptr); // no slow glide over from the last one watched
+		}
 	}
 }
 
@@ -1015,7 +1075,8 @@ void RemoveBody(uint8_t* ctl)
 {
 	int slot = ctl[kCtlSlot];
 	uint8_t* body = *(uint8_t**)(ctl + kCtlBody);
-	if (slot >= 16 || !body || ctl[kCtlState] != kStateDeath) {
+	extern bool g_roundBreak;
+	if (slot >= 16 || !body || ctl[kCtlState] != kStateDeath || g_roundBreak) { // the next round's reload takes it
 		return;
 	}
 	DWORD now = GetTickCount();
@@ -1605,6 +1666,29 @@ void __attribute__((thiscall)) ControlUpdate(uint8_t* ctl)
 	// and the host runs a player match's bots
 	uint8_t* slotRecords = g_ruleSlots ? *g_ruleSlots : nullptr;
 	bool hostBot = ctl && !local && !g_offline && g_game && *g_game && (*g_game)[0x256] && slotRecords && ctl[kCtlSlot] < 16 && slotRecords[0x1b1 + ctl[kCtlSlot] * 0x7c] && Host();
+	if (ctl && ctl[kCtlSlot] < 16 && (g_roundDead >> ctl[kCtlSlot]) & 1) {
+		int slot = ctl[kCtlSlot];
+		static DWORD waitLogged = 0;
+		if (GetTickCount() - g_roundStartAt > 60000) { // here: since the round ended
+			g_roundDead &= ~(1u << slot);
+			XLS_LOG_INFO("mods: rules: rounds: player %d never came back in play (state %u).", slot, (unsigned)ctl[kCtlState]);
+		}
+		else if (!*(uint8_t**)(ctl + 0x40) || SlotOut(slot)) { // waiting for the round's spawn (a body, kCtlBody) and the deaths' reset
+			if (GetTickCount() - waitLogged > 2000) {
+				waitLogged = GetTickCount();
+				XLS_LOG_INFO("mods: rules: rounds: player %d waits for the new round (state %u, body %p, out %d).", slot, (unsigned)ctl[kCtlState], *(uint8_t**)(ctl + 0x40), (int)SlotOut(slot));
+			}
+		}
+		else {
+			g_roundDead &= ~(1u << slot);
+			if (ctl[kCtlState] != 0) {
+				XLS_LOG_INFO("mods: rules: rounds: player %d back in play for the new round (state %u -> 0).", slot, (unsigned)ctl[kCtlState]);
+				ctl[kCtlState] = 0;
+				((float*)(ctl + kCtlDeathTimers))[0] = 0.0f;
+				((float*)(ctl + kCtlDeathTimers))[1] = 0.0f;
+			}
+		}
+	}
 	bool hold = ctl && (local || g_offline || hostBot) && SlotOut(ctl[kCtlSlot]);
 	uint8_t was = ctl ? ctl[kCtlState] : 0;
 	if (hold && was == kStateDeath) {
@@ -1623,6 +1707,27 @@ void __attribute__((thiscall)) ControlUpdate(uint8_t* ctl)
 	}
 	if (!hold) {
 		if (local) {
+			// Back in play after spectating (a new round or half): the camera still follows whoever was watched,
+			// so point it at our own body again, for up to 5 s while the round's spawn sets it up.
+			static DWORD restoreUntil = 0;
+			if (g_watched >= 0) {
+				restoreUntil = GetTickCount() + 5000;
+			}
+			uint8_t* cam = *(uint8_t**)(ctl + kCtlCamera);
+			uint8_t* player = *(uint8_t**)(ctl + kCtlPlayer);
+			uint8_t* own = player ? *(uint8_t**)(player + kPlayerBody) : nullptr;
+			if (restoreUntil && GetTickCount() < restoreUntil && cam && own && g_follow && ctl[kCtlState] == 0 &&
+			    *(uint8_t**)(cam + kCameraBody) != own) {
+				g_follow(cam, own, 0xff, *g_followArg, 0.0f);
+				if (g_cameraSnap) {
+					g_cameraSnap(cam, nullptr);
+				}
+				XLS_LOG_INFO("mods: rules: survival: camera back on player %d after spectating.", (int)ctl[kCtlSlot]);
+				restoreUntil = 0;
+			}
+			else if (restoreUntil && GetTickCount() >= restoreUntil) {
+				restoreUntil = 0;
+			}
 			g_watched = -1;
 			HideHud(false);
 		}
@@ -1731,9 +1836,41 @@ bool __attribute__((fastcall)) EndCheck(void* flow)
 	return true;
 }
 
+// Rounds (the stock halftime, made N rounds): the flow's state 5 (match end) runs FUN_01007110, then breaks for the
+// second half while slots+0x84 (halftime) is set and +0x1f44 (second half) isn't, else ends the match; the break runs
+// FUN_010068e0 (+0x1f44 = 1) and reloads the map with scores kept. +0x1f44 also picks the swapped start points. So:
+// RoundEnd counts the round's winner and leaves +0x1f44 0 while rounds are left (another break), NextRound sets it to
+// the next round's sides, RoundTime gives each round the full time (the game halves it with halftime on) and marks a
+// new match. The result ranks by rounds won.
+const uint32_t kSlotsHalftime = 0x84, kSlotsSecondHalf = 0x1f44;
+int g_round = 0, g_roundWins[16] = {}, g_roundBase[16] = {}, g_roundScore[16] = {}, g_rawScore[16] = {};
+bool g_roundSeen[16] = {}, g_roundBreak = false;
+DWORD g_roundBegan = 0; // when the latest round past the first reloaded
+DWORD g_roundBreakAt = 0, g_rankAt = 0;
+uint8_t* g_rankFlow = nullptr;
+int g_rankArg = 0;
+
+using VoidFn = void (*)();
+using SlotsFn = void(__attribute__((fastcall)) *)(uint8_t*);
+VoidFn g_roundEndOriginal = nullptr, g_roundTimeOriginal = nullptr;
+SlotsFn g_nextRoundOriginal = nullptr;
+
+int RoundsTotal(int index)
+{
+	return index < 10 ? index + 1 : 3 + (index - 10) * 2;
+}
+
+bool RoundsOn()
+{
+	return g_nextRoundOriginal && g_rounds > 0 && *g_matchSetup && g_game && *g_game && (*g_game)[0x256];
+}
+
 void __attribute__((thiscall)) Ranking(uint8_t* flow, int arg)
 {
 	g_rankingOriginal(flow, arg);
+	g_rankFlow = flow;
+	g_rankArg = arg;
+	g_rankAt = GetTickCount();
 	uint8_t* setup = *g_matchSetup;
 	int32_t rule = setup ? *(int32_t*)(setup + kSetupRule) : 0;
 	static DWORD logged = 0;
@@ -1742,25 +1879,145 @@ void __attribute__((thiscall)) Ranking(uint8_t* flow, int arg)
 		logged = GetTickCount();
 		XLS_LOG_INFO("mods: rules: survival: ranking (rule %d, %d entries).", rule, *(int32_t*)(flow + kRankCount));
 	}
-	if (!g_survival || g_lives <= 0 || (rule != kRuleTraining && rule != kRuleElimination && rule != kRuleTeamElimination && rule != kRuleTeamKills)) {
-		return;
-	}
-	bool team = rule == kRuleTeamElimination || rule == kRuleTeamKills;
 	int32_t (*list)[3] = (int32_t(*)[3])(flow + kRankList);
 	int count = *(int32_t*)(flow + kRankCount);
 	count = count < 0 ? 0 : count > 16 ? 16 : count;
-	// respawns left first, the score breaks ties (encoded in the score the ranks are told apart by)
-	for (int i = 0; i < count; i++) {
-		list[i][2] = LivesLeft(list[i][1], team) * 100000 + (list[i][2] < 100000 ? list[i][2] : 99999);
-	}
-	for (int i = 1; i < count; i++) {
-		for (int j = i; j > 0 && list[j][2] > list[j - 1][2]; j--) {
-			std::swap(list[j], list[j - 1]);
+	bool rounds = RoundsOn();
+	if (rounds) { // this round's score: the game keeps scores over the break
+		for (int i = 0; i < count; i++) {
+			int id = list[i][1];
+			if (id >= 0 && id < 16) {
+				g_rawScore[id] = list[i][2];
+				g_roundSeen[id] = true;
+				g_roundScore[id] = list[i][2] >= g_roundBase[id] ? list[i][2] - g_roundBase[id] : list[i][2];
+			}
 		}
 	}
-	if (log && count) {
-		XLS_LOG_INFO("mods: rules: survival: ranked first %s %d (%d respawns left, score %d).", team ? "team" : "player", list[0][1], list[0][2] / 100000, list[0][2] % 100000);
+	bool survival = g_survival && g_lives > 0 && (rule == kRuleTraining || rule == kRuleElimination || rule == kRuleTeamElimination || rule == kRuleTeamKills);
+	if (survival) {
+		bool team = rule == kRuleTeamElimination || rule == kRuleTeamKills;
+		// respawns left first, the score breaks ties (encoded in the score the ranks are told apart by)
+		for (int i = 0; i < count; i++) {
+			int left = LivesLeft(list[i][1], team);
+			list[i][2] = left * 100000 + (list[i][2] < 100000 ? list[i][2] : 99999);
+			int id = list[i][1];
+			if (rounds && id >= 0 && id < 16) {
+				g_roundScore[id] = left * 100000 + std::min(g_roundScore[id], 99999);
+			}
+		}
 	}
+	if (rounds) { // rounds won first
+		for (int i = 0; i < count; i++) {
+			int id = list[i][1];
+			int wins = id >= 0 && id < 16 ? g_roundWins[id] : 0;
+			list[i][2] = wins * 10000000 + std::min(std::max(list[i][2], 0), 9999999);
+		}
+	}
+	if (survival || rounds) {
+		for (int i = 1; i < count; i++) {
+			for (int j = i; j > 0 && list[j][2] > list[j - 1][2]; j--) {
+				std::swap(list[j], list[j - 1]);
+			}
+		}
+	}
+	if (log && survival && count) {
+		XLS_LOG_INFO("mods: rules: survival: ranked first %d (score %d).", list[0][1], list[0][2]);
+	}
+}
+
+void RoundEnd()
+{
+	uint8_t* slots = *g_matchSetup;
+	if (!RoundsOn() || !slots) {
+		g_roundEndOriginal();
+		return;
+	}
+	if (g_rankFlow && GetTickCount() - g_rankAt > 500) {
+		Ranking(g_rankFlow, g_rankArg); // a client doesn't always rank here
+	}
+	int total = RoundsTotal(g_rounds), best = -1, bestScore = 0, ties = 0;
+	for (int id = 0; id < 16; id++) {
+		if (!g_roundSeen[id]) {
+			continue;
+		}
+		if (best < 0 || g_roundScore[id] > bestScore) {
+			best = id;
+			bestScore = g_roundScore[id];
+			ties = 0;
+		}
+		else if (g_roundScore[id] == bestScore) {
+			ties++;
+		}
+	}
+	int winner = ties ? -1 : best, most = 0;
+	if (winner >= 0) {
+		g_roundWins[winner]++;
+	}
+	g_round++;
+	for (int id = 0; id < 16; id++) {
+		g_roundBase[id] = g_rawScore[id];
+		most = std::max(most, g_roundWins[id]);
+	}
+	bool bestOf = g_rounds >= 10;
+	bool over = g_round >= total || (bestOf && most > total / 2);
+	XLS_LOG_INFO("mods: rules: rounds: round %d of %s%d over, %s %d (round score %d)%s; %s.", g_round, bestOf ? "best of " : "", total,
+	             winner >= 0 ? "won by" : "drawn, top", best, bestScore, winner >= 0 ? FormatA(", %d wins", g_roundWins[winner]).c_str() : "",
+	             over ? "match over" : "next round");
+	if (over && g_rankFlow) {
+		Ranking(g_rankFlow, g_rankArg); // the result follows rounds won
+	}
+	uint32_t dead = 0;
+	for (int slot = 0; slot < 16; slot++) {
+		dead |= g_slotState[slot] != 0 ? 1u << slot : 0;
+	}
+	g_roundDead = over ? 0 : dead;
+	g_roundStartAt = GetTickCount();
+	XLS_LOG_INFO("mods: rules: rounds: down at the round's end: 0x%04x.", (unsigned)dead);
+	g_roundEndOriginal();
+	slots[kSlotsHalftime] = 1;
+	slots[kSlotsSecondHalf] = over ? 1 : 0;
+	g_roundBreak = !over;
+	g_roundBreakAt = GetTickCount();
+}
+
+void __attribute__((fastcall)) NextRound(uint8_t* slots)
+{
+	g_nextRoundOriginal(slots);
+	if (RoundsOn() && slots) {
+		int every = g_switchEvery;
+		slots[kSlotsSecondHalf] = every > 0 ? (g_round / every) & 1 : 0;
+		XLS_LOG_INFO("mods: rules: rounds: round %d next, sides %s.", g_round + 1, slots[kSlotsSecondHalf] ? "swapped" : "as started");
+	}
+}
+
+void RoundTime()
+{
+	uint8_t* slots = *g_matchSetup;
+	bool versus = g_game && *g_game && (*g_game)[0x256];
+	if (!slots || !versus) {
+		g_roundTimeOriginal();
+		return;
+	}
+	if (!g_roundBreak || GetTickCount() - g_roundBreakAt > 180000) { // a new match
+		g_round = 0;
+		memset(g_roundWins, 0, sizeof(g_roundWins));
+		memset(g_roundBase, 0, sizeof(g_roundBase));
+		memset(g_roundScore, 0, sizeof(g_roundScore));
+		memset(g_rawScore, 0, sizeof(g_rawScore));
+		memset(g_roundSeen, 0, sizeof(g_roundSeen));
+		if (g_rounds > 0) {
+			XLS_LOG_INFO("mods: rules: rounds: new match, %s%d rounds, sides switch %s.", g_rounds >= 10 ? "best of " : "", RoundsTotal(g_rounds),
+			             g_switchEvery ? FormatA("every %d", g_switchEvery.load()).c_str() : "never");
+		}
+	}
+	if (!g_roundBreak) {
+		g_roundDead = 0;
+	}
+	g_roundBegan = g_roundBreak ? GetTickCount() : 0;
+	g_roundBreak = false;
+	slots[kSlotsHalftime] = 0; // the full time for every round
+	g_roundTimeOriginal();
+	slots[kSlotsHalftime] = g_rounds > 0 ? 1 : 0; // our Rounds row stands in for the stock Halftime one
 }
 
 // Training's AI Enemy Battle screen (flash\training\id300: Map and Game Type rows, mc_BOT) gets two
@@ -1778,7 +2035,7 @@ using FlashCallFn = bool(__attribute__((thiscall)) *)(uint8_t*, int, const char*
 FlashCallFn g_flashCall = nullptr;
 
 // Team Survival: the team kill counters (flash\cockpit\id762 mc_Kill, top left, "kills/target") show each
-// team's respawns left over the respawns it started with. The cockpit's setters (thiscall(cockpit),
+// team's players standing plus respawns left, over its players plus starting respawns. The cockpit's setters (thiscall(cockpit),
 // setKillRed / setKillBlue(3 digits, 2 target digits, infinity flag) on the movie at cockpit +0x58) are
 // detoured, and so is its per-frame update (which calls them only when the kills change), to show a new
 // count as soon as a team loses a respawn.
@@ -1805,13 +2062,25 @@ bool CountersOurs()
 	       g_killRedOriginal && g_killBlueOriginal && g_cockpitUpdateOriginal && g_flashCall;
 }
 
+// Players standing plus respawns left, over the team's players plus the respawns it started with (1 life: 4/4 down to 0/4).
+void CounterValues(int team, int* left, int* total)
+{
+	int players = 0;
+	for (int slot = 0; slot < 16; slot++) {
+		players += InPlay(slot) && SlotTeam(slot) == team;
+	}
+	*total = std::min(g_lives - 1 + players, 99);
+	*left = std::min(std::max(LivesLeft(team, true), 0), *total);
+}
+
 void SetCounter(uint8_t* cockpit, int team)
 {
 	uint8_t* movie = *(uint8_t**)(cockpit + kCockpitMovie);
 	if (!movie) {
 		return;
 	}
-	int total = std::min(g_lives - 1, 99), left = std::min(std::max(total - TeamDeaths(team), 0), 999);
+	int left, total;
+	CounterValues(team, &left, &total);
 	static std::atomic<int> counterLogged{-1};
 	if (counterLogged.exchange(left * 2 + team) != left * 2 + team) {
 		XLS_LOG_INFO("mods: rules: survival display: team %d counter = %d respawns (cockpit %p, movie %p).", team, left, cockpit, movie);
@@ -1845,7 +2114,8 @@ void __attribute__((thiscall)) CockpitUpdate(uint8_t* cockpit)
 		g_counterShown[0] = g_counterShown[1] = -1;
 	}
 	for (int team = 0; team < 2; team++) {
-		int total = std::min(g_lives - 1, 99), left = std::min(std::max(total - TeamDeaths(team), 0), 999);
+		int left, total;
+	CounterValues(team, &left, &total);
 		if (g_counterShown[team] != left * 100 + total) {
 			SetCounter(cockpit, team);
 		}
@@ -2241,10 +2511,53 @@ void RespawnSecondJump(bool on)
 	}
 }
 
+// Rounds: each player's spawn record (game +0x28 + slot * 4; the spawn reads the weapon kinds at +0x10, eight of them, and
+// with +0xb clear it loads the ammo kept at +0x64 and +0x74, two shorts each) carries a survivor's weapons and ammo into
+// the next round, as the game's halftime does. Taken at the match's first spawn, put back at a later round's.
+const uint32_t kRecordSize = 0xc8;
+uint8_t g_loadout[16][kRecordSize];
+bool g_loadoutHave[16] = {};
+extern bool g_roundBreak;
+extern DWORD g_roundBegan;
+
+void RoundLoadout(int slot)
+{
+	uint8_t* game = g_game ? *g_game : nullptr;
+	uint8_t* rec = game && slot >= 0 && slot < 16 ? *(uint8_t**)(game + 0x28 + slot * 4) : nullptr;
+	if (!rec || !RoundsOn()) {
+		return;
+	}
+	if (!g_roundBegan || GetTickCount() - g_roundBegan > 30000) { // the match's start (or no rounds behind it)
+		memcpy(g_loadout[slot], rec, kRecordSize);
+		g_loadoutHave[slot] = true;
+		return;
+	}
+	if (!g_loadoutHave[slot]) {
+		return;
+	}
+	const uint8_t* was = g_loadout[slot];
+	std::string other;
+	for (uint32_t i = 4; i < kRecordSize; i++) {
+		bool ours = i == 0xb || (i >= 0x10 && i < 0x30) || (i >= 0x64 && i < 0x84);
+		if (!ours && rec[i] != was[i]) {
+			other += FormatA(" +%02x %02x->%02x", i, was[i], rec[i]);
+		}
+	}
+	bool changed = rec[0xb] != was[0xb] || memcmp(rec + 0x10, was + 0x10, 0x20) || memcmp(rec + 0x64, was + 0x64, 0x20);
+	rec[0xb] = was[0xb];
+	memcpy(rec + 0x10, was + 0x10, 0x20);
+	memcpy(rec + 0x64, was + 0x64, 0x20);
+	XLS_LOG_INFO("mods: rules: rounds: player %d starts the round with the match's loadout (%s; other changes:%s).", slot,
+	             changed ? "weapons/ammo put back" : "unchanged", other.empty() ? " none" : other.c_str());
+}
+
 uint32_t __attribute__((thiscall)) Spawn(uint8_t* spawner, uint32_t respawn, void* a, void* b)
 {
 	if (!spawner) {
 		return g_spawnOriginal(spawner, respawn, a, b);
+	}
+	if (!(respawn & 0xff)) {
+		RoundLoadout(spawner[kCtlSlot]);
 	}
 	PutSecondary(spawner[kCtlSlot], respawn & 0xff ? "respawns" : "spawns");
 	bool second = (respawn & 0xff) && g_secondary && g_respawnSecond;
@@ -2258,7 +2571,21 @@ uint32_t __attribute__((thiscall)) Spawn(uint8_t* spawner, uint32_t respawn, voi
 		auto* m = (int16_t*)((uint8_t*)b + g_magazine);
 		m[0] = m[1] = (int16_t)((g_grenadeCount - 1) * GrenadeCost(WeaponEntry((uint8_t*)b)));
 	}
+	int spawnSlot = spawner[kCtlSlot];
+	if (spawnSlot < 16 && ((g_roundDead >> spawnSlot) & 1) && *(uint8_t**)(spawner + 0x40)) {
+		// a new round's spawn of a player who was down at the last round's end: its old death view would carry on, count down
+		// and respawn it again (a death)
+		g_roundDead &= ~(1u << spawnSlot);
+		XLS_LOG_INFO("mods: rules: rounds: player %d spawned for the new round, death view cleared (state %u -> 0).", spawnSlot, (unsigned)spawner[kCtlState]);
+		spawner[kCtlState] = 0;
+		((float*)(spawner + kCtlDeathTimers))[0] = 0.0f;
+		((float*)(spawner + kCtlDeathTimers))[1] = 0.0f;
+	}
 	if (uint8_t* unit = *(uint8_t**)(spawner + 0x40)) {
+		if (spawnSlot < 16 && g_unitTeam) {
+			UnitTeam(spawnSlot); // its team while alive, for spectating once it is gone
+			g_selfTeam[spawnSlot] = unit[g_unitTeam];
+		}
 		const float* at = (const float*)(unit + 0x30);
 		XLS_LOG_INFO("mods: rules: player %u unit %p id %08x at %.0f %.0f %.0f.", spawner[kCtlSlot], unit, *(uint32_t*)(unit + 0x1c), at[0], at[1], at[2]);
 	}
@@ -2354,14 +2681,19 @@ const std::vector<Section> kSections = {
 	{"Weapons", {0x05, 0x06, 0x2f, 0x31}},
 	{"VS", {0x07}},
 };
-const size_t kSectionPlayer = 2, kSectionWeapons = 3; // these have a row of ours, so they're always there
+const size_t kSectionRounds = 1, kSectionPlayer = 2, kSectionWeapons = 3;
+const uint8_t kRuleHalftime = 0x26; // the stock Halftime row: our Rounds rows stand in for it
+std::string RoundsName(int index)
+{
+	return index < 10 ? std::to_string(index + 1) : "Best of " + std::to_string(3 + (index - 10) * 2);
+} // these have a row of ours, so they're always there
 const uint8_t kScoreRows[] = {0x01, 0x0e, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x1e};
 
 enum SetupPage { kSetupTop, kSetupOptions, kSetupSection, kSetupTypes, kSetupEntries, kSetupName, kSetupBots, kSetupRadar, kSetupAnchor };
 enum SetupKind { kKindValue, kKindNav, kKindHeader, kKindOwn };
 enum SetupAction { kActNone, kActTypes, kActType, kActOptions, kActCreate, kActSection, kActDefault, kActProfile, kActBots, kActRadar, kActAnchor };
-const char* const kBotRuleKeys[] = {"bots", "botDifficulty", "botBrain", "botPersona", "botTaunts", "radar", "radarPlayers", "radarVs", "anchorRange", "anchorSpeed", "fallStagger", "grenadeCount", "grenadePickup", "quickResupply"};
-const int kBotRuleCounts[] = {2, 4, 2, 6, 4, 3, 4, 4, 13, 12, 4, 12, 11, 2};
+const char* const kBotRuleKeys[] = {"bots", "botDifficulty", "botBrain", "botPersona", "botTaunts", "radar", "radarPlayers", "radarVs", "anchorRange", "anchorSpeed", "fallStagger", "grenadeCount", "grenadePickup", "quickResupply", "rounds", "switchSides", "radarTeam"};
+const int kBotRuleCounts[] = {2, 4, 2, 6, 4, 3, 4, 4, 13, 12, 4, 12, 11, 2, 14, 11, 2};
 const char* const kRadarNames[] = {"Always On", "Near Data Post", "Hidden"};
 const char* const kDetectNames[] = {"Always Show", "Moving & Shooting", "Running & Shooting", "Shooting"};
 struct SetupRow {
@@ -2425,7 +2757,7 @@ void SetupBuild(const uint8_t* rules)
 	g_matchDesired = rules[0x15];
 	const SetupAt& at = g_setupStack.back();
 	int c = RowCategory(rules);
-	auto valueRow = [&](uint8_t offset) { g_setupRows.push_back({kKindValue, offset, kActNone, 0, "", ""}); };
+	auto valueRow = [&](uint8_t offset) { g_setupRows.push_back({kKindValue, offset, kActNone, 0, offset == 0x01 ? "Round Time" : "", ""}); };
 	auto navRow = [&](SetupKind kind, SetupAction action, int arg, const std::string& label, const std::string& value) {
 		g_setupRows.push_back({kind, kNavOffset, action, arg, label, value});
 	};
@@ -2471,9 +2803,14 @@ void SetupBuild(const uint8_t* rules)
 	case kSetupSection:
 		g_setupTitle = kSections[at.arg].name;
 		for (uint8_t offset : kSections[at.arg].offsets) {
-			if (StockRow(c, offset) && !hidden(offset)) {
+			if (StockRow(c, offset) && !hidden(offset) && offset != kRuleHalftime) {
 				valueRow(offset);
 			}
+		}
+		if ((size_t)at.arg == kSectionRounds) {
+			int rounds = GameRulesExtras()["rounds"], every = GameRulesExtras()["switchSides"];
+			navRow(kKindOwn, kActNone, 14, "Rounds", RoundsName(rounds));
+			navRow(kKindOwn, kActNone, 15, "Switch Side Every # Rounds", every ? std::to_string(every) : "Never");
 		}
 		if ((size_t)at.arg == kSectionPlayer && !(rules[0x2f] & kInfiniteGrenades)) {
 			int count = GameRulesExtras()["grenadeCount"];
@@ -2520,6 +2857,7 @@ void SetupBuild(const uint8_t* rules)
 		navRow(kKindOwn, kActNone, 5, "Radar", kRadarNames[x["radar"] % 3]);
 		navRow(kKindOwn, kActNone, 6, "Players Show", kDetectNames[x["radarPlayers"] % 4]);
 		navRow(kKindOwn, kActNone, 7, "VS Show", kDetectNames[x["radarVs"] % 4]);
+		navRow(kKindOwn, kActNone, 16, "Team Colours", x["radarTeam"] ? "On" : "Off");
 		break;
 	}
 	case kSetupAnchor: {
@@ -2843,12 +3181,15 @@ void BotRulesSync()
 	g_radarMode = x["radar"];
 	g_radarPlayers = x["radarPlayers"];
 	g_radarVs = x["radarVs"];
+	g_radarTeamRule = x["radarTeam"];
 	g_anchorRangeRule = x["anchorRange"];
 	g_anchorSpeedRule = x["anchorSpeed"];
 	g_fallRule = x["fallStagger"];
 	g_grenadeCountRule = x["grenadeCount"];
 	g_grenadePickupRule = x["grenadePickup"];
 	g_quickResupplyRule = x["quickResupply"];
+	g_roundsRule = x["rounds"];
+	g_switchRule = x["switchSides"];
 }
 
 // Keep what carries between types, take the entry's rules, tell the game.
@@ -2973,6 +3314,18 @@ void __attribute__((thiscall)) CreateTick(uint8_t* screen)
 	int32_t state = *(int32_t*)(screen + kCreateState);
 	uint8_t* rules = *(uint8_t**)(screen + kCreateSlots);
 	static int32_t lastState = -1;
+	// Back left the screen, which doesn't always tick while closed (the reset above): if it hasn't ticked for a while,
+	// this is a new visit, not the same one leaving. Else the setup stayed "leaving" and the stock rows came back.
+	static DWORD lastTick = 0;
+	DWORD tickNow = GetTickCount();
+	if (g_setupLeaving && tickNow - lastTick > 500) {
+		XLS_LOG_INFO("mods: game rules: create screen back after %lu ms: setup reset.", (unsigned long)(tickNow - lastTick));
+		g_setupOpen = false;
+		g_setupLeaving = false;
+		g_setupMouse = -1;
+		lastState = -1;
+	}
+	lastTick = tickNow;
 	if (state != lastState) {
 		uint8_t* dialog = *(uint8_t**)(screen + kCreateDialog);
 		XLS_LOG_INFO("mods: game rules: create screen state %d -> %d (phase %d, dialog state %d, result %d).", lastState, state, screen[0x19], dialog ? dialog[0x18] : -1, dialog ? *(int32_t*)(dialog + kDialogResult) : -1);
@@ -3753,6 +4106,8 @@ void RulesInstall(unsigned char* base)
 	g_players = (uint8_t**)(base + (kRulesVas[build].players - 0x400000));
 	g_status = (uint8_t**)(base + (kRulesVas[build].status - 0x400000));
 	g_follow = (FollowFn)(base + (kRulesVas[build].follow - 0x400000));
+	g_cameraSnap = (CameraSnapFn)(base + (kCameraSnap[build] - 0x400000));
+	g_unitTeam = kUnitTeam[build];
 	g_followArg = (const float*)(base + (kRulesVas[build].followArg - 0x400000));
 	g_flashCall = (FlashCallFn)(base + (kRulesVas[build].flashCall - 0x400000));
 	g_input = (uint8_t**)(base + (kRulesVas[build].input - 0x400000));
@@ -3837,6 +4192,24 @@ void RulesInstall(unsigned char* base)
 	g_rankingOriginal = (RankingFn)Detour(base + (kRulesVas[build].ranking - 0x400000), kRankingPrologue, sizeof(kRankingPrologue), (void*)&Ranking);
 	if (!g_endCheckOriginal || !g_rankingOriginal) {
 		XLS_LOG_WARN("mods: rules: match end not hooked, survival matches end only by time.");
+	}
+	{
+		// FUN_01007110 (round end): push ecx; mov ecx,[global]. FUN_01006fe0 (round time): mov eax,[global]. FUN_010068e0: push esi;
+		// mov esi,ecx; cmp byte [esi+0x1c],0
+		const uint32_t kRoundEnd[kBuildCount] = {0x1007110, 0xff6d30, 0x1007400, 0xff7040};
+		const uint32_t kRoundTime[kBuildCount] = {0x1006fe0, 0xff6c00, 0x10072d0, 0xff6f10};
+		const uint32_t kNextRound[kBuildCount] = {0x10068e0, 0xff6500, 0x1006bd0, 0xff6810};
+		const uint32_t kRoundGlobal[kBuildCount] = {0x1852144, 0x18420a4, 0x1853144, 0x18420a4};
+		uint8_t endPro[7] = {0x51, 0x8b, 0x0d}, timePro[5] = {0xa1};
+		memcpy(endPro + 3, &kRoundGlobal[build], 4);
+		memcpy(timePro + 1, &kRoundGlobal[build], 4);
+		const uint8_t kNextRoundPrologue[] = {0x56, 0x8b, 0xf1, 0x80, 0x7e, 0x1c, 0x00};
+		g_roundEndOriginal = (VoidFn)Detour(base + (kRoundEnd[build] - 0x400000), endPro, sizeof(endPro), (void*)&RoundEnd);
+		g_roundTimeOriginal = g_roundEndOriginal ? (VoidFn)Detour(base + (kRoundTime[build] - 0x400000), timePro, sizeof(timePro), (void*)&RoundTime) : nullptr;
+		g_nextRoundOriginal = g_roundTimeOriginal ? (SlotsFn)Detour(base + (kNextRound[build] - 0x400000), kNextRoundPrologue, sizeof(kNextRoundPrologue), (void*)&NextRound) : nullptr;
+		if (!g_nextRoundOriginal) {
+			XLS_LOG_WARN("mods: rules: rounds not hooked, the Rounds rows have no effect.");
+		}
 	}
 	g_ctlUpdateOriginal = (ControlUpdateFn)Detour(base + (kRulesVas[build].ctlUpdate - 0x400000), kCtlUpdatePrologue, sizeof(kCtlUpdatePrologue), (void*)&ControlUpdate);
 	if (!g_ctlUpdateOriginal) {
@@ -3968,6 +4341,14 @@ int RulesLocalSlot()
 
 const char* RulesBattleMessage(uint32_t id)
 {
+	int self = g_localIndex;
+	// the death only counts once its countdown ends, so one in the death view is added here
+	int pending = self >= 0 && self < 16 && g_slotState[self] == kStateDeath ? 1 : 0;
+	bool noneLeft = g_survival && g_lives > 0 && self >= 0 && self < 16 &&
+	                (g_out || (g_team ? TeamDeaths(SlotTeam(self)) + pending >= g_lives : SlotDeaths(self) + pending >= g_lives)); // the thread's flag lags
+	if ((id == 21 || id == 22) && noneLeft) { // "Respawn in <#RespornTime> seconds" / "second": no respawn coming
+		return "Eliminated";
+	}
 	return g_eliminatedText && (int)id == g_eliminatedId ? g_eliminatedText : nullptr;
 }
 

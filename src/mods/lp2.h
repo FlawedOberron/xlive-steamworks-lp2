@@ -90,7 +90,8 @@ struct RadarShotInfo {
 	unsigned long at;
 };
 int RadarRecentShots(RadarShotInfo* out, int max, unsigned long age); // gunfire in the last age ms, newest not first
-void RadarRulesSet(int mode, int players, int vs); // 0 Always On, 1 Near Data Post, 2 Hidden; 0 Always, 1 Moving, 2 Running, 3 Shooting
+// mode: 0 Always On, 1 Near Data Post, 2 Hidden; players / vs: 0 Always, 1 Moving, 2 Running, 3 Shooting; team: 1 = blips in team colours (own blue, enemy red)
+void RadarRulesSet(int mode, int players, int vs, int team);
 void RulesNextCreateIsBotMatch(); // the next create screen comes from the Multiplayer screen's Bot Match (rules.cpp)
 bool BotsInPlayerMatch(); // this machine hosts a player match with bots filled in (rules.cpp)
 // The overlay mod file that replaces a game file (overlay.cpp), or nullptr.

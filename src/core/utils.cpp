@@ -1,5 +1,6 @@
 #include "core/utils.h"
 
+#include <cctype>
 #include <shlwapi.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -296,11 +297,33 @@ std::string GamertagFromPersona(const char* personaUtf8, bool asciiOnly)
 			result += utf8;
 		}
 	}
+	// The game names the save folder after the gamertag (Documents\CAPCOM\LOST PLANET 2\<name>), and its text treats <...>
+	// as tags: so no characters a Windows file name can't hold (a Steam name with ':' couldn't save).
+	for (char& c : result) {
+		if (c == '<' || c == '>' || c == ':' || c == '"' || c == '/' || c == '\\' || c == '|' || c == '?' || c == '*') {
+			c = '_';
+		}
+	}
 	while (!result.empty() && result.back() == ' ') {
 		result.pop_back();
 	}
 	if (result.empty()) {
 		result = "Player";
+	}
+	// names Windows keeps for devices can't be folders either
+	{
+		std::string stem = result.substr(0, result.find('.'));
+		for (char& c : stem) {
+			c = (char)toupper((unsigned char)c);
+		}
+		static const char* const kReserved[] = {"CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+		                                        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"};
+		for (const char* r : kReserved) {
+			if (stem == r) {
+				result = result.size() < 15 ? result.insert(stem.size(), "_") : "_" + result.substr(1); // "NUL.x" -> "NUL_.x"
+				break;
+			}
+		}
 	}
 	return result;
 }

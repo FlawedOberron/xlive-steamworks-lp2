@@ -115,6 +115,10 @@ function lp2SetupText()
       }
       else
       {
+         if(lp2SetupLabels[i] != undefined && lp2SetupLabels[i] != "")
+         {
+            row.txt_TitleItem.text = lp2SetupLabels[i];
+         }
          lp2SetupFit(row,"-");
       }
       i++;

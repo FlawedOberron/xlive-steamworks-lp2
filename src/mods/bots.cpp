@@ -330,6 +330,27 @@ void LogAimValues()
 	             value(v.offset[0]), value(v.offset[1]), value(v.offset[2]), value(v.offset[3]));
 }
 
+// Mode 15, ours (the game's modes stop at 14 and score 0 past it): 100 while the bot's target is reloading or has an empty
+// magazine. Weapon (character's held one) +0x210c reload timer, above 0 while reloading (the game's FUN_0091f640 waits on
+// it); +0x20fc rounds loaded, +0x20fe in reserve. DX9 weapons are 0x10 lower.
+bool BotLogOn();
+const uint32_t kModeTargetReload = 15;
+bool TargetReloading(uint8_t* unit)
+{
+	uint8_t* target = *(uint8_t**)(unit + g_vas->target);
+	if (!target || target[0x1f] != 1) {
+		return false;
+	}
+	uint8_t* weapon = *(uint8_t**)(target + g_vas->held);
+	if (!weapon) {
+		return false;
+	}
+	const uint32_t d = g_vas->held == 0x1688 ? 0 : 0x10;
+	float timer = *(float*)(weapon + 0x210c - d);
+	int16_t loaded = *(int16_t*)(weapon + 0x20fc - d), reserve = *(int16_t*)(weapon + 0x20fe - d);
+	return timer > 0.0f || (loaded == 0 && reserve > 0);
+}
+
 float __attribute__((thiscall)) EvalParam(uint8_t* eval, uint8_t* unit, void* b, void* c)
 {
 	uint8_t* game = *(uint8_t**)At(g_vas->game);
@@ -337,6 +358,15 @@ float __attribute__((thiscall)) EvalParam(uint8_t* eval, uint8_t* unit, void* b,
 		return g_evalOriginal(eval, unit, b, c);
 	}
 	LogAimValues();
+	if (*(uint32_t*)(eval + kEvalMode) == kModeTargetReload) {
+		bool r = TargetReloading(unit);
+		static DWORD logged = 0;
+		if (r && BotLogOn() && GetTickCount() - logged > 3000) {
+			logged = GetTickCount();
+			XLS_LOG_INFO("mods: bots: %p sees its target reloading.", unit);
+		}
+		return r ? 1.0f : 0.0f;
+	}
 	int a = Personality(unit);
 	if (*(uint32_t*)(eval + kEvalMode) == kModeAppeal) {
 		uint32_t roll = Mix((uint32_t)(uintptr_t)unit ^ (GetTickCount() / 4000) * 0x9e3779b9u) % 100;
@@ -455,6 +485,76 @@ void LogPlan(uint8_t slot, uint8_t* plan, uint8_t* unit, const uint8_t* p)
 	             *(float*)(unit + g_vas->recentDamage), p[kPostFree] ? "free" : "none");
 }
 
+// After a bot uses a data post (an Exec...Post item ends), that post is off its list for a while: the game keeps offering
+// the same post while it boots up, so the bot looped run to it / activate / stand there thinking.
+const DWORD kPostDone = 15000;
+struct PostDone {
+	uint8_t* post = nullptr;
+	DWORD at = 0;
+	bool inExec = false;
+};
+PostDone g_postDone[16];
+uint8_t* g_postUnits[16];
+
+const char* PlanItemName(uint8_t* plan)
+{
+	void* now = plan ? *(void**)(plan + 0x710) : nullptr;
+	uint8_t* item = now ? *(uint8_t**)((uint8_t*)now + 0x30) : nullptr;
+	uint8_t* name = item ? *(uint8_t**)(item + 4) : nullptr;
+	return name ? (const char*)(name + 8) : "";
+}
+
+bool PostRecentlyDone(int slot, uint8_t* post)
+{
+	return slot >= 0 && slot < 16 && post && g_postDone[slot].post == post && GetTickCount() - g_postDone[slot].at < kPostDone;
+}
+
+// Dodge direction. cAIPlanMoveHmAction::vf7 (DX11 0x99b390), pad action 4, starts a dodge: it sets pad +0x1cc bit 31 and
+// gives the pad a direction (pad vtable +0x14c, a world vector): away from grenades and the line of fire, else a random side.
+// When the bot is out of its weapon's range (the plan item says which class: Avoid / Avoid-Short, beyond 20 / 7 m) the roll
+// goes forward instead, diagonally, towards its target. Long and heavy weapons, and in-range bots, keep the game's choice.
+typedef uint32_t(__attribute__((thiscall)) * HmActionFn)(uint8_t*, uint8_t*, uint8_t*, uint8_t*);
+typedef void(__attribute__((thiscall)) * PadDirFn)(uint8_t*, float*);
+HmActionFn g_hmActionOriginal = nullptr;
+const uint32_t kDodgeVas[kBuildCount] = {0x99b390, 0x98bb40, 0x99b6b0, 0x98be70};
+const uint32_t kPadDodge = 0x1cc, kPadSetDir = 0x14c;
+
+uint32_t __attribute__((thiscall)) HmAction(uint8_t* move, uint8_t* unit, uint8_t* plan, uint8_t* pad)
+{
+	bool dodge = move && move[4] == 4 && pad;
+	bool before = dodge && (*(uint32_t*)(pad + kPadDodge) >> 31);
+	uint32_t r = g_hmActionOriginal(move, unit, plan, pad);
+	if (!dodge || before || !(*(uint32_t*)(pad + kPadDodge) >> 31) || !unit || !plan || !BotMenuOptions().improved) {
+		return r;
+	}
+	uint8_t* target = *(uint8_t**)(unit + g_vas->target);
+	if (!target) {
+		return r;
+	}
+	const char* item = PlanItemName(plan);
+	float range = strcmp(item, "Avoid") == 0 ? 2000.0f : strcmp(item, "Avoid-Short") == 0 ? 700.0f : -1.0f;
+	const float* a = (const float*)(unit + 0xd0);
+	const float* b = (const float*)(target + 0xd0);
+	float dx = b[0] - a[0], dz = b[2] - a[2], d = sqrtf(dx * dx + dz * dz);
+	if (range < 0 || d < range || d < 1.0f) {
+		return r;
+	}
+	dx /= d;
+	dz /= d;
+	float side = Rand() & 1 ? 0.6f : -0.6f;
+	float dir[4] = {dx * 0.8f - dz * side, 0.0f, dz * 0.8f + dx * side, 0.0f};
+	float n = sqrtf(dir[0] * dir[0] + dir[2] * dir[2]);
+	dir[0] /= n;
+	dir[2] /= n;
+	(*(PadDirFn*)(*(uint8_t**)pad + kPadSetDir))(pad, dir);
+	static DWORD logged = 0;
+	if (BotLogOn() && GetTickCount() - logged > 3000) {
+		logged = GetTickCount();
+		XLS_LOG_INFO("mods: bots: %p dodges towards its target %.0f m away (%s).", unit, d / 100.0f, item);
+	}
+	return r;
+}
+
 void ReactToHit(uint8_t* think, uint8_t* unit)
 {
 	const uint8_t slot = think[kThinkSlot];
@@ -467,7 +567,22 @@ void ReactToHit(uint8_t* think, uint8_t* unit)
 	p[kOwnLife] = LifePercent(unit);
 	p[kTargetLife] = LifePercent(*(uint8_t**)(unit + g_vas->target));
 	uint8_t* plan = *(uint8_t**)(think + kThinkPlan);
-	p[kPostFree] = plan && *(void**)(plan + kPlanPost) ? 100 : 0;
+	uint8_t* post = plan ? *(uint8_t**)(plan + kPlanPost) : nullptr;
+	{
+		const char* item = PlanItemName(plan);
+		bool exec = strncmp(item, "Exec", 4) == 0 && strstr(item, "Post");
+		PostDone& d = g_postDone[slot];
+		if (d.inExec && !exec && post) {
+			d.post = post;
+			d.at = GetTickCount();
+			if (BotLogOn()) {
+				XLS_LOG_INFO("mods: bots: slot %u used post %p: leaves it for %lu s.", slot, post, (unsigned long)(kPostDone / 1000));
+			}
+		}
+		d.inExec = exec;
+		g_postUnits[slot] = unit;
+	}
+	p[kPostFree] = post && !PostRecentlyDone(slot, post) ? 100 : 0;
 	LogPlan(slot, plan, unit, p);
 	Reaction& r = g_reactions[slot];
 	const float damage = *(float*)(unit + g_vas->recentDamage);
@@ -524,6 +639,9 @@ struct RoamGoal {
 	float best = 0;
 	bool has = false, noise = false;
 	DWORD used = 0, set = 0, heard = 0, progress = 0, rest = 0;
+	int hopFrom = -1, hopTo = -1; // the area link it's running along, its best distance to the hop's end and when that last improved
+	float hopBest = 0;
+	DWORD hopProgress = 0;
 };
 std::unordered_map<uint8_t*, RoamGoal> g_goals;
 std::mutex g_goalLock;
@@ -534,39 +652,272 @@ float Distance2(const float* a, const float* b)
 	return dx * dx + dy * dy + dz * dz;
 }
 
-bool RoamPoint(const float* from, RoamGoal& g)
+// The map split into areas: its start points grouped on a kAreaCell grid (x/z), each area's goal the point nearest its
+// points' middle (a real spawn spot, so reachable). Per team (unit team byte, 16 kept): when its bots last went through an
+// area (swept) and last heard fighting there. Bots go to fresh fighting first (mostly the nearest), else the nearest area
+// the team hasn't swept lately that no teammate is already headed for; all swept, the team starts over.
+const float kAreaCell = 2500.0f, kAreaLevel = 500.0f, kStep = 4500.0f, kStepUp = 600.0f, kLevelWeight = 4.0f;
+const DWORD kHopStuck = 5000, kBlockedFor = 120000;
+const DWORD kSweptFor = 120000, kFightFor = 30000;
+struct Area {
+	float pos[3] = {0, 0, 0};
+	std::vector<int> links; // areas a bot can run to in one go (the game's path gives up on long runs)
+	DWORD swept[16] = {}, fight[16] = {};
+};
+std::vector<Area> g_areas;
+std::vector<const float*> g_points; // the start points (not base markers)
+std::unordered_map<int64_t, DWORD> g_blocked; // link from * 1024 + to -> when a bot got stuck on it
+std::unordered_map<int64_t, int> g_areaCells;
+const void* g_areaSet = nullptr;
+uint32_t g_areaCount = 0;
+
+// x/z cells, and levels: the same spot on another floor is another area.
+int64_t AreaCell(const float* p)
+{
+	return ((int64_t)floorf(p[0] / kAreaCell) * 100003 + (int64_t)floorf(p[2] / kAreaCell)) * 4099 + (int64_t)floorf(p[1] / kAreaLevel);
+}
+
+// Distance with height weighted up, so the nearest area is on the same floor.
+float LevelDistance2(const float* a, const float* b)
+{
+	float dx = a[0] - b[0], dy = (a[1] - b[1]) * kLevelWeight, dz = a[2] - b[2];
+	return dx * dx + dy * dy + dz * dz;
+}
+
+// Caller holds g_goalLock. Rebuilt when the start point set changes (a new map or round).
+void AreasBuild()
 {
 	uint8_t* game = *(uint8_t**)At(g_vas->game);
 	uint8_t* set = game ? *(uint8_t**)(game + kInitPosSet) : nullptr;
 	uint32_t count = set ? *(uint32_t*)(set + kSetCount) : 0;
 	uint8_t** records = set ? *(uint8_t***)(set + kSetArray) : nullptr;
-	if (!records || !count || count > 256) {
-		return false;
+	if (set == g_areaSet && count == g_areaCount) {
+		return;
 	}
-	const float* pick = nullptr;
-	float farthest = -1.0f;
-	for (int tries = 0; tries < 12; tries++) {
-		uint8_t* r = records[Rand() % count];
+	g_areaSet = set;
+	g_areaCount = count;
+	g_areas.clear();
+	g_areaCells.clear();
+	g_points.clear();
+	if (!records || !count || count > 256) {
+		return;
+	}
+	struct Sum { double x = 0, y = 0, z = 0; int n = 0; std::vector<const float*> pts; };
+	std::unordered_map<int64_t, Sum> cells;
+	for (uint32_t i = 0; i < count; i++) {
+		uint8_t* r = records[i];
 		if (!r || r[kRecKind] > 5) { // 6, 7: team base markers
 			continue;
 		}
 		const float* pos = (const float*)(r + kRecPos);
-		float d = Distance2(from, pos);
-		if (d > farthest) {
-			farthest = d;
-			pick = pos;
+		g_points.push_back(pos);
+		Sum& c = cells[AreaCell(pos)];
+		c.x += pos[0];
+		c.y += pos[1];
+		c.z += pos[2];
+		c.n++;
+		c.pts.push_back(pos);
+	}
+	for (auto& [cell, c] : cells) {
+		float mid[3] = {(float)(c.x / c.n), (float)(c.y / c.n), (float)(c.z / c.n)};
+		const float* best = c.pts[0];
+		for (const float* p : c.pts) {
+			best = Distance2(p, mid) < Distance2(best, mid) ? p : best;
 		}
-		if (d >= kRoamNear * kRoamNear) { // the first pick enough: random, not always the pick end of the map
+		Area a;
+		memcpy(a.pos, best, sizeof(a.pos));
+		g_areaCells[cell] = (int)g_areas.size();
+		g_areas.push_back(a);
+	}
+	// links: near enough across and up or down; an area with none gets its nearest
+	int links = 0;
+	for (size_t i = 0; i < g_areas.size(); i++) {
+		int nearest = -1;
+		float nearD = 1e30f;
+		for (size_t j = 0; j < g_areas.size(); j++) {
+			if (i == j) {
+				continue;
+			}
+			const float *a = g_areas[i].pos, *b = g_areas[j].pos;
+			float across = (a[0] - b[0]) * (a[0] - b[0]) + (a[2] - b[2]) * (a[2] - b[2]), up = fabsf(a[1] - b[1]);
+			if (across <= kStep * kStep && up <= kStepUp) {
+				g_areas[i].links.push_back((int)j);
+				links++;
+			}
+			float d = LevelDistance2(a, b);
+			if (d < nearD) {
+				nearD = d;
+				nearest = (int)j;
+			}
+		}
+		if (g_areas[i].links.empty() && nearest >= 0) {
+			g_areas[i].links.push_back(nearest);
+			links++;
+		}
+	}
+	g_blocked.clear();
+	XLS_LOG_INFO("mods: bots: map split into %u areas, %d links (%u start points).", (unsigned)g_areas.size(), links, count);
+}
+
+int AreaAt(const float* p)
+{
+	auto it = g_areaCells.find(AreaCell(p));
+	if (it != g_areaCells.end()) {
+		return it->second;
+	}
+	int best = -1; // between areas: the nearest one, by level first
+	float bestD = 1e30f;
+	for (size_t i = 0; i < g_areas.size(); i++) {
+		float d = LevelDistance2(p, g_areas[i].pos);
+		if (d < bestD) {
+			bestD = d;
+			best = (int)i;
+		}
+	}
+	return best;
+}
+
+// Caller holds g_goalLock. Where to run now for a goal: in the goal's area, the goal; else the next area on the shortest route
+// over the links (Dijkstra; a blocked link costs a lot, so routes go round it while there's another way). -1 hop: the goal.
+const float* Waypoint(const float* from, const float* goal, int* hopFrom, int* hopTo)
+{
+	*hopFrom = *hopTo = -1;
+	int start = AreaAt(from), end = AreaAt(goal), n = (int)g_areas.size();
+	if (start < 0 || end < 0 || start == end || n > 1024) {
+		return goal;
+	}
+	DWORD now = GetTickCount();
+	std::vector<float> cost(n, 1e30f);
+	std::vector<int> prev(n, -1);
+	std::vector<bool> done(n, false);
+	cost[start] = 0;
+	for (;;) {
+		int u = -1;
+		for (int i = 0; i < n; i++) {
+			if (!done[i] && cost[i] < 1e29f && (u < 0 || cost[i] < cost[u])) {
+				u = i;
+			}
+		}
+		if (u < 0 || u == end) {
 			break;
 		}
+		done[u] = true;
+		for (int v : g_areas[u].links) {
+			auto it = g_blocked.find((int64_t)u * 1024 + v);
+			bool blocked = it != g_blocked.end() && now - it->second < kBlockedFor;
+			float c = cost[u] + sqrtf(Distance2(g_areas[u].pos, g_areas[v].pos)) + (blocked ? 1e6f : 0.0f);
+			if (c < cost[v]) {
+				cost[v] = c;
+				prev[v] = u;
+			}
+		}
 	}
-	if (!pick) {
+	if (prev[end] < 0) {
+		return goal; // no route: straight there, the game's way
+	}
+	int hop = end;
+	while (prev[hop] != start) {
+		hop = prev[hop];
+	}
+	*hopFrom = start;
+	*hopTo = hop;
+	return hop == end ? goal : g_areas[hop].pos;
+}
+
+// Caller holds g_goalLock.
+bool RoamPoint(uint8_t* unit, const float* from, RoamGoal& g)
+{
+	AreasBuild();
+	if (g_areas.empty()) {
 		return false;
 	}
-	memcpy(g.pos, pick, sizeof(g.pos));
+	int team = unit[g_vas->team] & 15, here = AreaAt(from);
+	DWORD now = GetTickCount();
+	const float* mates[16];
+	int nMates = 0;
+	for (auto& [other, og] : g_goals) {
+		if (other != unit && og.has && !og.noise && nMates < 16 && other[g_vas->team] == unit[g_vas->team]) {
+			mates[nMates++] = og.pos;
+		}
+	}
+	auto taken = [&](const float* p) {
+		for (int i = 0; i < nMates; i++) {
+			if (Distance2(p, mates[i]) < kAreaCell * kAreaCell / 4) {
+				return true;
+			}
+		}
+		return false;
+	};
+	int pick = -1;
+	float bestScore = 1e30f;
+	bool fight = false;
+	for (size_t i = 0; i < g_areas.size(); i++) { // fresh fighting: metres away plus 2 per second old, a little chance
+		const Area& a = g_areas[i];
+		if ((int)i == here || !a.fight[team] || now - a.fight[team] > kFightFor) {
+			continue;
+		}
+		float score = sqrtf(Distance2(from, a.pos)) / 100.0f + (now - a.fight[team]) / 500.0f + Rand() % 15;
+		if (score < bestScore) {
+			bestScore = score;
+			pick = (int)i;
+			fight = true;
+		}
+	}
+	for (int pass = 0; pass < 2 && pick < 0; pass++) {
+		for (size_t i = 0; i < g_areas.size(); i++) { // the nearest unswept area nobody on the team is headed for
+			const Area& a = g_areas[i];
+			if ((int)i == here || (a.swept[team] && now - a.swept[team] < kSweptFor)) {
+				continue;
+			}
+			float score = sqrtf(Distance2(from, a.pos)) / 100.0f + (taken(a.pos) ? 100.0f : 0.0f) + Rand() % 20;
+			if (score < bestScore) {
+				bestScore = score;
+				pick = (int)i;
+			}
+		}
+		if (pick < 0) { // all swept: start over
+			for (Area& a : g_areas) {
+				a.swept[team] = 0;
+			}
+			if (BotLogOn()) {
+				XLS_LOG_INFO("mods: bots: team %d swept every area, starting over.", team);
+			}
+		}
+	}
+	if (pick < 0) {
+		return false;
+	}
+	memcpy(g.pos, g_areas[pick].pos, sizeof(g.pos));
 	g.has = true;
 	g.noise = false;
+	if (BotLogOn()) {
+		const Area& a = g_areas[pick];
+		if (fight) {
+			XLS_LOG_INFO("mods: bots: %p heads for fighting in area %d (%.0f s ago).", unit, pick, (now - a.fight[team]) / 1000.0f);
+		}
+		else {
+			XLS_LOG_INFO("mods: bots: %p sweeps area %d.", unit, pick);
+		}
+	}
 	return true;
+}
+
+// Caller holds g_goalLock: the area the bot is in is swept for its team; gunfire it hears marks the shot's area.
+void AreasNote(uint8_t* unit, const float* here, const RadarShotInfo* shots, int n, bool everyone, DWORD now)
+{
+	AreasBuild();
+	int team = unit[g_vas->team] & 15, at = AreaAt(here);
+	if (at >= 0) {
+		g_areas[at].swept[team] = now;
+	}
+	for (int i = 0; i < n; i++) {
+		if (shots[i].who != unit && (everyone || shots[i].team != unit[g_vas->team]) && Distance2(here, shots[i].pos) < kHearing * kHearing) {
+			int area = AreaAt(shots[i].pos);
+			if (area >= 0) {
+				g_areas[area].fight[team] = now;
+			}
+		}
+	}
 }
 
 // Caller holds g_goalLock.
@@ -578,6 +929,7 @@ void GoalUpdate(uint8_t* unit, RoamGoal& g, DWORD now)
 		RadarShotInfo shots[32];
 		int n = RadarRecentShots(shots, 32, kShotHeard), kind = GameKind();
 		bool everyone = kind >= 1 && kind <= 3;
+		AreasNote(unit, here, shots, n, everyone, now);
 		float nearest = g.has && g.noise ? Distance2(here, g.pos) : kHearing * kHearing;
 		const float* heard = nullptr;
 		for (int i = 0; i < n; i++) {
@@ -627,7 +979,7 @@ void GoalUpdate(uint8_t* unit, RoamGoal& g, DWORD now)
 	if (renew) {
 		g.has = false;
 		g.noise = false;
-		if (RoamPoint(here, g)) {
+		if (RoamPoint(unit, here, g)) {
 			g.set = g.progress = now;
 			g.best = sqrtf(Distance2(here, g.pos));
 			if (BotLogOn()) {
@@ -659,6 +1011,11 @@ char __attribute__((thiscall)) Resolve(void* self, uint8_t* unit, uint8_t* plan,
 		if (!post) {
 			return 0;
 		}
+		for (int s = 0; s < 16; s++) { // the bot's own slot: whichever slot's think has this plan
+			if (g_postDone[s].post == post && PostRecentlyDone(s, post) && g_postUnits[s] == unit) {
+				return 0;
+			}
+		}
 		bool here = Distance2((const float*)(unit + 0xd0), (const float*)(post + 0xd0)) < kPostHere * kPostHere;
 		if (g.has && g.noise && !here && GameKind() != kKindPostGrab) {
 			return 0;
@@ -668,9 +1025,31 @@ char __attribute__((thiscall)) Resolve(void* self, uint8_t* unit, uint8_t* plan,
 	if (!g.has) {
 		return g_resolveOriginal(self, unit, plan, ctx, target, out, info);
 	}
-	out[0] = g.pos[0];
-	out[1] = g.pos[1];
-	out[2] = g.pos[2];
+	AreasBuild();
+	const float* here = (const float*)(unit + 0xd0);
+	int hopFrom, hopTo;
+	const float* to = Waypoint(here, g.pos, &hopFrom, &hopTo);
+	float left = sqrtf(Distance2(here, to));
+	if (hopFrom != g.hopFrom || hopTo != g.hopTo || now - g.hopProgress > 2 * kHopStuck) { // a new hop (or a stale one)
+		g.hopFrom = hopFrom;
+		g.hopTo = hopTo;
+		g.hopBest = left;
+		g.hopProgress = now;
+	}
+	else if (left < g.hopBest - kProgress) {
+		g.hopBest = left;
+		g.hopProgress = now;
+	}
+	else if (hopFrom >= 0 && now - g.hopProgress > kHopStuck) { // no closer in a while: that link doesn't work for now
+		g_blocked[(int64_t)hopFrom * 1024 + hopTo] = now;
+		g.hopProgress = now;
+		if (BotLogOn()) {
+			XLS_LOG_INFO("mods: bots: %p stuck going from area %d to %d (%.0f m left): link blocked for a while.", unit, hopFrom, hopTo, left / 100.0f);
+		}
+	}
+	out[0] = to[0];
+	out[1] = to[1];
+	out[2] = to[2];
 	out[3] = 0.0f;
 	static LONG logged = 0;
 	if (InterlockedIncrement(&logged) <= 3) {
@@ -745,6 +1124,13 @@ void BotsInstall(unsigned char* base)
 	g_thinkBodyOriginal = (ThinkFn)Detour(At(g_vas->think), kThinkBodyPrologue, sizeof(kThinkBodyPrologue), (void*)&ThinkBody);
 	if (!g_thinkBodyOriginal) {
 		XLS_LOG_WARN("mods: bots: think code not recognised, bots won't react to being shot.");
+	}
+	static const uint8_t kHmPrologue[] = {0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf0};
+	if (GameBuild() >= 0) {
+		g_hmActionOriginal = (HmActionFn)Detour(At(kDodgeVas[GameBuild()]), kHmPrologue, sizeof(kHmPrologue), (void*)&HmAction);
+	}
+	if (!g_hmActionOriginal) {
+		XLS_LOG_WARN("mods: bots: dodge code not recognised, dodges keep the game's direction.");
 	}
 	static const uint8_t kResolvePrologue[] = {0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf0, 0x81, 0xec, 0xd4, 0x01, 0x00, 0x00};
 	g_resolveOriginal = (ResolveFn)Detour(At(g_vas->resolve), kResolvePrologue, sizeof(kResolvePrologue), (void*)&Resolve);
