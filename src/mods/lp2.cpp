@@ -24,12 +24,14 @@ DWORD WINAPI Worker(LPVOID)
 	ConfigEnsureLoaded();
 	auto* base = (uint8_t*)GetModuleHandleW(nullptr);
 	bool mapsPending = MapsWanted();
+	UiEarly();
 	PluginsLoad();
 	bool pluginsPending = true;
 	bool pathPending = true; // also without sets of our own: other players' sets are loaded through it
 	bool started = false;
 	bool versionsPending = true;
 	for (int tick = 0; tick < 30000 && (mapsPending || pluginsPending || pathPending || !started); tick++) {
+		UiEarly(); // before the game makes its D3D device
 		started = TitleStarted();
 		// not tied to a known build (the disc exes have no map slots), and needed before the first search
 		if (started && versionsPending) {

@@ -29,6 +29,7 @@ void OverlayInstall();
 // ui.cpp: our own UI drawn over the game each frame (Dear ImGui). A layer draws with ImGui (width, height = the back
 // buffer); none draws anything unless it chooses to. UiFont: our normal and large fonts (nullptr before the first frame).
 using UiDrawFn = void (*)(float width, float height);
+void UiEarly(); // hooks the game's D3D create import once it is filled in (call from start-up on)
 void UiInstall(int build);
 void UiAddLayer(const char* name, UiDrawFn draw);
 ::ImFont* UiFont(bool large);

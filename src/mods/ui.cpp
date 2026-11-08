@@ -532,11 +532,22 @@ IDirect3D9* WINAPI Create9(UINT sdk)
 	return d3d;
 }
 
+// once the import slot holds the real function (SteamStub fills the Steam exes' imports in after our DllMain)
 bool HookCreate(bool dx11)
 {
 	void** slot = dx11 ? ImportSlot("d3d11.dll", "D3D11CreateDeviceAndSwapChain") : ImportSlot("d3d9.dll", "Direct3DCreate9");
-	return slot && (dx11 ? Patch(slot, (void*)&Create11, (void**)&g_create11) : Patch(slot, (void*)&Create9, (void**)&g_create9));
+	HMODULE dll = GetModuleHandleA(dx11 ? "d3d11.dll" : "d3d9.dll");
+	HMODULE owner = nullptr;
+	if (!slot || !dll || !*slot ||
+	    !GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)*slot, &owner) ||
+	    owner == GetModuleHandleA(nullptr)) {
+		return false;
+	}
+	return dx11 ? Patch(slot, (void*)&Create11, (void**)&g_create11) : Patch(slot, (void*)&Create9, (void**)&g_create9);
 }
+
+bool g_uiOff = false, g_createHooked = false;
+int g_uiDx = -2; // 0 DX11, 1 DX9, -1 neither, -2 not checked yet
 
 bool Hook11(HWND wnd)
 {
@@ -651,6 +662,28 @@ void UiAddLayer(const char* name, UiDrawFn draw)
 	return f ? f : UiFont(large);
 }
 
+void UiEarly()
+{
+	if (g_createHooked || g_uiOff) {
+		return;
+	}
+	if (g_uiDx == -2) {
+		wchar_t path[MAX_PATH] = {};
+		GetModuleFileNameW(nullptr, path, MAX_PATH);
+		const wchar_t* name = wcsrchr(path, L'\\');
+		name = name ? name + 1 : path;
+		g_uiDx = _wcsnicmp(name, L"LP2DX11", 7) == 0 ? 0 : _wcsnicmp(name, L"LP2DX9", 6) == 0 ? 1 : -1;
+		g_uiOff = GetFileAttributesW((xls::Cfg().modCacheDir + L"no-ui.txt").c_str()) != INVALID_FILE_ATTRIBUTES;
+	}
+	if (g_uiDx < 0 || g_uiOff) {
+		return;
+	}
+	if (HookCreate(g_uiDx == 0)) {
+		g_createHooked = true;
+		XLS_LOG_INFO("mods: ui: the game's %s create import hooked.", g_uiDx == 0 ? "D3D11" : "D3D9");
+	}
+}
+
 void UiInstall(int build)
 {
 	if (build < 0) {
@@ -661,8 +694,9 @@ void UiInstall(int build)
 		return;
 	}
 	bool dx11 = build % 2 == 0;
-	if (!HookCreate(dx11)) {
-		XLS_LOG_WARN("mods: ui: the game's D3D create import not found.");
+	UiEarly();
+	if (!g_createHooked) {
+		XLS_LOG_WARN("mods: ui: the game's D3D create import not hooked.");
 	}
 	HANDLE thread = CreateThread(nullptr, 0, HookThread, dx11 ? (void*)1 : nullptr, 0, nullptr);
 	if (thread) {
