@@ -618,6 +618,8 @@ void SetSetting(int sid, int setting, float to, float fade, double now)
 	XLS_LOG_INFO("mods: script: volume %d %s -> %g over %g s.", sid, kScriptSettings[setting], to, fade);
 }
 
+void MapModeEvent(const std::string& name, int player, double now);
+
 void Fire(State& s, int node, int in, double now)
 {
 	if (++s.steps > kSteps) {
@@ -900,6 +902,7 @@ void Fire(State& s, int node, int in, double now)
 	case kModeOnKill:
 	case kModeOnDeath:
 	case kModeOnSpawn:
+	case kScriptOnModeEvent:
 		Out(s, node, 0, now);   // events: ModeDispatch fires them
 		break;
 	case kModeSpawnPlayer: {
@@ -1044,6 +1047,12 @@ void Fire(State& s, int node, int in, double now)
 		Out(s, node, 0, now);
 		break;
 	}
+	case kModeFireEvent:
+		if (&s == g_mode) {
+			MapModeEvent(n.text, PlayerIn(s, n.player), now);
+		}
+		Out(s, node, 0, now);
+		break;
 	case kScriptChance:
 		Out(s, node, std::uniform_real_distribution<float>(0.0f, 100.0f)(g_random) < Get(s, n.a) ? 0 : 1, now);
 		break;
@@ -1195,6 +1204,31 @@ void ModeDispatch(State& s, int type, int a, int b, float x, double now)
 		}
 		s.steps = 0;
 		Out(s, (int)i, 0, now);
+	}
+}
+
+// a mode's "Fire map event": the map's own script (host) runs its "On mode event" nodes with that name (case ignored)
+void MapModeEvent(const std::string& name, int player, double now)
+{
+	State* s = g_state;
+	if (!s) {
+		return;
+	}
+	int ran = 0;
+	for (size_t i = 0; i < s->graph.nodes.size(); i++) {
+		const ScriptNode& n = s->graph.nodes[i];
+		if (n.type != kScriptOnModeEvent || _stricmp(n.text.c_str(), name.c_str()) != 0) {
+			continue;
+		}
+		SetVar(*s, n.player, (float)player);
+		s->steps = 0;
+		Out(*s, (int)i, 0, now);
+		ran++;
+	}
+	static std::string logged;
+	if (logged != name) {
+		logged = name;
+		XLS_LOG_INFO("mods: mode: map event \"%s\" (player %d): %d map node(s).", name.c_str(), player, ran);
 	}
 }
 

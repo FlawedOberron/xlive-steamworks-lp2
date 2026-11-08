@@ -1314,6 +1314,20 @@ float CarriedValue(const uint8_t* w, int archetype)
 	return loaded <= 0 && reserve <= 0 ? 0.0f : WeaponValue(w, archetype);
 }
 
+bool IsGrenade(const uint8_t* w)
+{
+	int k = WeaponKind(w);
+	return k >= 0x15 && k <= 0x19;
+}
+
+// grenades go in their own slot: taking another type drops the bot's own on the spot, which then looks like a pickup
+// again (bots looped between the two). So a grenade is only worth a short detour, and once a bot has gone for one it
+// leaves grenades alone for a while.
+std::mutex g_grenadeLock;
+std::unordered_map<uint8_t*, DWORD> g_grenadeAt; // character -> when it last went for grenades
+const DWORD kGrenadeRest = 60000;
+const float kGrenadeGain = 12.0f;
+
 bool SameWeapon(const uint8_t* a, const uint8_t* b)
 {
 	return a && b && (*(const uint32_t*)(a + 0x1c) >> 8) == (*(const uint32_t*)(b + 0x1c) >> 8);
@@ -1352,11 +1366,21 @@ uint8_t* __cdecl WeaponSearch(uint8_t* ch, float* dist, uint32_t a, uint32_t b, 
 	uint8_t* held = *(uint8_t**)(ch + g_vas->held);
 	uint8_t* other = *(uint8_t**)(ch + g_vas->other);
 	float worst = std::min(CarriedValue(held, arch), CarriedValue(other, arch));
+	DWORD now = GetTickCount();
+	bool grenadesRest;
+	{
+		std::lock_guard<std::mutex> lock(g_grenadeLock);
+		auto it = g_grenadeAt.find(ch);
+		grenadesRest = it != g_grenadeAt.end() && now - it->second < kGrenadeRest;
+	}
 	int best = -1;
 	float bestScore = 0.0f, bestGain = 0.0f;
 	for (int i = 0; i < m; i++) {
 		float gain;
-		if (SameWeapon(found[i], held) || SameWeapon(found[i], other)) { // ammo for one it has: only when that one runs dry
+		if (IsGrenade(found[i])) {
+			gain = grenadesRest ? -1.0f : kGrenadeGain;
+		}
+		else if (SameWeapon(found[i], held) || SameWeapon(found[i], other)) { // ammo for one it has: only when that one runs dry
 			const uint8_t* mine = SameWeapon(found[i], held) ? held : other;
 			gain = CarriedValue(mine, arch) <= 0.0f ? 30.0f : -1.0f;
 		}
@@ -1379,6 +1403,13 @@ uint8_t* __cdecl WeaponSearch(uint8_t* ch, float* dist, uint32_t a, uint32_t b, 
 	}
 	if (best < 0) {
 		return nullptr;
+	}
+	if (IsGrenade(found[best])) {
+		std::lock_guard<std::mutex> lock(g_grenadeLock);
+		if (g_grenadeAt.size() > 256) {
+			g_grenadeAt.clear();
+		}
+		g_grenadeAt[ch] = now;
 	}
 	*dist = away[best];
 	return found[best];
@@ -1406,7 +1437,7 @@ bool SwapBeforePickUp(uint8_t* unit, uint8_t* plan)
 	uint8_t* w = *(uint8_t**)(plan + kPlanWeapon);
 	uint8_t* held = *(uint8_t**)(unit + g_vas->held);
 	uint8_t* other = *(uint8_t**)(unit + g_vas->other);
-	if (!w || !held || !other || SameWeapon(w, held) || SameWeapon(w, other) || WeaponKind(held) == 0x0c || WeaponKind(other) == 0x0c) {
+	if (!w || IsGrenade(w) || !held || !other || SameWeapon(w, held) || SameWeapon(w, other) || WeaponKind(held) == 0x0c || WeaponKind(other) == 0x0c) {
 		return false;
 	}
 	int arch = Personality(unit);

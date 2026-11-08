@@ -99,7 +99,10 @@ enum ScriptType { kScriptStart, kScriptEnter, kScriptTimer, kScriptDelay, kScrip
 	// game modes (.lp2mode, modes.cpp / scripts.cpp ModeEvent): events, then actions and data
 	kModeMatchStart, kModeRoundStart, kModeRoundEnd, kModeWorldUpdate, kModeOnKill, kModeOnDeath, kModeOnSpawn,
 	kModeSpawnPlayer, kModeHoldPlayer, kModeEliminate, kModeRespawnRules, kModeQueue, kModeScore, kModePlayerInfo,
-	kModeTeamList, kModeEndRound, kModeEndMatch, kModeShowText, kScriptTypes };
+	kModeTeamList, kModeEndRound, kModeEndMatch, kModeShowText,
+	// mode -> map: the mode's "Fire map event" (text = the event's name, player) runs the map script's "On mode event" nodes
+	// of that name (they set their player variable)
+	kModeFireEvent, kScriptOnModeEvent, kScriptTypes };
 const int kScriptIns = 5, kScriptOuts = 8;
 struct ScriptTypeInfo {
 	const char* name;
@@ -163,6 +166,8 @@ inline const ScriptTypeInfo kScriptTypeInfo[kScriptTypes] = {
 	{"endround", {"in"}, {}},
 	{"endmatch", {"in"}, {}},
 	{"showtext", {"in"}, {"then"}},
+	{"modeevent", {"in"}, {"then"}},
+	{"onmodeevent", {}, {"then"}},
 };
 // Variables' kinds ("var_kinds"): a number; a player (its match slot, -1 nobody); a list of players; a script marker
 // (its number in "script_markers", -1 none); a list of markers.
