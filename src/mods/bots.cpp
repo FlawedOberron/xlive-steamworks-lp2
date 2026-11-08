@@ -663,6 +663,13 @@ struct RoamGoal {
 	int hopFrom = -1, hopTo = -1; // the area link it's running along, its best distance to the hop's end and when that last improved
 	float hopBest = 0;
 	DWORD hopProgress = 0;
+	// the link being crossed (zones), for ThinkBody's presses: kind (-1 none), its start / end, when Resolve last said so
+	int linkKind = -1;
+	float linkA[3] = {0, 0, 0}, linkB[3] = {0, 0, 0};
+	DWORD linkSeen = 0;
+	DWORD jumpAt = 0, grappleAt = 0, aimFrom = 0, unstickAt = 0; // last presses; when it started aiming the anchor
+	float grappleY = 0;     // height when it fired, to log whether it climbed
+	bool grappleCheck = false;
 };
 std::unordered_map<uint8_t*, RoamGoal> g_goals;
 std::mutex g_goalLock;
@@ -687,7 +694,7 @@ struct Hop {
 	float a[3], b[3];
 	float length;
 };
-const bool kBotsGrapple = false; // grapple links are routed over once bots can fire the anchor (RE: the bot pad's action 10)
+const bool kBotsGrapple = true; // grapple links: ThinkBody aims the bot's cursor at the link's end and presses the anchor (untested)
 struct Area {
 	float pos[3] = {0, 0, 0};
 	std::vector<int> links; // areas a bot can run to in one go (the game's path gives up on long runs)
@@ -843,7 +850,7 @@ int AreaAt(const float* p)
 // there (a ledge to drop off, a launch volume to walk into: force.cpp throws the bot, a grapple's firing spot).
 const float kHopAt = 250.0f;
 
-const float* ZoneWaypoint(const float* from, const float* goal, int start, int end, int* hopFrom, int* hopTo)
+const float* ZoneWaypoint(const float* from, const float* goal, int start, int end, int* hopFrom, int* hopTo, const Hop** link)
 {
 	int n = (int)g_areas.size();
 	DWORD now = GetTickCount();
@@ -891,6 +898,7 @@ const float* ZoneWaypoint(const float* from, const float* goal, int start, int e
 	*hopFrom = start;
 	*hopTo = hop;
 	const Hop* h = via[hop];
+	*link = h;
 	if (!h || h->kind == kNavWalk) {
 		return hop == end ? goal : g_areas[hop].pos;
 	}
@@ -905,15 +913,16 @@ const float* ZoneWaypoint(const float* from, const float* goal, int start, int e
 
 // Caller holds g_goalLock. Where to run now for a goal: in the goal's area, the goal; else the next area on the shortest route
 // over the links (Dijkstra; a blocked link costs a lot, so routes go round it while there's another way). -1 hop: the goal.
-const float* Waypoint(const float* from, const float* goal, int* hopFrom, int* hopTo)
+const float* Waypoint(const float* from, const float* goal, int* hopFrom, int* hopTo, const Hop** link)
 {
 	*hopFrom = *hopTo = -1;
+	*link = nullptr;
 	int start = AreaAt(from), end = AreaAt(goal), n = (int)g_areas.size();
 	if (start < 0 || end < 0 || start == end || n > 4096) {
 		return goal;
 	}
 	if (!g_nav.zones.empty()) {
-		return ZoneWaypoint(from, goal, start, end, hopFrom, hopTo);
+		return ZoneWaypoint(from, goal, start, end, hopFrom, hopTo, link);
 	}
 	DWORD now = GetTickCount();
 	std::vector<float> cost(n, 1e30f);
@@ -1177,7 +1186,14 @@ char __attribute__((thiscall)) Resolve(void* self, uint8_t* unit, uint8_t* plan,
 	AreasBuild();
 	const float* here = (const float*)(unit + 0xd0);
 	int hopFrom, hopTo;
-	const float* to = Waypoint(here, g.pos, &hopFrom, &hopTo);
+	const Hop* link = nullptr;
+	const float* to = Waypoint(here, g.pos, &hopFrom, &hopTo, &link);
+	g.linkKind = link ? link->kind : -1;
+	if (link) {
+		memcpy(g.linkA, link->a, sizeof(g.linkA));
+		memcpy(g.linkB, link->b, sizeof(g.linkB));
+	}
+	g.linkSeen = now;
 	float left = sqrtf(Distance2(here, to));
 	if (hopFrom != g.hopFrom || hopTo != g.hopTo || now - g.hopProgress > 2 * kHopStuck) { // a new hop (or a stale one)
 		g.hopFrom = hopFrom;
@@ -1207,10 +1223,111 @@ char __attribute__((thiscall)) Resolve(void* self, uint8_t* unit, uint8_t* plan,
 	return 1;
 }
 
+// Crossing links. The think is the bot's pad: its body clears the buttons (+0x1c8) each frame, the plan presses them
+// (cAIPlanMoveHmAction: action 7 jump 0x2, action 0x10 anchor 0x4), then the unit reads them; so presses added after
+// the body count for that frame. Jump links: jump at the edge. Grapple links: at the firing spot the bot's cursor
+// (think +0x1a8, cVirtualCursor mCursorPos +0x60 / mCursorTargetPos +0x70) is held on the link's end for a moment, then
+// the anchor fires. Launch links need nothing (walking into the volume throws it). Stalled on any link: one jump.
+const uint32_t kThinkCursor = 0x1a8, kCursorPos = 0x60, kCursorTarget = 0x70, kPadJump = 0x2, kPadAnchor = 0x4;
+const float kJumpAt = 130.0f, kGrappleAt = 300.0f;
+const DWORD kLinkFresh = 700, kJumpRest = 900, kGrappleRest = 4000, kAimFor = 350, kUnstickAfter = 1800, kUnstickRest = 2500;
+
+void Traverse(uint8_t* think, uint8_t* unit)
+{
+	uint8_t* game = *(uint8_t**)At(g_vas->game);
+	if (!unit || unit[0x1f] != 1 || !BotWorld(game) || !BotMenuOptions().improved || !Alive(unit)) {
+		return;
+	}
+	const float* here = (const float*)(unit + 0xd0);
+	DWORD now = GetTickCount();
+	uint32_t press = 0;
+	const char* what = nullptr;
+	float logA = 0, logB = 0;
+	{
+		std::lock_guard<std::mutex> lock(g_goalLock);
+		auto it = g_goals.find(unit);
+		if (it == g_goals.end()) {
+			return;
+		}
+		RoamGoal& g = it->second;
+		if (g.grappleCheck && now - g.grappleAt > 1500) {
+			g.grappleCheck = false;
+			if (BotLogOn()) {
+				XLS_LOG_INFO("mods: bots: %p grapple %s (%.1f m up).", unit, here[1] - g.grappleY > 150.0f ? "climbed" : "didn't climb",
+				             (here[1] - g.grappleY) / 100.0f);
+			}
+		}
+		if (now - g.linkSeen > kLinkFresh) {
+			g.aimFrom = 0;
+			return;
+		}
+		auto flat = [](const float* a, const float* b) {
+			float dx = a[0] - b[0], dz = a[2] - b[2];
+			return sqrtf(dx * dx + dz * dz);
+		};
+		// a seam (pieces touching, a small step) is walked: no jump
+		bool seam = flat(g.linkA, g.linkB) < 60.0f && fabsf(g.linkB[1] - g.linkA[1]) < 45.0f;
+		if (g.linkKind == kNavJump && !seam && flat(here, g.linkA) < kJumpAt && flat(here, g.linkB) > 60.0f && now - g.jumpAt > kJumpRest) {
+			press = kPadJump;
+			g.jumpAt = now;
+			what = "jumps";
+			logA = flat(here, g.linkB) / 100.0f;
+			logB = (g.linkB[1] - here[1]) / 100.0f;
+		}
+		else if (g.linkKind == kNavGrapple && Distance2(here, g.linkA) < kGrappleAt * kGrappleAt && now - g.grappleAt > kGrappleRest) {
+			if (!g.aimFrom) {
+				g.aimFrom = now;
+			}
+			uint8_t* cursor = *(uint8_t**)(think + kThinkCursor);
+			if (cursor) {
+				float* pos = (float*)(cursor + kCursorPos);
+				float* target = (float*)(cursor + kCursorTarget);
+				for (int i = 0; i < 3; i++) {
+					pos[i] = target[i] = g.linkB[i];
+				}
+			}
+			if (now - g.aimFrom > kAimFor) {
+				press = kPadAnchor;
+				g.grappleAt = now;
+				g.aimFrom = 0;
+				g.grappleY = here[1];
+				g.grappleCheck = true;
+				what = "fires the anchor";
+				logA = sqrtf(Distance2(here, g.linkB)) / 100.0f;
+				logB = (g.linkB[1] - here[1]) / 100.0f;
+			}
+		}
+		else {
+			g.aimFrom = 0;
+			if (g.hopFrom >= 0 && g.linkKind != kNavLaunch && now - g.hopProgress > kUnstickAfter && now - g.unstickAt > kUnstickRest &&
+			    now - g.jumpAt > kJumpRest) {
+				press = kPadJump;
+				g.unstickAt = g.jumpAt = now;
+				what = "jumps to get unstuck";
+				logA = g.hopBest / 100.0f;
+				logB = 0;
+			}
+		}
+	}
+	if (!press) {
+		return;
+	}
+	*(uint32_t*)(think + kPadButtons) |= press;
+	static DWORD logged = 0;
+	if (BotLogOn() && GetTickCount() - logged > 1000) {
+		logged = GetTickCount();
+		XLS_LOG_INFO("mods: bots: %p %s (%.1f m to go, %.1f m up).", unit, what, logA, logB);
+	}
+}
+
 uint32_t __attribute__((thiscall)) ThinkBody(uint8_t* think, uint8_t* unit)
 {
 	ReactToHit(think, unit);
-	return g_thinkBodyOriginal(think, unit);
+	uint32_t r = g_thinkBodyOriginal(think, unit);
+	if (r) {
+		Traverse(think, unit);
+	}
+	return r;
 }
 
 
