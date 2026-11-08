@@ -139,6 +139,9 @@ struct ModeEv {
 std::mutex g_modeEvLock;
 std::vector<ModeEv> g_modeEvents;
 int g_modeDeaths[kSlots] = {};        // this round
+// the mode's score (Score node): what placement ranks by, apart from the game's own points (kills etc., which still
+// feed the stock results and career points). Match and this round, per player and per team.
+int g_modeScore[kSlots] = {}, g_modeRoundScore[kSlots] = {}, g_modeTeamScore[2] = {}, g_modeTeamRoundScore[2] = {};
 int g_modeLives = 0;                  // respawn rules: deaths allowed per round (0: no limit)
 bool g_modeManual = false;            // respawn rules: back only by Spawn player
 struct ModeEnd {
@@ -961,10 +964,30 @@ void Fire(State& s, int node, int in, double now)
 		break;
 	}
 	case kModeScore: {
-		static bool told = false;
-		if (!told) {
-			told = true;
-			XLS_LOG_INFO("mods: mode: the Score node does nothing yet.");
+		int slot = PlayerIn(s, n.player);
+		int team = slot >= 0 && n.scoreOf != 0 ? RulesTeamOf(slot) : -1;
+		int v = (int)lrintf(Get(s, n.a));
+		int* match = nullptr;
+		int* round = nullptr;
+		if (n.scoreOf == 0 && slot >= 0) {
+			match = &g_modeScore[slot];
+			round = &g_modeRoundScore[slot];
+		}
+		else if (team == 0 || team == 1) {
+			match = &g_modeTeamScore[team];
+			round = &g_modeTeamRoundScore[team];
+		}
+		if (match) {
+			if (in == 1) { // set: the round's part follows
+				*round += v - *match;
+				*match = v;
+			}
+			else {
+				*match += v;
+				*round += v;
+			}
+			XLS_LOG_INFO("mods: mode: score of %s %d %s %d: %d.", n.scoreOf == 0 ? "player" : "team", n.scoreOf == 0 ? slot : team,
+			             in == 1 ? "set to" : "+", v, *match);
 		}
 		Out(s, node, 0, now);
 		break;
@@ -973,7 +996,7 @@ void Fire(State& s, int node, int in, double now)
 		int slot = PlayerIn(s, n.player);
 		float v = 0.0f;
 		if (slot >= 0) {
-			v = n.info == 0 ? (float)RulesTeamOf(slot) : n.info == 3 ? (float)g_modeDeaths[slot]
+			v = n.info == 0 ? (float)RulesTeamOf(slot) : n.info == 1 ? (float)g_modeScore[slot] : n.info == 3 ? (float)g_modeDeaths[slot]
 				: n.info == 4 ? (g_modeLives > 0 ? (float)std::max(0, g_modeLives - g_modeDeaths[slot]) : -1.0f) : 0.0f;
 		}
 		SetVar(s, n.var, v);
@@ -1597,6 +1620,10 @@ void ModeLoad()
 	g_modeLives = 0;
 	g_modeManual = false;
 	memset(g_modeDeaths, 0, sizeof g_modeDeaths);
+	memset(g_modeScore, 0, sizeof g_modeScore);
+	memset(g_modeRoundScore, 0, sizeof g_modeRoundScore);
+	memset(g_modeTeamScore, 0, sizeof g_modeTeamScore);
+	memset(g_modeTeamRoundScore, 0, sizeof g_modeTeamRoundScore);
 	LeaveCriticalSection(&g_lock);
 	{
 		std::lock_guard<std::mutex> lock(g_modeEvLock);
@@ -1676,6 +1703,8 @@ void ModeFrame()
 				break;
 			case kEvRoundStart:
 				memset(g_modeDeaths, 0, sizeof g_modeDeaths);
+				memset(g_modeRoundScore, 0, sizeof g_modeRoundScore);
+				memset(g_modeTeamRoundScore, 0, sizeof g_modeTeamRoundScore);
 				g_modeEnd = ModeEnd();
 				ModeDispatch(*s, kModeRoundStart, e.a, 0, 0.0f, now);
 				break;
@@ -1714,6 +1743,32 @@ void ModeFrame()
 bool ModeActive()
 {
 	return g_mode != nullptr;
+}
+
+bool ModeScores(int id, bool team, int* match, int* round)
+{
+	*match = *round = 0;
+	if (!g_lockReady) {
+		return false;
+	}
+	EnterCriticalSection(&g_lock);
+	bool on = g_mode != nullptr;
+	if (on && !team && id >= 0 && id < kSlots) {
+		*match = g_modeScore[id];
+		*round = g_modeRoundScore[id];
+	}
+	else if (on && team && (id == 0 || id == 1)) { // the team's own score and its players'
+		*match = g_modeTeamScore[id];
+		*round = g_modeTeamRoundScore[id];
+		for (int k = 0; k < kSlots; k++) {
+			if (RulesTeamOf(k) == id) {
+				*match += g_modeScore[k];
+				*round += g_modeRoundScore[k];
+			}
+		}
+	}
+	LeaveCriticalSection(&g_lock);
+	return on;
 }
 
 bool ModeEndPending(int* side, bool* team, bool* match)

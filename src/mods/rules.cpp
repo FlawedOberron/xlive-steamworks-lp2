@@ -292,6 +292,7 @@ std::atomic<int> g_menuLives{0};
 std::atomic<bool> g_team{false};
 std::atomic<bool> g_survivalDropped{false};
 std::atomic<uint32_t> g_elimMask{0}; // a game mode's eliminated players (held too)
+std::atomic<int> g_elimOrder[16] = {}, g_elimCount{0}; // when each was eliminated this round (1 first out), placement
 std::atomic<bool> g_menuTeam{false};
 uint32_t g_magazine = 0;
 uint8_t** g_ruleSlots = nullptr;
@@ -1140,6 +1141,7 @@ void RulesEliminate(int slot, bool out)
 	uint32_t was = out ? g_elimMask.fetch_or(bit) : g_elimMask.fetch_and(~bit);
 	if (((was & bit) != 0) != out) {
 		XLS_LOG_INFO("mods: rules: player %d %s.", slot, out ? "eliminated" : "back in the match");
+		g_elimOrder[slot] = out ? ++g_elimCount : 0;
 	}
 	if (out) {
 		RulesHold(slot, true);
@@ -2051,6 +2053,82 @@ bool RoundsOn()
 	return g_nextRoundOriginal && g_rounds > 0 && *g_matchSetup && g_game && *g_game && (*g_game)[0x256];
 }
 
+// With a game mode the placement is the mode's, apart from the game's points (kills etc.: the stock results and the
+// career points read each player's own score, only the order / ties come from this list; FUN_0100d360 adds a placement
+// bonus in the elimination types). Order: rounds won (no rounds: the round's End winner), the mode's score (Score
+// node), still standing / out last, then the game's points. The list's score becomes the tier (equal = tied).
+void ModeRanking(int32_t (*list)[3], int count, bool rounds)
+{
+	struct Key {
+		int64_t k[4];
+		bool operator<(const Key& o) const { return std::lexicographical_compare(k, k + 4, o.k, o.k + 4); }
+		bool operator==(const Key& o) const { return std::equal(k, k + 4, o.k); }
+	};
+	bool team = TeamGame();   // the ranking's ids: teams in team types, players otherwise
+	int endSide = -1;
+	bool endTeam = false;
+	bool ended = ModeEndPending(&endSide, &endTeam, nullptr) && endSide >= 0;
+	Key match[16], round[16];
+	for (int i = 0; i < count; i++) {
+		int id = list[i][1];
+		bool valid = id >= 0 && id < 16;
+		bool won = ended && (team == endTeam ? id == endSide : endTeam ? (valid && SlotTeam(id) == endSide) : SlotTeam(endSide) == id);
+		int scoreMatch = 0, scoreRound = 0;
+		ModeScores(id, team, &scoreMatch, &scoreRound);
+		int64_t standing = 0;   // FFA: in = 1000, out = the order they went out; teams: players still in
+		if (team) {
+			for (int k = 0; k < 16; k++) {
+				standing += RulesInPlay(k) && SlotTeam(k) == id && !RulesEliminated(k) ? 1 : 0;
+			}
+		}
+		else if (valid) {
+			standing = RulesEliminated(id) ? g_elimOrder[id].load() : 1000;
+		}
+		int64_t points = list[i][2];
+		int64_t roundPoints = rounds && valid ? g_roundScore[id] : points;
+		int64_t wins = valid ? g_roundWins[id] : 0;
+		match[i] = {{rounds ? wins : (int64_t)won, scoreMatch, standing, points}};
+		round[i] = {{(int64_t)won, scoreRound, standing, roundPoints}};
+	}
+	auto tiers = [&](Key* keys, int* out) { // 1 the lowest, equal keys equal
+		for (int i = 0; i < count; i++) {
+			std::vector<Key> lower;
+			for (int j = 0; j < count; j++) {
+				if (keys[j] < keys[i] && std::find(lower.begin(), lower.end(), keys[j]) == lower.end()) {
+					lower.push_back(keys[j]);
+				}
+			}
+			out[i] = 1 + (int)lower.size();
+		}
+	};
+	int matchTier[16], roundTier[16];
+	tiers(match, matchTier);
+	tiers(round, roundTier);
+	static DWORD logged = 0;
+	if (count && GetTickCount() - logged > 10000) {
+		logged = GetTickCount();
+		int top = 0;
+		for (int i = 1; i < count; i++) {
+			top = matchTier[i] > matchTier[top] ? i : top;
+		}
+		const int64_t* k = match[top].k;
+		XLS_LOG_INFO("mods: rules: mode ranking: first %s %d (%s %lld, score %lld, standing %lld, points %lld).", team ? "team" : "player",
+		             list[top][1], rounds ? "rounds won" : "won", (long long)k[0], (long long)k[1], (long long)k[2], (long long)k[3]);
+	}
+	for (int i = 0; i < count; i++) {
+		int id = list[i][1];
+		list[i][2] = matchTier[i];
+		if (rounds && id >= 0 && id < 16) {
+			g_roundScore[id] = roundTier[i];   // RoundEnd: the round's winner
+		}
+	}
+	for (int i = 1; i < count; i++) {
+		for (int j = i; j > 0 && list[j][2] > list[j - 1][2]; j--) {
+			std::swap(list[j], list[j - 1]);
+		}
+	}
+}
+
 void __attribute__((thiscall)) Ranking(uint8_t* flow, int arg)
 {
 	g_rankingOriginal(flow, arg);
@@ -2091,6 +2169,10 @@ void __attribute__((thiscall)) Ranking(uint8_t* flow, int arg)
 				g_roundScore[id] = left * 100000 + std::min(g_roundScore[id], 99999);
 			}
 		}
+	}
+	if (ModeActive()) {
+		ModeRanking(list, count, rounds);
+		return;
 	}
 	int modeSide = -1;
 	bool modeTeam = false;
@@ -2243,6 +2325,10 @@ void RoundTime()
 	LivesReset(); // every round starts with everyone in play again (re-reported every frame)
 	g_heldMask = 0; // the round's start spawns everyone: nobody held or eliminated
 	g_elimMask = 0;
+	g_elimCount = 0;
+	for (auto& o : g_elimOrder) {
+		o = 0;
+	}
 	if (newMatch) {
 		ModeLoad();
 		ModeEvent(kEvMatchStart);
