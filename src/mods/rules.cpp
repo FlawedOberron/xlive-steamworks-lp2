@@ -1625,6 +1625,11 @@ void PutSecondary(uint8_t index, const char* when)
 	BotMatchLogSlots();
 	auto* info = *(uint8_t**)(*g_game + 0x28 + index * 4);
 	auto* second = info ? (uint32_t*)(info + 0x10 + kSlotSecond * 4) : nullptr;
+	if (info && strcmp(when, "spawns") == 0) { // the loadout each player (bots too) starts with: weapon ids 0x04KK00VV, KK kind
+		const uint32_t* w = (const uint32_t*)(info + 0x10);
+		XLS_LOG_INFO("mods: rules: player %u loadout %08x %08x %08x %08x %08x %08x %08x %08x.", index, w[0], w[1], w[2], w[3], w[4],
+		             w[5], w[6], w[7]);
+	}
 	int kind = g_secondary;
 	uint32_t want = kind ? 0x04000000u | (uint32_t)kind << 16 : 0;
 	if (!second) {
