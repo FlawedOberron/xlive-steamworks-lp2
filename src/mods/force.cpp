@@ -61,6 +61,10 @@ struct Unit {
 	float placed[3] = {0, 0, 0}; // where we left it last frame
 	bool air = false;            // carried off the ground (characters)
 	float step = 0.0f;           // our last vertical move, cm (landing / ceiling tests)
+	// grenades a velocity volume launched: steered along the players' arc (our gravity and drag) until they hit something,
+	// as Havok's own gravity / damping landed them short of where a player lands
+	bool flying = false;
+	double since = 0.0;
 	std::vector<bool> inside;    // per volume, last frame
 };
 
@@ -175,6 +179,28 @@ void ForceUnit(unsigned char* unit, int kind)
 				vel[k] = set ? to[k] + add[k] : moved[k] / dt + add[k];
 			}
 			SetGrenadeVelocity(unit, vel);
+			u.flying = set;
+			memcpy(u.v, vel, 12);
+			u.since = now;
+		}
+		else if (u.flying && dt > 0.0f) {
+			// it went where we sent it (within half a step, and 5 cm): still in the air; else it hit something
+			float off = 0.0f, len = 0.0f;
+			for (int k = 0; k < 3; k++) {
+				float e = u.v[k] * dt;   // the velocity we set, over this frame's time
+				off += (moved[k] - e) * (moved[k] - e);
+				len += e * e;
+			}
+			if (sqrtf(off) > std::max(5.0f, 0.5f * sqrtf(len)) || now - u.since > 10.0) {
+				u.flying = false;   // Havok has it from here (bounces, rolling)
+			}
+			else {
+				u.v[1] -= kEarth * g_gravity * dt;
+				float drag = 1.0f - kAirDrag * dt;
+				u.v[0] *= drag;
+				u.v[2] *= drag;
+				SetGrenadeVelocity(unit, u.v);
+			}
 		}
 		memcpy(u.placed, pos, 12);
 		u.at = now;
