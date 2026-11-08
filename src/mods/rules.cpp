@@ -23,6 +23,7 @@
 
 #include <atomic>
 #include <functional>
+#include <cmath>
 #include <map>
 #include <mutex>
 #include <string>
@@ -1076,6 +1077,135 @@ void RemoveBody(uint8_t* ctl)
 	XLS_LOG_INFO("mods: rules: survival: player %d is out, body removed.", slot);
 }
 
+// Held players (lives.cpp decides: a waiting line, a mode's Hold player): out of play without being out of the match.
+// A held slot's character is removed and its controller kept in the held death view (as an out player's); a release
+// spawns it the way a round's start does (the spawn with no weapons handed over), then puts it at the chosen point.
+// Each PC does this for the players it runs (its own; the host the bots; offline everyone), on the game thread (HudUpdate).
+std::atomic<uint32_t> g_heldMask{0};
+struct ReleaseReq {
+	bool pending = false, at = false;
+	float pos[3] = {};
+	float yaw = NAN;
+};
+std::mutex g_releaseMutex;
+ReleaseReq g_releaseReq[16];
+bool Host();
+
+bool RunsHere(int slot)
+{
+	int self = g_localIndex;
+	if (slot == self || g_offline) {
+		return true;
+	}
+	uint8_t* records = g_ruleSlots ? *g_ruleSlots : nullptr;
+	return records && records[0x1b1 + slot * 0x7c] && Host(); // a bot, on the host
+}
+
+uint8_t* PlayerOf(int slot)
+{
+	uint8_t* entry = slot >= 0 && slot < 16 ? g_controllers[slot] : nullptr;
+	return entry ? *(uint8_t**)(entry + kCtlPlayer) : nullptr;
+}
+
+} // the API below is lp2.h's
+
+void RulesHold(int slot, bool hold)
+{
+	if (slot < 0 || slot >= 16) {
+		return;
+	}
+	uint32_t bit = 1u << slot;
+	uint32_t was = hold ? g_heldMask.fetch_or(bit) : g_heldMask.fetch_and(~bit);
+	if (((was & bit) != 0) != hold) {
+		XLS_LOG_INFO("mods: rules: player %d %s.", slot, hold ? "held (out of play, waiting)" : "no longer held");
+	}
+}
+
+bool RulesHeld(int slot)
+{
+	return slot >= 0 && slot < 16 && ((g_heldMask >> slot) & 1);
+}
+
+void RulesRelease(int slot, const float* pos, float yaw)
+{
+	if (slot < 0 || slot >= 16) {
+		return;
+	}
+	std::lock_guard<std::mutex> lock(g_releaseMutex);
+	ReleaseReq& r = g_releaseReq[slot];
+	r.pending = true;
+	r.at = pos != nullptr;
+	if (pos) {
+		memcpy(r.pos, pos, sizeof(r.pos));
+	}
+	r.yaw = yaw;
+}
+
+namespace {
+
+uint32_t __attribute__((thiscall)) Spawn(uint8_t* spawner, uint32_t respawn, void* a, void* b);
+
+void HeldTick()
+{
+	uint32_t held = g_heldMask;
+	for (int slot = 0; slot < 16; slot++) {
+		uint8_t* player = PlayerOf(slot);
+		if (!player || !RunsHere(slot)) {
+			continue;
+		}
+		ReleaseReq r;
+		{
+			std::lock_guard<std::mutex> lock(g_releaseMutex);
+			r = g_releaseReq[slot];
+			g_releaseReq[slot].pending = false;
+		}
+		float* timers = (float*)(player + kCtlDeathTimers);
+		if (r.pending) {
+			g_heldMask &= ~(1u << slot);
+			if (!*(uint8_t**)(player + kCtlBody)) {
+				Spawn(player, 0, nullptr, nullptr); // a round start's spawn: fresh character, starting loadout
+			}
+			player[kCtlState] = 0;
+			timers[0] = timers[1] = 0.0f;
+			uint8_t* body = *(uint8_t**)(player + kCtlBody);
+			if (body && r.at) {
+				CharacterTeleport(body, r.pos, r.yaw);
+			}
+			uint8_t* cam = *(uint8_t**)(g_controllers[slot] + kCtlCamera);
+			if (slot == g_localIndex && cam && body && g_follow) {
+				g_follow(cam, body, 0xff, *g_followArg, 0.0f);
+				if (g_cameraSnap) {
+					g_cameraSnap(cam, nullptr);
+				}
+				g_watched = -1;
+			}
+			XLS_LOG_INFO("mods: rules: player %d released%s (body %p).", slot,
+			             r.at ? FormatA(" at %.0f %.0f %.0f", r.pos[0], r.pos[1], r.pos[2]).c_str() : "", body);
+			continue;
+		}
+		if (!((held >> slot) & 1)) {
+			continue;
+		}
+		if (uint8_t* body = *(uint8_t**)(player + kCtlBody)) {
+			bool watchedByCamera = false;
+			for (int i = 0; i < 16; i++) {
+				uint8_t* cam = g_controllers[i] ? *(uint8_t**)(g_controllers[i] + kCtlCamera) : nullptr;
+				watchedByCamera = watchedByCamera || (i != slot && cam && *(uint8_t**)(cam + kCameraBody) == body);
+			}
+			if (watchedByCamera) {
+				continue; // a spectator moves on first
+			}
+			using RemoveFn = void(__attribute__((thiscall)) *)(uint8_t*);
+			((RemoveFn)(*(void***)body)[kBodyRemoveSlot])(body);
+			*(uint8_t**)(player + kCtlBody) = nullptr;
+			XLS_LOG_INFO("mods: rules: player %d held: character removed.", slot);
+		}
+		player[kCtlState] = kStateDeath;
+		timers[0] = timers[0] < 1.0f ? 1.0f : timers[0];
+		timers[1] = timers[1] < 1.0f ? 1.0f : timers[1];
+	}
+}
+
 // While the local player spectates, the cockpit's own-state parts are hidden (see CockpitShow; the
 // game's cockpit-off status flag would take the whole HUD). The survival thread ends it once nobody
 // spectates (match over, quit).
@@ -1370,15 +1500,25 @@ extern std::atomic<DWORD> g_localSeen;
 void DeathProbe(uint8_t* ctl);
 
 std::atomic<DWORD> g_hudSeenAt{0}; // the battle HUD's last update: our overlay's HUD shows only while it runs
+void ReportLife(int slot);
+bool InPlay(int slot);
 
 void __attribute__((thiscall)) HudUpdate(uint8_t* hud)
 {
 	g_hudSeenAt = GetTickCount();
 	int self = g_localIndex;
+	HeldTick();
 	LivesMatch(self, g_survival && g_lives > 0, g_team);
+	// every slot, every frame: the controller update only runs while a player is dead
+	for (int slot = 0; slot < 16; slot++) {
+		if (InPlay(slot)) {
+			ReportLife(slot);
+		}
+	}
+	LivesTick();
 	uint8_t** entry = (uint8_t**)(hud + kHudEntry);
 	uint8_t* own = *entry;
-	bool out = g_survival && self >= 0 && self < 16 && own && own == g_controllers[self] && SlotOut(self);
+	bool out = self >= 0 && self < 16 && own && own == g_controllers[self] && ((g_survival && SlotOut(self)) || RulesHeld(self));
 	if (out && GetTickCount() - g_localSeen > 100) {
 		static DWORD logged = 0;
 		if (GetTickCount() - logged > 10000) {
@@ -1625,14 +1765,14 @@ void ReportLife(int slot)
 	uint8_t* body = Body(slot);
 	uint8_t st = g_slotState[slot];
 	bool out = g_survival && g_lives > 0 && SlotOut(slot);
-	LifeState state = out && (st != 0 || !body) ? LifeState::Out : st != 0 || !body ? LifeState::Dead : LifeState::Alive;
+	LifeState state = RulesHeld(slot) ? LifeState::Held : out && (st != 0 || !body) ? LifeState::Out : st != 0 || !body ? LifeState::Dead : LifeState::Alive;
 	int team = state == LifeState::Alive ? UnitTeam(slot) : -1;
 	if (team < 0 && LivesTeam(slot) < 0) {
 		team = SlotTeam(slot);
 	}
 	int left = -1;
 	if (g_survival && g_lives > 0) {
-		int pending = st == kStateDeath ? 1 : 0;
+		int pending = st != 0 ? 1 : 0;
 		left = std::max(g_lives - 1 - (g_team ? TeamDeaths(SlotTeam(slot)) : SlotDeaths(slot)) - pending, 0);
 		if (out) {
 			left = 0;
@@ -1679,7 +1819,7 @@ void __attribute__((thiscall)) ControlUpdate(uint8_t* ctl)
 			}
 		}
 	}
-	bool hold = ctl && (local || g_offline || hostBot) && SlotOut(ctl[kCtlSlot]);
+	bool hold = ctl && (local || g_offline || hostBot) && (SlotOut(ctl[kCtlSlot]) || RulesHeld(ctl[kCtlSlot]));
 	uint8_t was = ctl ? ctl[kCtlState] : 0;
 	if (hold && was == kStateDeath) {
 		float* timers = (float*)(ctl + kCtlDeathTimers);
@@ -1957,6 +2097,26 @@ void RoundEnd()
 	if (over && g_rankFlow) {
 		Ranking(g_rankFlow, g_rankArg); // the result follows rounds won
 	}
+	{ // the round's result on screen (this runs where the match flow does: the host)
+		int self = g_localIndex;
+		int own = self >= 0 && self < 16 ? (g_team ? SlotTeam(self) : self) : -1;
+		uint8_t* setupNames = g_matchSetup ? *g_matchSetup : nullptr;
+		std::string text;
+		uint32_t colour = 0xffffff;
+		if (winner < 0) {
+			text = FormatA("ROUND %d DRAWN", g_round);
+		}
+		else if (g_team) {
+			text = FormatA(winner == own ? "YOUR TEAM WINS ROUND %d" : "ENEMY TEAM WINS ROUND %d", g_round);
+			colour = winner == own ? 0x4c9cff : 0xff4848;
+		}
+		else {
+			const char* name = setupNames && winner < 16 ? (const char*)setupNames + (winner + 3) * 0x7c : "";
+			text = winner == own ? FormatA("YOU WIN ROUND %d", g_round) : FormatA("%.20s WINS ROUND %d", name, g_round);
+			colour = winner == own ? 0x4c9cff : 0xff4848;
+		}
+		LivesMessage(text.c_str(), 0, colour, 4.0f);
+	}
 	uint32_t dead = 0;
 	for (int slot = 0; slot < 16; slot++) {
 		dead |= g_slotState[slot] != 0 ? 1u << slot : 0;
@@ -2004,6 +2164,10 @@ void RoundTime()
 	}
 	if (!g_roundBreak) {
 		g_roundDead = 0;
+	}
+	LivesReset(); // every round starts with everyone in play again (re-reported every frame)
+	if (g_roundBreak && g_rounds > 0) {
+		LivesMessage(FormatA("ROUND %d", g_round + 1).c_str(), 0, 0xffffff, 2.5f);
 	}
 	g_roundBegan = g_roundBreak ? GetTickCount() : 0;
 	g_roundBreak = false;
@@ -4389,7 +4553,7 @@ const char* RulesBattleMessage(uint32_t id)
 {
 	int self = g_localIndex;
 	// the death only counts once its countdown ends, so one in the death view is added here
-	int pending = self >= 0 && self < 16 && g_slotState[self] == kStateDeath ? 1 : 0;
+	int pending = self >= 0 && self < 16 && g_slotState[self] != 0 ? 1 : 0; // any of the death view's states
 	bool noneLeft = g_survival && g_lives > 0 && self >= 0 && self < 16 &&
 	                (g_out || (g_team ? TeamDeaths(SlotTeam(self)) + pending >= g_lives : SlotDeaths(self) + pending >= g_lives)); // the thread's flag lags
 	if ((id == 21 || id == 22) && noneLeft) { // "Respawn in <#RespornTime> seconds" / "second": no respawn coming

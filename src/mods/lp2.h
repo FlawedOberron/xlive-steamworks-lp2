@@ -32,10 +32,11 @@ using UiDrawFn = void (*)(float width, float height);
 void UiInstall(int build);
 void UiAddLayer(const char* name, UiDrawFn draw);
 ::ImFont* UiFont(bool large);
+::ImFont* UiFontNamed(const char* name, bool large); // a font this PC has (ModCache\fonts.txt), loaded on first ask; ours until then
 // lives.cpp: each match slot's life state, as rules.cpp reports it, and what follows from it (who an out player watches,
 // what the overlay tells the player). LivesMatch: called every battle HUD frame. LivesPickWatch: dir 0 keeps a still
 // watchable current one; -1 / 1 step; -1 for nobody.
-enum class LifeState { None, Alive, Dead, Out };
+enum class LifeState { None, Alive, Dead, Out, Held };
 void LivesInstall();
 void LivesReport(int slot, LifeState state, int team, int respawnsLeft, const char* name);
 void LivesMatch(int local, bool survival, bool teams);
@@ -44,6 +45,17 @@ LifeState LivesState(int slot);
 int LivesTeam(int slot);
 int LivesPickWatch(int self, int current, int dir);
 void LivesWatching(int slot);
+void LivesTick(); // every battle HUD frame, game thread, after the reports: modes' logic (the Arena test for now)
+// On-screen messages (overlay): style 0 banner (middle), 1 top line, 2 under the HUD; colour 0xRRGGBB; slot -1 everyone
+// on this PC's screen, else only when that slot is the local player.
+void LivesMessage(const char* text, int style, uint32_t rgb, float seconds, int slot = -1);
+// rules.cpp: held players (out of play, not out of the match) and releasing them at a point (pos cm, yaw degrees as
+// CharacterTeleport; pos null: where the game spawns them)
+void RulesHold(int slot, bool hold);
+bool RulesHeld(int slot);
+void RulesRelease(int slot, const float* pos, float yaw);
+// scripts.cpp: the map's script markers matching a name / wildcard: x, y, z (cm, floor centre), yaw; how many found
+int ScriptMarkerFind(const char* pattern, float (*out)[4], int max);
 // Extra online map slots declared by mod.json files (maps.cpp). MapsWanted loads them;
 // MapsTryInstall patches the game once its code is decrypted and returns true when done.
 bool MapsWanted();

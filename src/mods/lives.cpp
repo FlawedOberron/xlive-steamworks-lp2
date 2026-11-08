@@ -6,15 +6,21 @@
 #include "mods/lp2.h"
 
 #include "core/log.h"
+#include "core/utils.h"
 
 #include <windows.h>
 
 #include "third-party/imgui/imgui.h"
 
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <string>
+#include <vector>
+#include <algorithm>
+#include <random>
 
 namespace xls::mods {
 
@@ -47,16 +53,59 @@ const char* StateName(LifeState s)
 		return "dead";
 	case LifeState::Out:
 		return "out";
+	case LifeState::Held:
+		return "held";
 	default:
 		return "none";
 	}
+}
+
+// On-screen messages
+struct Message {
+	std::string text;
+	int style;
+	uint32_t rgb;
+	DWORD until, from;
+	int slot;
+};
+std::vector<Message> g_messages; // under g_mutex
+
+// The Arena test (until modes run: arena-test.txt in the game folder holds how many fight at once, e.g. 2). Everyone
+// else waits in line, held; when a fighter dies they go to the back of the line and the first in line comes in, at a
+// script marker named arena_spawn_* when the map has them (where the game spawns them otherwise).
+int g_arenaFighters = -1; // -1: not read yet, 0: off
+std::vector<int> g_queue;   // under g_mutex
+bool g_arenaStarted = false;
+DWORD g_arenaStartAt = 0;
+int g_arenaNextSpot = 0;
+
+int ArenaFighters()
+{
+	if (g_arenaFighters >= 0) {
+		return g_arenaFighters;
+	}
+	char path[MAX_PATH] = {};
+	GetModuleFileNameA(nullptr, path, MAX_PATH);
+	if (char* slash = strrchr(path, '\\')) {
+		strcpy(slash + 1, "arena-test.txt");
+	}
+	g_arenaFighters = 0;
+	if (FILE* f = fopen(path, "r")) {
+		int n = 0;
+		if (fscanf(f, "%d", &n) == 1 && n > 0) {
+			g_arenaFighters = std::min(n, 15);
+		}
+		fclose(f);
+		XLS_LOG_INFO("mods: lives: Arena test on (%s): %d fighting at once.", path, g_arenaFighters);
+	}
+	return g_arenaFighters;
 }
 
 // The overlay: bottom centre, only for the local player in a Survival match while the battle HUD runs.
 void Draw(float width, float height)
 {
 	int self = g_local;
-	if (!g_survivalOn || self < 0 || self >= 16 || GetTickCount() - g_matchSeen > 500) {
+	if (self < 0 || self >= 16 || GetTickCount() - g_matchSeen > 500) {
 		return;
 	}
 	Slot me, watched;
@@ -82,7 +131,53 @@ void Draw(float width, float height)
 		dl->AddText(f, f->FontSize, ImVec2(x, y), colour, text);
 		return size.y;
 	};
-	if (me.state == LifeState::Out) {
+	// messages
+	{
+		std::vector<Message> list;
+		{
+			std::lock_guard<std::mutex> lock(g_mutex);
+			DWORD now = GetTickCount();
+			g_messages.erase(std::remove_if(g_messages.begin(), g_messages.end(), [&](const Message& m) { return (int)(now - m.until) >= 0; }),
+			                 g_messages.end());
+			list = g_messages;
+		}
+		float bannerY = height * 0.3f, topY = 70 * scale, hudY = height - 210 * scale;
+		for (const Message& m : list) {
+			if (m.slot >= 0 && m.slot != self) {
+				continue;
+			}
+			DWORD now = GetTickCount();
+			float fade = std::min({1.0f, (now - m.from) / 250.0f, (m.until - now) / 400.0f});
+			ImU32 col = IM_COL32((m.rgb >> 16) & 255, (m.rgb >> 8) & 255, m.rgb & 255, (int)(255 * std::max(fade, 0.0f)));
+			if (m.style == 0) {
+				bannerY += centred(big, m.text.c_str(), bannerY, col) + 6 * scale;
+			}
+			else if (m.style == 1) {
+				topY += centred(small, m.text.c_str(), topY, col) + 4 * scale;
+			}
+			else {
+				hudY += centred(small, m.text.c_str(), hudY, col) + 4 * scale;
+			}
+		}
+	}
+	if (me.state == LifeState::Held) {
+		int place = 0;
+		{
+			std::lock_guard<std::mutex> lock(g_mutex);
+			auto it = std::find(g_queue.begin(), g_queue.end(), self);
+			place = it == g_queue.end() ? 0 : (int)(it - g_queue.begin()) + 1;
+		}
+		float y = height - 150 * scale;
+		y += centred(big, "WAITING", y, IM_COL32(120, 200, 255, 255));
+		char line[96];
+		snprintf(line, sizeof line, place ? "You're number %d in line" : "Waiting to come in", place);
+		y += centred(small, line, y + 4 * scale, IM_COL32(235, 248, 255, 255)) + 4 * scale;
+		if (watching >= 0 && watched.name[0]) {
+			snprintf(line, sizeof line, "Watching %s", watched.name);
+			centred(small, line, y + 4 * scale, IM_COL32(150, 210, 230, 220));
+		}
+	}
+	else if (me.state == LifeState::Out) {
 		float y = height - 150 * scale;
 		y += centred(big, "ELIMINATED", y, IM_COL32(255, 72, 72, 255));
 		char line[96];
@@ -97,7 +192,7 @@ void Draw(float width, float height)
 			centred(small, "Fire: next player     Zoom: previous player", y + 4 * scale, IM_COL32(150, 210, 230, 220));
 		}
 	}
-	else if (me.state == LifeState::Dead && me.respawnsLeft >= 0) {
+	else if (g_survivalOn && me.state == LifeState::Dead && me.respawnsLeft >= 0) {
 		char line[64];
 		if (me.respawnsLeft == 0) {
 			snprintf(line, sizeof line, g_teams ? "No team respawns left" : "No respawns left");
@@ -147,6 +242,113 @@ void LivesReset()
 		s = Slot();
 	}
 	g_watching = -1;
+	g_queue.clear();
+	g_arenaStarted = false;
+	g_arenaStartAt = 0;
+	for (int slot = 0; slot < 16; slot++) {
+		RulesHold(slot, false);
+	}
+}
+
+void LivesMessage(const char* text, int style, uint32_t rgb, float seconds, int slot)
+{
+	if (!text || !*text) {
+		return;
+	}
+	std::lock_guard<std::mutex> lock(g_mutex);
+	DWORD now = GetTickCount();
+	g_messages.push_back({text, style, rgb, now + (DWORD)(std::max(seconds, 0.5f) * 1000), now, slot});
+	XLS_LOG_INFO("mods: lives: message \"%s\" (style %d, %.1f s%s).", text, style, seconds, slot >= 0 ? FormatA(", player %d", slot).c_str() : "");
+}
+
+namespace {
+
+// Next arena spot: the map's arena_spawn_* markers in turn (nullptr: none, the game's own spawn)
+bool ArenaSpot(float pos[3], float* yaw)
+{
+	float found[16][4];
+	int n = ScriptMarkerFind("arena_spawn_*", found, 16);
+	if (n <= 0) {
+		return false;
+	}
+	int k = g_arenaNextSpot++ % n;
+	memcpy(pos, found[k], 12);
+	*yaw = found[k][3];
+	return true;
+}
+
+void ArenaBringIn(int slot)
+{
+	float pos[3], yaw = NAN;
+	bool at = ArenaSpot(pos, &yaw);
+	RulesRelease(slot, at ? pos : nullptr, yaw);
+	char text[80];
+	snprintf(text, sizeof text, "%s comes in", g_slots[slot].name[0] ? g_slots[slot].name : "Next player");
+	g_messages.push_back({text, 1, 0xffffff, GetTickCount() + 3000, GetTickCount(), -1});
+}
+
+}
+
+void LivesTick()
+{
+	int fighters = ArenaFighters();
+	if (fighters <= 0 || GetTickCount() - g_matchSeen > 500) {
+		return;
+	}
+	std::lock_guard<std::mutex> lock(g_mutex);
+	std::vector<int> present;
+	for (int slot = 0; slot < 16; slot++) {
+		if (g_slots[slot].state != LifeState::None && GetTickCount() - g_slots[slot].seen < 3000) {
+			present.push_back(slot);
+		}
+	}
+	if (!g_arenaStarted) {
+		if (!g_arenaStartAt) {
+			g_arenaStartAt = GetTickCount();
+		}
+		if (present.size() < 2 || GetTickCount() - g_arenaStartAt < 1500) { // let everyone spawn first
+			return;
+		}
+		g_arenaStarted = true;
+		std::vector<int> order = present;
+		std::shuffle(order.begin(), order.end(), std::mt19937(GetTickCount()));
+		g_queue.clear();
+		for (size_t i = 0; i < order.size(); i++) {
+			if ((int)i < fighters) {
+				float pos[3], yaw = NAN;
+				if (ArenaSpot(pos, &yaw)) {
+					RulesRelease(order[i], pos, yaw); // to the arena spot (already in play: a teleport)
+				}
+			}
+			else {
+				g_queue.push_back(order[i]);
+				RulesHold(order[i], true);
+			}
+		}
+		XLS_LOG_INFO("mods: lives: Arena test: %d players, %d fight, %d wait.", (int)order.size(), std::min(fighters, (int)order.size()),
+		             (int)g_queue.size());
+		g_messages.push_back({"ARENA", 0, 0xffd040, GetTickCount() + 3000, GetTickCount(), -1});
+		return;
+	}
+	// a fighter down: to the back of the line, the first in line comes in
+	for (int slot : present) {
+		Slot& s = g_slots[slot];
+		bool queued = std::find(g_queue.begin(), g_queue.end(), slot) != g_queue.end();
+		if ((s.state == LifeState::Dead || s.state == LifeState::Out) && !queued && !RulesHeld(slot)) {
+			RulesHold(slot, true);
+			g_queue.push_back(slot);
+			XLS_LOG_INFO("mods: lives: Arena test: player %d down, back of the line (%d waiting).", slot, (int)g_queue.size());
+			if (!g_queue.empty() && g_queue.front() != slot) {
+				int next = g_queue.front();
+				g_queue.erase(g_queue.begin());
+				ArenaBringIn(next);
+			}
+			else if (!g_queue.empty()) { // nobody else waiting: straight back in
+				g_queue.erase(g_queue.begin());
+				ArenaBringIn(slot);
+			}
+		}
+	}
 }
 
 LifeState LivesState(int slot)

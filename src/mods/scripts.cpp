@@ -197,6 +197,31 @@ std::vector<int> Markers(const State& s, const std::string& pattern)
 	return out;
 }
 
+}
+
+int ScriptMarkerFind(const char* pattern, float (*out)[4], int max)
+{
+	State* st = g_state;
+	if (!st || !pattern) {
+		return 0;
+	}
+	int n = 0;
+	for (int k : Markers(*st, pattern)) {
+		if (n >= max) {
+			break;
+		}
+		const ScriptMarker& m = st->graph.markers[k];
+		out[n][0] = m.pos[0];
+		out[n][1] = m.pos[1];
+		out[n][2] = m.pos[2];
+		out[n][3] = m.yaw;
+		n++;
+	}
+	return n;
+}
+
+namespace {
+
 // a list entry from its variable: a player's slot or a marker's number, by the variable's kind
 int ItemIn(const State& s, int var)
 {

@@ -19,7 +19,10 @@
 #include "third-party/imgui/imgui_impl_dx11.h"
 #include "third-party/imgui/imgui_impl_dx9.h"
 
+#include <algorithm>
 #include <atomic>
+#include <map>
+#include <set>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -106,8 +109,91 @@ std::vector<char> FontBytes(const char* face, bool bold)
 	return data;
 }
 
+// Every TrueType family this PC has (Wine's and the prefix's): ModCache\fonts.txt in the game folder, one per line, for the
+// editor's font menus (a mode's Show text). Any of them can be drawn with (UiFontNamed).
+int CALLBACK AddFamily(const LOGFONTA* lf, const TEXTMETRICA*, DWORD type, LPARAM out)
+{
+	if ((type & TRUETYPE_FONTTYPE) && lf->lfFaceName[0] && lf->lfFaceName[0] != '@') {
+		((std::set<std::string>*)out)->insert(lf->lfFaceName);
+	}
+	return 1;
+}
+
+void ListFonts()
+{
+	HMODULE gdi = LoadLibraryA("gdi32.dll");
+	using EnumFn = int(WINAPI*)(HDC, LOGFONTA*, FONTENUMPROCA, LPARAM, DWORD);
+	using CreateDCFn = HDC(WINAPI*)(HDC);
+	using DeleteDCFn = BOOL(WINAPI*)(HDC);
+	auto enumFonts = gdi ? (EnumFn)(void*)GetProcAddress(gdi, "EnumFontFamiliesExA") : nullptr;
+	auto createDC = gdi ? (CreateDCFn)(void*)GetProcAddress(gdi, "CreateCompatibleDC") : nullptr;
+	auto deleteDC = gdi ? (DeleteDCFn)(void*)GetProcAddress(gdi, "DeleteDC") : nullptr;
+	if (!enumFonts || !createDC || !deleteDC) {
+		return;
+	}
+	HDC dc = createDC(nullptr);
+	std::set<std::string> names;
+	LOGFONTA lf = {};
+	lf.lfCharSet = DEFAULT_CHARSET;
+	enumFonts(dc, &lf, AddFamily, (LPARAM)&names, 0);
+	deleteDC(dc);
+	char path[MAX_PATH] = {};
+	GetModuleFileNameA(nullptr, path, MAX_PATH);
+	if (char* slash = strrchr(path, '\\')) {
+		strcpy(slash + 1, "ModCache");
+		CreateDirectoryA(path, nullptr);
+		strcat(path, "\\fonts.txt");
+	}
+	if (FILE* f = fopen(path, "w")) {
+		for (const std::string& n : names) {
+			fprintf(f, "%s\n", n.c_str());
+		}
+		fclose(f);
+	}
+	XLS_LOG_INFO("mods: ui: %u fonts listed in %s.", (unsigned)names.size(), path);
+}
+
+// Fonts asked for by name: added to the atlas before the next frame (the backend then rebuilds its font texture)
+std::mutex g_fontMutex;
+std::map<std::string, std::pair<ImFont*, ImFont*>> g_named; // name -> normal, large (nullptr: not found)
+std::set<std::string> g_wanted;
+float g_fontScale = 1.0f;
+
+bool LoadWanted()
+{
+	std::set<std::string> wanted;
+	{
+		std::lock_guard<std::mutex> lock(g_fontMutex);
+		wanted.swap(g_wanted);
+	}
+	if (wanted.empty()) {
+		return false;
+	}
+	ImGuiIO& io = ImGui::GetIO();
+	for (const std::string& name : wanted) {
+		std::vector<char> bytes = FontBytes(name.c_str(), false);
+		std::pair<ImFont*, ImFont*> fonts = {nullptr, nullptr};
+		if (!bytes.empty()) {
+			ImFontConfig cfg;
+			cfg.OversampleH = 2;
+			for (int large = 0; large < 2; large++) {
+				void* copy = IM_ALLOC(bytes.size());
+				memcpy(copy, bytes.data(), bytes.size());
+				ImFont* f = io.Fonts->AddFontFromMemoryTTF(copy, (int)bytes.size(), (large ? 34.0f : 20.0f) * g_fontScale, &cfg);
+				(large ? fonts.second : fonts.first) = f;
+			}
+		}
+		std::lock_guard<std::mutex> lock(g_fontMutex);
+		g_named[name] = fonts;
+	}
+	io.Fonts->Build();
+	return true;
+}
+
 void Fonts(float height)
 {
+	g_fontScale = height / 720.0f;
+	ListFonts();
 	ImGuiIO& io = ImGui::GetIO();
 	float scale = height / 720.0f;
 	ImFontConfig cfg;
@@ -206,6 +292,9 @@ HRESULT STDMETHODCALLTYPE Present9(IDirect3DDevice9* dev, const RECT* a, const R
 			}
 		}
 		if (!g_failed && dev == g_dev9) {
+			if (LoadWanted()) {
+				ImGui_ImplDX9_InvalidateDeviceObjects(); // its NewFrame makes the font texture again
+			}
 			ImGui_ImplDX9_NewFrame();
 			Frame();
 			IDirect3DSurface9 *bb = nullptr, *was = nullptr;
@@ -294,6 +383,9 @@ HRESULT STDMETHODCALLTYPE Present11(IDXGISwapChain* sc, UINT sync, UINT flags)
 			}
 		}
 		if (!g_failed && g_rtv) {
+			if (LoadWanted()) {
+				ImGui_ImplDX11_InvalidateDeviceObjects();
+			}
 			ImGui_ImplDX11_NewFrame();
 			Frame();
 			ID3D11RenderTargetView* wasRtv = nullptr;
@@ -460,6 +552,21 @@ void UiAddLayer(const char* name, UiDrawFn draw)
 ::ImFont* UiFont(bool large)
 {
 	return large ? g_fontLarge : g_fontNormal;
+}
+
+::ImFont* UiFontNamed(const char* name, bool large)
+{
+	if (!name || !*name) {
+		return UiFont(large);
+	}
+	std::lock_guard<std::mutex> lock(g_fontMutex);
+	auto it = g_named.find(name);
+	if (it == g_named.end()) {
+		g_wanted.insert(name); // from the next frame
+		return UiFont(large);
+	}
+	ImFont* f = large ? it->second.second : it->second.first;
+	return f ? f : UiFont(large);
 }
 
 void UiInstall(int build)
