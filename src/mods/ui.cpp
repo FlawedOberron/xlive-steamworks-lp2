@@ -3,8 +3,9 @@
 // unless a layer chooses to, so stock screens, stock modes and the campaign look as they always did.
 //
 // The hooks: DX9 the device's Present (vtable 17) and Reset (16), DX11 the swap chain's Present (8) and ResizeBuffers (13).
-// The vtables come from a throwaway device made on a hidden window once the game's window is up (a class's vtable is
-// shared by every object of it, the game's included). mappics.cpp patches the same DX9 Present slot when it first writes
+// The vtables come from the game's own device: its D3D create import is hooked and patched as it's made (a class's
+// vtable is shared by every object of it). Fallback, if that isn't caught within 5 s of the window: a throwaway device
+// on a hidden window. mappics.cpp patches the same DX9 Present slot when it first writes
 // a picture; whichever comes second calls the other.
 #include "mods/lp2.h"
 
@@ -463,6 +464,80 @@ bool Hook9(HWND wnd)
 	return ok;
 }
 
+// The game's own device: its import of the D3D create call is pointed at ours, so the vtable is patched from the
+// game's real swap chain / device as it's made (the throwaway device above, made beside the game's, could leave
+// Steam's overlay without its screenshot key).
+std::atomic<bool> g_caught{false};
+
+void** ImportSlot(const char* dll, const char* name)
+{
+	auto* base = (uint8_t*)GetModuleHandleA(nullptr);
+	auto* nt = (IMAGE_NT_HEADERS*)(base + ((IMAGE_DOS_HEADER*)base)->e_lfanew);
+	const IMAGE_DATA_DIRECTORY& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+	if (!dir.VirtualAddress) {
+		return nullptr;
+	}
+	for (auto* desc = (IMAGE_IMPORT_DESCRIPTOR*)(base + dir.VirtualAddress); desc->Name; desc++) {
+		if (_stricmp((const char*)(base + desc->Name), dll) != 0 || !desc->OriginalFirstThunk) {
+			continue;
+		}
+		auto* names = (IMAGE_THUNK_DATA*)(base + desc->OriginalFirstThunk);
+		auto* slots = (IMAGE_THUNK_DATA*)(base + desc->FirstThunk);
+		for (; names->u1.AddressOfData; names++, slots++) {
+			if (!IMAGE_SNAP_BY_ORDINAL(names->u1.Ordinal) && strcmp((const char*)((IMAGE_IMPORT_BY_NAME*)(base + names->u1.AddressOfData))->Name, name) == 0) {
+				return (void**)&slots->u1.Function;
+			}
+		}
+	}
+	return nullptr;
+}
+
+PFN_D3D11_CREATE_DEVICE_AND_SWAP_CHAIN g_create11 = nullptr;
+
+HRESULT WINAPI Create11(IDXGIAdapter* adapter, D3D_DRIVER_TYPE type, HMODULE sw, UINT flags, const D3D_FEATURE_LEVEL* levels, UINT count,
+	UINT sdk, const DXGI_SWAP_CHAIN_DESC* desc, IDXGISwapChain** sc, ID3D11Device** dev, D3D_FEATURE_LEVEL* level, ID3D11DeviceContext** ctx)
+{
+	HRESULT hr = g_create11(adapter, type, sw, flags, levels, count, sdk, desc, sc, dev, level, ctx);
+	if (SUCCEEDED(hr) && sc && *sc && !g_caught.exchange(true)) {
+		void** vt = *(void***)*sc;
+		bool ok = Patch(&vt[8], (void*)&Present11, (void**)&g_present11) && Patch(&vt[13], (void*)&Resize11, (void**)&g_resize11);
+		XLS_LOG_INFO("mods: ui: overlay hooked on the game's swap chain (%s).", ok ? "ok" : "patch failed");
+	}
+	return hr;
+}
+
+typedef HRESULT(STDMETHODCALLTYPE* CreateDevice9Fn)(IDirect3D9*, UINT, D3DDEVTYPE, HWND, DWORD, D3DPRESENT_PARAMETERS*, IDirect3DDevice9**);
+CreateDevice9Fn g_createDevice9 = nullptr;
+using Create9Fn = IDirect3D9*(WINAPI*)(UINT);
+Create9Fn g_create9 = nullptr;
+
+HRESULT STDMETHODCALLTYPE CreateDevice9(IDirect3D9* d3d, UINT adapter, D3DDEVTYPE type, HWND wnd, DWORD flags, D3DPRESENT_PARAMETERS* pp, IDirect3DDevice9** out)
+{
+	HRESULT hr = g_createDevice9(d3d, adapter, type, wnd, flags, pp, out);
+	if (SUCCEEDED(hr) && out && *out && !g_caught.exchange(true)) {
+		void** vt = *(void***)*out;
+		bool ok = Patch(&vt[17], (void*)&Present9, (void**)&g_present9) && Patch(&vt[16], (void*)&Reset9, (void**)&g_reset9);
+		XLS_LOG_INFO("mods: ui: overlay hooked on the game's device (%s).", ok ? "ok" : "patch failed");
+	}
+	return hr;
+}
+
+IDirect3D9* WINAPI Create9(UINT sdk)
+{
+	IDirect3D9* d3d = g_create9(sdk);
+	if (d3d && !g_createDevice9) {
+		void** vt = *(void***)d3d;
+		Patch(&vt[16], (void*)&CreateDevice9, (void**)&g_createDevice9);
+	}
+	return d3d;
+}
+
+bool HookCreate(bool dx11)
+{
+	void** slot = dx11 ? ImportSlot("d3d11.dll", "D3D11CreateDeviceAndSwapChain") : ImportSlot("d3d9.dll", "Direct3DCreate9");
+	return slot && (dx11 ? Patch(slot, (void*)&Create11, (void**)&g_create11) : Patch(slot, (void*)&Create9, (void**)&g_create9));
+}
+
 bool Hook11(HWND wnd)
 {
 	HMODULE d3d11 = LoadLibraryA("d3d11.dll");
@@ -527,7 +602,13 @@ DWORD WINAPI HookThread(void* param)
 		XLS_LOG_WARN("mods: ui: no game window within 2 minutes, no overlay.");
 		return 0;
 	}
-	Sleep(500);
+	for (int i = 0; i < 50 && !g_caught; i++) { // the game's own device, through the import hook
+		Sleep(100);
+	}
+	if (g_caught.exchange(true)) {
+		return 0;
+	}
+	XLS_LOG_WARN("mods: ui: the game's device wasn't caught, using a throwaway one.");
 	HWND wnd = DummyWindow();
 	bool ok = wnd && (dx11 ? Hook11(wnd) : Hook9(wnd));
 	if (wnd) {
@@ -580,6 +661,9 @@ void UiInstall(int build)
 		return;
 	}
 	bool dx11 = build % 2 == 0;
+	if (!HookCreate(dx11)) {
+		XLS_LOG_WARN("mods: ui: the game's D3D create import not found.");
+	}
 	HANDLE thread = CreateThread(nullptr, 0, HookThread, dx11 ? (void*)1 : nullptr, 0, nullptr);
 	if (thread) {
 		CloseHandle(thread);
