@@ -5,6 +5,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <math.h>
 #include <stdint.h>
 #include <string.h>
@@ -59,6 +60,7 @@ struct Unit {
 	float v[3] = {0, 0, 0};      // carried velocity, cm/s (characters, bullets)
 	float placed[3] = {0, 0, 0}; // where we left it last frame
 	bool air = false;            // carried off the ground (characters)
+	float step = 0.0f;           // our last vertical move, cm (landing / ceiling tests)
 	std::vector<bool> inside;    // per volume, last frame
 };
 
@@ -112,6 +114,10 @@ void ForceUnit(unsigned char* unit, int kind)
 	}
 	Unit& u = g_units[unit];
 	bool fresh = u.at > 0.0 && now - u.at <= kStale;
+	if (!fresh && u.air) {
+		XLS_LOG_INFO("mods: force: a carried %s lost its flight (no update for %.2f s) at %.0f %.0f %.0f.", KindName(kind), now - u.at,
+			pos[0], pos[1], pos[2]);
+	}
 	if (!fresh) {
 		u = Unit();
 	}
@@ -175,12 +181,18 @@ void ForceUnit(unsigned char* unit, int kind)
 		return;
 	}
 
-	if (character && u.air && u.v[1] < 0.0f && moved[1] > 0.5f) {
+	// the game's own small moves (air control, step offsets) aren't a floor or a ceiling: only a push back of most of our
+	// own last vertical step is (a false landing mid-arc killed the throw and dropped players into gaps)
+	if (character && u.air && u.v[1] < 0.0f && u.step < 0.0f && moved[1] > std::max(0.5f, -0.6f * u.step)) {
 		u.air = false;   // our move down was pushed back up: landed
+		XLS_LOG_INFO("mods: force: a %s landed at %.0f %.0f %.0f (step %.1f cm, pushed back %.1f, still %.0f cm/s across).", KindName(kind),
+			pos[0], pos[1], pos[2], u.step, moved[1], sqrtf(u.v[0] * u.v[0] + u.v[2] * u.v[2]));
 		u.v[1] = 0.0f;
 	}
-	if (character && u.air && u.v[1] > 0.0f && moved[1] < -0.5f) {
+	if (character && u.air && u.v[1] > 0.0f && u.step > 0.0f && moved[1] < -std::max(0.5f, 0.6f * u.step)) {
 		u.v[1] = 0.0f;   // a ceiling
+		XLS_LOG_INFO("mods: force: a %s hit a ceiling at %.0f %.0f %.0f (step %.1f cm, pushed back %.1f).", KindName(kind), pos[0], pos[1],
+			pos[2], u.step, moved[1]);
 	}
 	if (set) {
 		memcpy(u.v, to, 12);
@@ -219,8 +231,12 @@ void ForceUnit(unsigned char* unit, int kind)
 		}
 		if (kind == kOnewayPlayers && u.air) {
 			*(float*)(unit + g_build->spd) = 0.0f;   // the game's own fall would add to ours
+			// cJump mFallTimer (mSpd + 0x18): uHuman::vf634 (DX11 0xc691e0) drops a player who has fallen this long over
+			// a no-ground area into the abyss state: a carried arc over a gap isn't a fall
+			*(float*)(unit + g_build->spd + 0x18) = 0.0f;
 		}
 	}
+	u.step = u.v[1] * dt;
 	memcpy(u.placed, pos, 12);
 	u.at = now;
 }

@@ -1538,7 +1538,7 @@ void __attribute__((thiscall)) HudUpdate(uint8_t* hud)
 	g_hudSeenAt = GetTickCount();
 	int self = g_localIndex;
 	HeldTick();
-	LivesMatch(self, g_survival && g_lives > 0, TeamGame());
+	LivesMatch(self, (g_survival && g_lives > 0) || ModeLivesLeft(self) >= 0, TeamGame());
 	// every slot, every frame: the controller update only runs while a player is dead
 	for (int slot = 0; slot < 16; slot++) {
 		if (InPlay(slot)) {
@@ -1808,7 +1808,8 @@ void ReportLife(int slot)
 	}
 	int left = -1;
 	if (ModeActive()) {
-		left = -2;   // the mode's: lives.cpp shows none of its own
+		int lives = ModeLivesLeft(slot);   // the mode's respawn rules: a death is counted as it happens
+		left = lives < 0 ? -2 : state == LifeState::Alive ? std::max(lives - 1, 0) : lives;
 	}
 	if (g_survival && g_lives > 0) {
 		int pending = st != 0 ? 1 : 0;

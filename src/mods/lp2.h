@@ -108,7 +108,8 @@ void ModeEvent(int kind, int a = -1, int b = -1); // any thread: queued for Mode
 void ModeFrame();                    // the game thread, every frame (HudUpdate)
 bool ModeActive();
 bool ModeEndPending(int* side, bool* team, bool* match); // End round / End match fired this round
-bool ModeScores(int id, bool team, int* match, int* round); // the mode's score (Score node) of a player / team; false no mode
+bool ModeScores(int id, bool team, int* match, int* round);
+int ModeLivesLeft(int slot);         // the mode's lives left this round (respawn rules), -2 none / not known here // the mode's score (Score node) of a player / team; false no mode
 std::string LivesName(int slot);     // lives.cpp: the player's name ("" unknown)
 // rules.cpp, for modes
 void RulesEliminate(int slot, bool out); // out of the match until the next round: held, shown as eliminated

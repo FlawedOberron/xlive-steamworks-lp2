@@ -192,6 +192,14 @@ void Draw(float width, float height)
 			centred(small, "Fire: next player     Zoom: previous player", y + 4 * scale, IM_COL32(150, 210, 230, 220));
 		}
 	}
+	else if (g_survivalOn && me.state == LifeState::Alive && me.respawnsLeft >= 0) { // a small standing reminder
+		char line[64];
+		snprintf(line, sizeof line, me.respawnsLeft == 1 ? "1 respawn left" : "%d respawns left", me.respawnsLeft);
+		ImVec2 at(24 * scale, height - 48 * scale);
+		ImDrawList* dl = ImGui::GetBackgroundDrawList();
+		dl->AddText(small, small->FontSize, ImVec2(at.x + 1, at.y + 1), IM_COL32(0, 0, 0, 180), line);
+		dl->AddText(small, small->FontSize, at, me.respawnsLeft == 0 ? IM_COL32(255, 120, 90, 255) : IM_COL32(235, 248, 255, 230), line);
+	}
 	else if (g_survivalOn && me.state == LifeState::Dead && me.respawnsLeft >= 0) {
 		char line[64];
 		if (me.respawnsLeft == 0) {

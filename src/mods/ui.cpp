@@ -8,6 +8,7 @@
 // a picture; whichever comes second calls the other.
 #include "mods/lp2.h"
 
+#include "core/config.h"
 #include "core/log.h"
 
 #include <windows.h>
@@ -572,6 +573,10 @@ void UiAddLayer(const char* name, UiDrawFn draw)
 void UiInstall(int build)
 {
 	if (build < 0) {
+		return;
+	}
+	if (GetFileAttributesW((xls::Cfg().modCacheDir + L"no-ui.txt").c_str()) != INVALID_FILE_ATTRIBUTES) {
+		XLS_LOG_INFO("mods: ui: ModCache\\no-ui.txt: overlay off (no Present hooks, no throwaway device).");
 		return;
 	}
 	bool dx11 = build % 2 == 0;

@@ -1745,6 +1745,15 @@ bool ModeActive()
 	return g_mode != nullptr;
 }
 
+int ModeLivesLeft(int slot)
+{
+	// lives left this round (deaths still allowed + 1 while alive); -2: no mode with lives, or a player (the host keeps them)
+	if (!g_mode || g_follow || g_modeManual || g_modeLives <= 0 || slot < 0 || slot >= kSlots) {
+		return -2;
+	}
+	return std::max(0, g_modeLives - g_modeDeaths[slot]);
+}
+
 bool ModeScores(int id, bool team, int* match, int* round)
 {
 	*match = *round = 0;
