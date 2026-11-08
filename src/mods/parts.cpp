@@ -2913,7 +2913,7 @@ void FindInfoXuid(uint8_t* game)
 int OwnerPlayer(uint8_t* owner)
 {
 	uint8_t* game = g_gameObject ? *g_gameObject : nullptr;
-	auto live = [](uint8_t* o) { return o && ((*(uint32_t*)(o + 4) & 7) == 1 || (*(uint32_t*)(o + 4) & 7) == 2); };
+	auto live = [](uint8_t* o) { return (uintptr_t)o >= 0x10000 && ((*(uint32_t*)(o + 4) & 7) == 1 || (*(uint32_t*)(o + 4) & 7) == 2); };
 	if (!game || !live(owner)) {
 		return -1;
 	}

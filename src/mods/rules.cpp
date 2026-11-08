@@ -904,7 +904,7 @@ uint8_t* Body(int slot)
 {
 	uint8_t* ctl = g_controllers[slot];
 	uint8_t* player = ctl ? *(uint8_t**)(ctl + kCtlPlayer) : nullptr;
-	uint32_t kind = player ? *(uint32_t*)(player + 4) & 7 : 0;
+	uint32_t kind = (uintptr_t)player >= 0x10000 ? *(uint32_t*)(player + 4) & 7 : 0; // junk (8) seen at a death
 	return kind == 1 || kind == 2 ? *(uint8_t**)(player + kPlayerBody) : nullptr;
 }
 
@@ -1903,11 +1903,17 @@ void __attribute__((thiscall)) ControlUpdate(uint8_t* ctl)
 			if (g_watched >= 0) {
 				restoreUntil = GetTickCount() + 5000;
 			}
-			uint8_t* cam = *(uint8_t**)(ctl + kCtlCamera);
-			uint8_t* player = *(uint8_t**)(ctl + kCtlPlayer);
-			uint8_t* own = player ? *(uint8_t**)(player + kPlayerBody) : nullptr;
-			if (restoreUntil && GetTickCount() < restoreUntil && cam && own && g_follow && ctl[kCtlState] == 0 &&
-			    *(uint8_t**)(cam + kCameraBody) != own) {
+			// read safely: at a death the player field has held junk (8: a crash reading +0x40, 2026-11-08)
+			uint8_t *cam = nullptr, *player = nullptr, *own = nullptr, *watching = nullptr;
+			ReadGame(ctl + kCtlCamera, &cam);
+			ReadGame(ctl + kCtlPlayer, &player);
+			if ((uintptr_t)player < 0x10000 || !ReadGame(player + kPlayerBody, &own) || (uintptr_t)own < 0x10000) {
+				own = nullptr;
+			}
+			if ((uintptr_t)cam < 0x10000 || !ReadGame(cam + kCameraBody, &watching)) {
+				cam = nullptr;
+			}
+			if (restoreUntil && GetTickCount() < restoreUntil && cam && own && g_follow && ctl[kCtlState] == 0 && watching != own) {
 				g_follow(cam, own, 0xff, *g_followArg, 0.0f);
 				if (g_cameraSnap) {
 					g_cameraSnap(cam, nullptr);

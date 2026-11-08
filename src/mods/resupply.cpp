@@ -51,6 +51,9 @@ std::atomic<bool> g_on{false};
 
 bool Live(const uint8_t* unit)
 {
+	if ((uintptr_t)unit < 0x10000) { // null or junk (a player field held 8 at a death)
+		return false;
+	}
 	uint32_t state = *(const uint32_t*)(unit + 4) & 7;
 	return state == 1 || state == 2;
 }

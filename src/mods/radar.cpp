@@ -105,7 +105,7 @@ uint8_t* Viewer()
 		uint32_t state = *(uint32_t*)(o + 4) & 7;
 		return state == 1 || state == 2;
 	};
-	if (!a || !live(a)) {
+	if ((uintptr_t)a < 0x10000 || !live(a)) {
 		return nullptr;
 	}
 	uint8_t* unit = *(uint8_t**)(a + 0x40);
