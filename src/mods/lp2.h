@@ -98,6 +98,12 @@ void OnewayInstall(unsigned char* base);
 void ForceInstall(unsigned char* base);
 void ForceUnit(unsigned char* unit, int kind);
 void ForceSetMap(const MapPhysics* physics);
+// zones.cpp: bot zone outlines drawn as fences on the overlay (script node zoneoutline). ZonesShow: every zone whose
+// name or tag matches the pattern (* ?), rgb rrggbb, height cm, seconds (0: until hidden); host side, sent to all
+void ZonesSetMap(const struct MapPhysics* physics);
+int ZonesShow(const char* pattern, bool show, uint32_t rgb, float height, float seconds);
+void ZonesPack(std::vector<uint8_t>* m);
+void ZonesUnpack(const uint8_t*& p, const uint8_t* end);
 void BotsSetMap(const MapPhysics* physics); // the package's bot zones (none: areas from the start points)
 float RulesGrappleRange(); // the match's anchor reach, cm (0: grappling off)
 
@@ -153,6 +159,8 @@ std::string MapsOnlineText(uint32_t id); // the game's MsgOnline text in its lan
 const char* RulesBattleMessage(uint32_t id); // MsgBattle: the Eliminated text while a battle message is being formatted, else null
 int RulesSlotOf(const uint8_t* character); // the match slot whose body it is, -1 none (AI, akrid)
 int RulesLocalSlot();                      // the local player's match slot, -1 not known
+// the local player's camera (eye, look-at point, up; fov as the game holds it): false when there is none
+bool RulesCamera(float eye[3], float target[3], float up[3], float* fov);
 unsigned char* RulesBody(int slot);        // the slot's character (on foot or its VS), null none
 uint32_t RulesMessageAlias(uint32_t id); // our ids that reuse a game message -> that message
 bool RulesPatchMenuFlash(std::vector<uint8_t>* gfx);

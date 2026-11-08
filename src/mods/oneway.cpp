@@ -241,6 +241,7 @@ void OnewaySetMap(const MapPhysics* physics)
 	g_force = physics && !physics->force.empty();
 	ForceSetMap(physics);
 	BotsSetMap(physics);
+	ZonesSetMap(physics);
 	if (!g_volumes.empty()) {
 		XLS_LOG_INFO("mods: oneway: %u volume(s).", (unsigned)g_volumes.size());
 	}

@@ -4,6 +4,8 @@
 
 #include <math.h>
 
+#include <array>
+#include <stdint.h>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -89,7 +91,7 @@ enum ScriptType { kScriptStart, kScriptEnter, kScriptTimer, kScriptDelay, kScrip
 	kScriptList, kScriptListRemove, kScriptListGet, kScriptListCount, kScriptForEach, kScriptPlayerCheck, kScriptPlayerGet,
 	kScriptPlayerAct, kScriptLoop, kScriptFindMarkers, kScriptGetMarker, kScriptSpawn,
 	kScriptTeleport, kScriptGetPos, kScriptVector, kScriptSwitch, kScriptSequence, kScriptGate, kScriptOnce, kScriptBranch,
-	kScriptChance, kScriptCooldown, kScriptTypes };
+	kScriptChance, kScriptCooldown, kScriptZoneOutline, kScriptTypes };
 const int kScriptIns = 4, kScriptOuts = 8;
 struct ScriptTypeInfo {
 	const char* name;
@@ -134,6 +136,7 @@ inline const ScriptTypeInfo kScriptTypeInfo[kScriptTypes] = {
 	{"branch", {"in"}, {"1", "2", "3", "4", "5", "6"}},
 	{"chance", {"in"}, {"yes", "no"}},
 	{"cooldown", {"in", "reset"}, {"then", "blocked"}},
+	{"zoneoutline", {"show", "hide"}, {"then"}},
 };
 // Variables' kinds ("var_kinds"): a number; a player (its match slot, -1 nobody); a list of players; a script marker
 // (its number in "script_markers", -1 none); a list of markers.
@@ -200,6 +203,7 @@ struct ScriptNode {
 	float seconds = 1.0f;  // timer / delay / cooldown; setvalue: fade
 	float maxSeconds = 0.0f; // timer / delay: above seconds: a random time between them
 	bool repeat = false, autostart = false; // timer; gate: autostart = starts open
+	uint32_t rgb = 0xffcc33; // zoneoutline: "colour" (rrggbb)
 	std::string text;      // log ({name}: a variable's value); findmarkers / getmarker: the name (* and ? wildcards)
 	std::vector<float> cases; // switch: the value of each case port (1..6)
 	std::vector<ScriptLink> out[kScriptOuts]; // by output port number
@@ -231,6 +235,8 @@ struct NavZone {
 	std::string name;
 	float pos[3];  // a spot on the walkable surface near its middle, cm
 	float size[3]; // its bounds' size, cm
+	std::vector<std::string> tags;  // the zone volume's "zone_tags" (lower case): e.g. koth_start
+	std::vector<std::vector<std::array<float, 3>>> outline; // its outer edges: closed loops on the floor, cm
 };
 struct NavLink {
 	int from, to;

@@ -365,6 +365,27 @@ bool ReadManifest(const Zip& zip, const std::wstring& label, MapPackage* map)
 		for (const Json& e : nz["zones"].Elements()) {
 			NavZone z;
 			z.name = e["name"].GetString("");
+			for (const Json& t : e["tags"].Elements()) {
+				std::string tag = t.GetString(std::string());
+				for (char& c : tag) {
+					c = (char)tolower((unsigned char)c);
+				}
+				if (!tag.empty()) {
+					z.tags.push_back(tag);
+				}
+			}
+			for (const Json& loop : e["outline"].Elements()) {
+				std::vector<std::array<float, 3>> pts;
+				for (const Json& q : loop.Elements()) {
+					std::array<float, 3> v;
+					if (vec3(q, v.data())) {
+						pts.push_back(v);
+					}
+				}
+				if (pts.size() >= 2) {
+					z.outline.push_back(std::move(pts));
+				}
+			}
 			if (vec3(e["pos"], z.pos)) {
 				vec3(e["size"], z.size);
 				map->physics.nav.zones.push_back(z);
@@ -512,7 +533,8 @@ bool ReadManifest(const Zip& zip, const std::wstring& label, MapPackage* map)
 		n.fromMarker = e["from"].GetString("player") == "marker";
 		n.vecOp = pick(e["vecop"].GetString(std::string()), kScriptVecOps, kVecOps, kVecAdd);
 		n.target = (int)e["target"].GetInt(1);
-		n.seconds = (float)e["seconds"].GetNumber(n.type == kScriptSetValue ? 0.0 : 1.0);
+		n.seconds = (float)e["seconds"].GetNumber(n.type == kScriptSetValue || n.type == kScriptZoneOutline ? 0.0 : 1.0);
+		n.rgb = (uint32_t)strtoul(e["colour"].GetString("ffcc33").c_str(), nullptr, 16) & 0xffffff;
 		n.maxSeconds = (float)e["max_seconds"].GetNumber(0.0);
 		n.repeat = e["repeat"].GetBool(false);
 		n.autostart = e["autostart"].GetBool(false);

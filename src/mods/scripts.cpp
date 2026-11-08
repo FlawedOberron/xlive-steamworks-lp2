@@ -797,6 +797,13 @@ void Fire(State& s, int node, int in, double now)
 		Out(s, node, std::uniform_int_distribution<int>(0, count - 1)(g_random), now);
 		break;
 	}
+	case kScriptZoneOutline: {
+		float h = Get(s, n.a);
+		ZonesShow(Format(s, n.text).c_str(), in == 0, n.rgb, h > 0.0f ? h : 300.0f, n.seconds);
+		InterlockedExchange(&g_dirty, 1);
+		Out(s, node, 0, now);
+		break;
+	}
 	case kScriptChance:
 		Out(s, node, std::uniform_real_distribution<float>(0.0f, 100.0f)(g_random) < Get(s, n.a) ? 0 : 1, now);
 		break;
@@ -978,6 +985,7 @@ std::vector<uint8_t> StateMessage(uint32_t key, int volumes, double now)
 	ReleaseSRWLockShared(&g_valueLock);
 	Put<uint16_t>(&m, n);
 	m.insert(m.end(), values.begin(), values.end());
+	ZonesPack(&m);   // the zone outlines shown (zones.cpp)
 	return m;
 }
 
@@ -997,12 +1005,14 @@ void ApplyState(const uint8_t* p, const uint8_t* end, uint32_t key, int volumes,
 	if (!Take(p, end, &n)) {
 		return;
 	}
+	bool whole = true;
 	AcquireSRWLockExclusive(&g_valueLock);
 	for (int i = 0; i < n; i++) {
 		uint16_t sid;
 		uint8_t setting;
 		float from, to, elapsed, fade;
 		if (!Take(p, end, &sid) || !Take(p, end, &setting) || !Take(p, end, &from) || !Take(p, end, &to) || !Take(p, end, &elapsed) || !Take(p, end, &fade)) {
+			whole = false;
 			break;
 		}
 		if (sid < volumes && setting < kSettings) {
@@ -1010,6 +1020,9 @@ void ApplyState(const uint8_t* p, const uint8_t* end, uint32_t key, int volumes,
 		}
 	}
 	ReleaseSRWLockExclusive(&g_valueLock);
+	if (whole) {
+		ZonesUnpack(p, end);
+	}
 }
 
 void OnMessage(const uint8_t* p, size_t size, uint32_t key, int volumes, double now, bool follow)

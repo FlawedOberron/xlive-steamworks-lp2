@@ -4549,6 +4549,22 @@ int RulesLocalSlot()
 	return g_localIndex;
 }
 
+bool RulesCamera(float eye[3], float target[3], float up[3], float* fov)
+{
+	// the local entry's camera (a uCamera: mCameraPos +0x40, mCameraUp +0x50, mTargetPos +0x60, mFov +0x30)
+	int self = g_localIndex;
+	uint8_t* entry = g_controllers && self >= 0 && self < 16 ? g_controllers[self] : nullptr;
+	uint8_t* cam = entry ? *(uint8_t**)(entry + kCtlCamera) : nullptr;
+	if (!cam) {
+		return false;
+	}
+	memcpy(eye, cam + 0x40, 12);
+	memcpy(up, cam + 0x50, 12);
+	memcpy(target, cam + 0x60, 12);
+	memcpy(fov, cam + 0x30, 4);
+	return true;
+}
+
 const char* RulesBattleMessage(uint32_t id)
 {
 	int self = g_localIndex;
