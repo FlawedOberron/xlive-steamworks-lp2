@@ -76,7 +76,8 @@ typedef void(__thiscall* SetVelocityFn)(void*, const float*, void*);
 SetVelocityFn g_setVelocity = nullptr;
 std::vector<ForceVolume> g_volumes; // the map's (game thread)
 float g_gravity = 1.0f;
-std::unordered_map<uint8_t*, Unit> g_units;
+std::unordered_map<uint8_t*, Unit> g_units; // under g_unitsMutex: the game updates units on several threads, and
+std::mutex g_unitsMutex;                    // ForceSetMap clears it at round start (crash 2026-11-09, DX9 bot match)
 std::vector<bool> g_logged;
 double g_freq = 0.0;
 std::unordered_map<uint8_t*, std::array<float, 3>> g_throws; // ForceThrow: velocities to set on the unit's next update
@@ -111,8 +112,12 @@ void SetGrenadeVelocity(uint8_t* shell, const float v[3])
 
 void ForceUnit(unsigned char* unit, int kind)
 {
+	if (!kind || !g_build) {
+		return;
+	}
+	std::lock_guard<std::mutex> unitsLock(g_unitsMutex); // before g_throwMutex (ForceSetMap takes them in the same order)
 	double now = Now();
-	if ((g_volumes.empty() && now > g_throwUntil) || !kind || !g_build) {
+	if (g_volumes.empty() && now > g_throwUntil) {
 		return;
 	}
 	float* pos = (float*)(unit + 0x30);
@@ -315,10 +320,12 @@ bool ForceThrowing()
 
 void ForceSetMap(const MapPhysics* physics)
 {
+	std::lock_guard<std::mutex> unitsLock(g_unitsMutex);
 	g_volumes = physics ? physics->force : std::vector<ForceVolume>();
 	g_gravity = physics ? physics->gravity : 1.0f;
 	g_logged.assign(g_volumes.size(), false);
 	g_units.clear();
+	std::lock_guard<std::mutex> throwLock(g_throwMutex);
 	g_throws.clear();
 	if (!g_volumes.empty()) {
 		XLS_LOG_INFO("mods: force: %u volume(s).", (unsigned)g_volumes.size());
