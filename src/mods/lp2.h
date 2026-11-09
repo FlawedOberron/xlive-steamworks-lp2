@@ -148,6 +148,7 @@ BotOptions BotMenuOptions();
 void RadarInstall(uint8_t* base, int build); // radar.cpp
 void ResupplyInstall(uint8_t* base, int build); // resupply.cpp
 void ResupplySet(bool on);
+uint8_t* ResupplyViewerBody(); // the local player's character, or nullptr
 struct RadarShotInfo {
 	float pos[3];
 	uint8_t* who; // compare only: it may be gone

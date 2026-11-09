@@ -142,6 +142,18 @@ void __attribute__((thiscall)) Scan(uint8_t* fighter, int a, int b, uint8_t* oth
 
 }
 
+// The viewer's character (the local player's body), or nullptr.
+uint8_t* ResupplyViewerBody()
+{
+	uint8_t* holder = g_viewer ? *g_viewer : nullptr;
+	uint8_t* control = holder ? *(uint8_t**)(holder + 0x480) : nullptr;
+	if (!control || !Live(control)) {
+		return nullptr;
+	}
+	uint8_t* body = *(uint8_t**)(control + 0x40);
+	return Live(body) ? body : nullptr;
+}
+
 void ResupplySet(bool on)
 {
 	g_on = on;

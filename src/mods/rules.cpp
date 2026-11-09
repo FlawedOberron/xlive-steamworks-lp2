@@ -174,7 +174,8 @@ const int kGrappleDefault = 3, kAnchorSpeedDefault = 2, kAnchorSpeedValues = 12;
 const int kGrappleValues = (int)(sizeof(kGrappleScales) / sizeof(kGrappleScales[0]));
 // Hit Stagger: what a soldier does when a hit of each kind (bullet, explosion, anchor, melee) takes stagger points (see
 // StaggerAdd). The points only decide when, and one hit is enough for most, so the rows pick the reaction instead.
-const char* const kStaggerNames[] = {"Default", "Off", "Occasional", "Flinch", "Knock-back", "Knockdown"};
+// the pools: shrink = flinch, blown = knockdown, third = the electric stun (FUN_009b8bb0; user test 2026-11-09)
+const char* const kStaggerNames[] = {"Default", "Off", "Occasional", "Flinch", "Knockdown", "Stun"};
 const int kStaggerValues = (int)(sizeof(kStaggerNames) / sizeof(kStaggerNames[0]));
 enum { kReactDefault, kReactOff, kReactOccasional, kReactFlinch, kReactBack, kReactDown };
 const DWORD kOccasionalMs = 1500; // Occasional: at most one reaction this often
@@ -183,7 +184,7 @@ const char* const kThresholdNames[] = {"Default", "0.5x", "0.75x", "1.25x", "1.5
 const float kThresholdScales[] = {1.0f, 0.5f, 0.75f, 1.25f, 1.5f, 2.0f, 3.0f, 1000000.0f};
 const int kThresholdValues = (int)(sizeof(kThresholdScales) / sizeof(kThresholdScales[0]));
 // Massive Shot: bullets filling the knock-back (blown) pool, as a shotgun blast does.
-const char* const kMassiveNames[] = {"Default", "Off", "Knock-back", "Knockdown"};
+const char* const kMassiveNames[] = {"Default", "Off", "Knockdown", "Stun"};
 const int kMassiveValues = 4;
 enum { kMassiveDefault, kMassiveOff, kMassiveBack, kMassiveDown };
 // Infinite Ammo: one row for both rules, bit 0 ammo, bit 1 grenades. Rules byte 0x30 held Unlimited
@@ -761,6 +762,68 @@ void StaggerSeenSet(void* character, bool reacted, bool forced, DWORD now)
 	seen.forced = forced ? now : seen.forced;
 }
 
+// Hit probe (diagnostic, log only): for the local player's first hits, which state bytes and flags of the character change
+// in the 0.4 s after (bytes +0x10..+0x40, dwords +0xcc0..+0xda0, raw offsets of this build). To find what plays the
+// per-hit flinch that no stagger pool starts (user test 2026-11-09: Bullet Stagger Off, rifle hits still flinch).
+std::atomic<int> g_hitProbes{0};
+std::atomic<bool> g_hitProbeBusy{false};
+struct HitProbeArgs {
+	uint8_t* body;
+	int kind;
+};
+
+DWORD WINAPI HitProbeThread(LPVOID param)
+{
+	HitProbeArgs a = *(HitProbeArgs*)param;
+	delete (HitProbeArgs*)param;
+	uint8_t was[0x40], now[0x40];
+	uint32_t wasF[0x38], nowF[0x38];
+	auto grab = [&](uint8_t* bytes, uint32_t* flags) {
+		return ReadGame(a.body + 0x10, (uint8_t(*)[0x30])bytes) && ReadGame(a.body + 0xcc0, (uint32_t(*)[0x38])flags);
+	};
+	int lines = 0;
+	if (grab(was, wasF)) {
+		XLS_LOG_INFO("mods: rules: hit probe %d: a %s hit on the local player.", g_hitProbes.load(), kStaggerKindNames[a.kind]);
+		for (int t = 15; t <= 400 && lines < 60; t += 15) {
+			Sleep(15);
+			if (!grab(now, nowF)) {
+				break;
+			}
+			for (int i = 0; i < 0x30 && lines < 60; i++) {
+				if (now[i] != was[i]) {
+					XLS_LOG_INFO("mods: rules: hit probe:   +%3d ms byte +0x%02x %02x -> %02x", t, 0x10 + i, was[i], now[i]);
+					lines++;
+				}
+			}
+			for (int i = 0; i < 0x38 && lines < 60; i++) {
+				if (nowF[i] != wasF[i]) {
+					XLS_LOG_INFO("mods: rules: hit probe:   +%3d ms dword +0x%03x %08x -> %08x", t, 0xcc0 + i * 4, wasF[i], nowF[i]);
+					lines++;
+				}
+			}
+			memcpy(was, now, sizeof(was));
+			memcpy(wasF, nowF, sizeof(wasF));
+		}
+	}
+	g_hitProbeBusy = false;
+	return 0;
+}
+
+void HitProbe(void* character, int kind)
+{
+	if (g_hitProbes.load() >= 8 || character != ResupplyViewerBody() || g_hitProbeBusy.exchange(true)) {
+		return;
+	}
+	g_hitProbes++;
+	HANDLE t = CreateThread(nullptr, 0, HitProbeThread, new HitProbeArgs{(uint8_t*)character, kind}, 0, nullptr);
+	if (t) {
+		CloseHandle(t);
+	}
+	else {
+		g_hitProbeBusy = false;
+	}
+}
+
 // Soldiers in versus only (the rules are VS rules; VS and Akrid keep the game's). Refills (positive) pass as they are.
 template <int Pool>
 bool __attribute__((thiscall)) StaggerAdd(void* character, uint32_t delta, uint32_t b)
@@ -771,6 +834,7 @@ bool __attribute__((thiscall)) StaggerAdd(void* character, uint32_t delta, uint3
 	}
 	int kind = StaggerKindOf(Pool);
 	DWORD now = GetTickCount();
+	HitProbe(character, kind);
 	if (kind == kStaggerBullet && Pool == 1) {
 		// Massive Shot: bullets into the knock-back pool. The threshold divides the points (2x: twice the pellets).
 		int massive = g_massive % kMassiveValues;
@@ -787,7 +851,7 @@ bool __attribute__((thiscall)) StaggerAdd(void* character, uint32_t delta, uint3
 			if (massive == kMassiveDown && g_staggerOriginal[2]) {
 				g_staggerOriginal[2](character, (uint16_t)(int16_t)-30000, b);
 			}
-			StaggerLog("mods: rules: hit stagger: a massive %s shot: %s.", kStaggerKindNames[kind], massive == kMassiveDown ? "knockdown" : "knock-back");
+			StaggerLog("mods: rules: hit stagger: a massive %s shot: %s.", kStaggerKindNames[kind], massive == kMassiveDown ? "stun" : "knockdown");
 		}
 		return standing;
 	}
