@@ -22,6 +22,7 @@
 #include <string.h>
 
 #include <algorithm>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -66,7 +67,10 @@ struct Car {
 	double last = 0.0, seen = 0.0;
 	double hitAt[16] = {};
 	float prevPos[16][3];
+	float placed[3] = {0, 0, 0}; // where we put it last update (what the game did in between is logged)
+	float gameMove = 0.0f;       // cm the game moved it since, last update
 };
+std::mutex g_carsLock;          // VS updates run on several worker threads at once
 std::unordered_map<unsigned char*, Car> g_cars;
 unsigned char* g_driven = nullptr; // the VS the local player rides (HUD frame), gets the keys
 jeep::Input g_input;            // the local driver's input, this frame
@@ -374,7 +378,10 @@ void RunOvers(unsigned char* vs, Car& car, float dt)
 
 void JeepSetMap(int onlineMap)
 {
-	g_cars.clear();
+	{
+		std::lock_guard<std::mutex> lock(g_carsLock);
+		g_cars.clear();
+	}
 	g_driven = nullptr;
 	g_on = GetFileAttributesW((Cfg().modCacheDir + L"jeep.txt").c_str()) != INVALID_FILE_ATTRIBUTES;
 	g_lift = 0.0f;
@@ -429,6 +436,7 @@ void JeepUnit(unsigned char* vs)
 	if (!g_on || !g_haveGround || vs[0x1f] != 2) {
 		return;
 	}
+	std::lock_guard<std::mutex> lock(g_carsLock);
 	double now = Now();
 	auto it = g_cars.find(vs);
 	if (it == g_cars.end() || now - it->second.seen > 1.0) { // new (or its address reused)
@@ -456,6 +464,11 @@ void JeepUnit(unsigned char* vs)
 	}
 	Car& car = it->second;
 	car.seen = now;
+	{
+		const float* p = (const float*)(vs + 0x30);
+		float d[3] = {p[0] - car.placed[0], p[1] - car.placed[1], p[2] - car.placed[2]};
+		car.gameMove = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+	}
 	float dt = (float)std::min(0.1, now - car.last);
 	if (dt <= 0.0f) {
 		return;
@@ -474,12 +487,13 @@ void JeepUnit(unsigned char* vs)
 		RunOvers(vs, car, dt);
 	}
 	Pose(vs, car);
+	memcpy(car.placed, vs + 0x30, 12);
 	if (vs == g_driven && now >= g_logAt) {
 		g_logAt = now + 2.0;
 		Vec3 u = jeep::Rotate(car.state.rot, {0, 1, 0});
-		XLS_LOG_INFO("mods: jeep: driving: at %.0f %.0f %.0f, %.0f cm/s, %d wheel(s) down%s, up %.2f, yaw %.0f (want %.0f), throttle %.0f.",
+		XLS_LOG_INFO("mods: jeep: driving: at %.0f %.0f %.0f, %.0f cm/s, %d wheel(s) down%s, up %.2f, yaw %.0f (want %.0f), throttle %.0f; the game moved it %.1f cm since our last write.",
 			car.state.pos.x, car.state.pos.y, car.state.pos.z, car.state.speed, car.state.groundedWheels, car.state.airborne ? ", airborne" : "", u.y,
-			jeep::Yaw(car.state.rot) * 57.2958f, in.lookYaw * 57.2958f, in.throttle);
+			jeep::Yaw(car.state.rot) * 57.2958f, in.lookYaw * 57.2958f, in.throttle, car.gameMove);
 	}
 }
 
@@ -489,6 +503,7 @@ void JeepFrame()
 	if (!g_on || !g_haveGround) {
 		return;
 	}
+	std::lock_guard<std::mutex> lock(g_carsLock);
 	int self = RulesLocalSlot();
 	unsigned char* ride = self >= 0 ? FindRide(self) : nullptr;
 	if (ride && g_cars.find(ride) == g_cars.end()) {
@@ -505,20 +520,26 @@ void JeepFrame()
 		g_driven = ride;
 	}
 	double now = Now();
-	if (!ride && now >= g_probeAt && self >= 0) {
-		// not riding as far as we can tell: say what we see when a jeep is close (finding the ride pointer)
+	if (!ride && now >= g_probeAt) {
+		// not riding as far as we can tell: what we see (finding the ride pointer)
 		g_probeAt = now + 3.0;
-		unsigned char* body = RulesBody(self);
+		unsigned char* body = self >= 0 ? RulesBody(self) : nullptr;
+		unsigned char* nearest = nullptr;
+		float best = 1e30f;
 		for (auto& [vs, car] : g_cars) {
-			if ((uintptr_t)body >= 0x10000 && Dist2(vs, body) < 400.0f * 400.0f) {
-				unsigned char *ctl = RulesController(self), *cam = nullptr, *watched = nullptr;
-				Read(ctl + 0x484, &cam);
-				Read(cam + 0x200, &watched);
-				XLS_LOG_INFO("mods: jeep: probe: a jeep %.0f cm from the local player (slot %d, body type %u, camera on %s), not seen as riding it.",
-					sqrtf(Dist2(vs, body)), self, body[0x1f], watched == body ? "the body" : watched == vs ? "the jeep" : "something else");
-				break;
+			if ((uintptr_t)body >= 0x10000 && Dist2(vs, body) < best) {
+				best = Dist2(vs, body);
+				nearest = vs;
 			}
 		}
+		unsigned char *ctl = self >= 0 ? RulesController(self) : nullptr, *cam = nullptr, *watched = nullptr;
+		Read(ctl + 0x484, &cam);
+		Read(cam + 0x200, &watched);
+		uint8_t type = 0, wtype = 0;
+		Read(body + 0x1f, &type);
+		Read(watched + 0x1f, &wtype);
+		XLS_LOG_INFO("mods: jeep: probe: local slot %d, body %p (type %u), camera on %p (type %u), nearest jeep %.0f cm, game moves it %.1f cm per update; %u jeeps.",
+			self, body, type, watched, wtype, nearest ? sqrtf(best) : -1.0f, nearest ? g_cars[nearest].gameMove : 0.0f, (unsigned)g_cars.size());
 	}
 	if (!ride) {
 		return;
