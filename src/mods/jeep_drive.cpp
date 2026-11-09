@@ -2,7 +2,7 @@
 // ground file <game>\Mods\jeep\online<NN>.col exists (lp2-tools lp2jeepcol.py from the map's move.sbc1), any VS the
 // local player rides is driven by the jeep model (src/mods/jeep) instead of its own movement: the pose is written
 // onto the VS every frame from the HUD update.
-//   W / S throttle and brake / reverse, steering towards the camera, Space handbrake, R flip it over,
+//   WASD: drive towards that direction relative to the camera (S alone: brake / reverse), Space handbrake, R flip,
 //   arrow keys air control.
 // Soldiers it hits are pushed, knocked (thrown, hurt) or killed by closing speed (jeep RunOver), on this PC only.
 // A test: no seats, no model, no network sync (other players see the VS where their copy puts it).
@@ -52,6 +52,8 @@ Ground g_ground;
 bool g_haveGround = false;
 int g_map = -1;
 bool g_on = false;              // jeep.txt, read at map load
+float g_lift = 0.0f;            // jeep.txt "height=<cm>": raises the VS above the ground point (its model's origin height)
+float g_turn = 0.0f;            // jeep.txt "yaw=<degrees>": the model's facing against the jeep's (+Z forward)
 
 jeep::Params g_params;
 jeep::State g_state;
@@ -308,6 +310,24 @@ void JeepSetMap(int onlineMap)
 {
 	g_vs = nullptr;
 	g_on = GetFileAttributesW((Cfg().modCacheDir + L"jeep.txt").c_str()) != INVALID_FILE_ATTRIBUTES;
+	g_lift = 0.0f;
+	g_turn = 0.0f;
+	if (FILE* f = _wfopen((Cfg().modCacheDir + L"jeep.txt").c_str(), L"r")) {
+		char line[128];
+		while (fgets(line, sizeof(line), f)) {
+			float v;
+			if (sscanf(line, " height = %f", &v) == 1) {
+				g_lift = v;
+			}
+			else if (sscanf(line, " yaw = %f", &v) == 1) {
+				g_turn = v * 3.14159265f / 180.0f;
+			}
+		}
+		fclose(f);
+		if (g_on && (g_lift != 0.0f || g_turn != 0.0f)) {
+			XLS_LOG_INFO("mods: jeep: jeep.txt: height %.0f cm, yaw %.0f deg.", g_lift, g_turn * 57.2958f);
+		}
+	}
 	if (!g_on || onlineMap < 0) {
 		g_map = -1;
 		g_haveGround = false;
@@ -352,33 +372,49 @@ void JeepFrame()
 		return;
 	}
 	jeep::Input in;
+	float camYaw = jeep::Yaw(g_state.rot);
+	float eye[3], target[3], up[3], fov;
+	if (RulesCamera(eye, target, up, &fov)) {
+		camYaw = atan2f(target[0] - eye[0], target[2] - eye[2]);
+	}
+	in.lookYaw = jeep::Yaw(g_state.rot); // no keys: coast straight
 	if (GameFocused()) {
-		in.throttle = (Key('W') ? 1.0f : 0.0f) - (Key('S') ? 1.0f : 0.0f);
+		// WASD is a direction relative to the camera: the jeep turns towards it and drives (D: 90 degrees right of the
+		// camera, W+D: 45). S alone brakes / reverses; S with A / D reverses steering that way
+		float x = (Key('D') ? 1.0f : 0.0f) - (Key('A') ? 1.0f : 0.0f);
+		float z = (Key('W') ? 1.0f : 0.0f) - (Key('S') ? 1.0f : 0.0f);
+		if (z < 0.0f) {
+			in.throttle = -1.0f;
+			in.lookSteer = false;
+			in.steer = x;
+		}
+		else if (x != 0.0f || z > 0.0f) {
+			in.throttle = 1.0f;
+			in.lookYaw = camYaw + atan2f(x, z);
+		}
 		in.handbrake = Key(VK_SPACE);
 		in.flip = Key('R');
 		in.airPitch = (Key(VK_UP) ? 1.0f : 0.0f) - (Key(VK_DOWN) ? 1.0f : 0.0f);
 		in.airRoll = (Key(VK_RIGHT) ? 1.0f : 0.0f) - (Key(VK_LEFT) ? 1.0f : 0.0f);
 	}
-	float eye[3], target[3], up[3], fov;
-	if (RulesCamera(eye, target, up, &fov)) {
-		in.lookYaw = atan2f(target[0] - eye[0], target[2] - eye[2]);
-	}
-	else {
-		in.lookYaw = jeep::Yaw(g_state.rot);
-	}
 	jeep::Step(g_params, &g_state, in, dt, Ray, nullptr);
 	RunOvers(self);
 	g_last = now;
 
-	Vec3 foot = jeep::ToWorld(g_state, {0, -kFoot, 0});
+	Vec3 foot = jeep::ToWorld(g_state, {0, -kFoot + g_lift, 0});
 	float pos[3] = {foot.x, foot.y, foot.z};
 	if (g_quatMode) {
 		CharacterPlace(g_vs, pos, nullptr);
-		float q[4] = {g_state.rot.x, g_state.rot.y, g_state.rot.z, g_state.rot.w};
+		jeep::Quat r = g_state.rot;
+		if (g_turn != 0.0f) { // r * (turn about Y)
+			float s = sinf(g_turn / 2), c = cosf(g_turn / 2);
+			r = {r.x * c - r.z * s, r.y * c + r.w * s, r.z * c + r.x * s, r.w * c - r.y * s};
+		}
+		float q[4] = {r.x, r.y, r.z, r.w};
 		memcpy(g_vs + 0x40, q, 16);
 	}
 	else {
-		float euler[3] = {0.0f, jeep::Yaw(g_state.rot), 0.0f};
+		float euler[3] = {0.0f, jeep::Yaw(g_state.rot) + g_turn, 0.0f};
 		CharacterPlace(g_vs, pos, euler);
 	}
 	if (now >= g_logAt) {
