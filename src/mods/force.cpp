@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include <array>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -79,6 +80,7 @@ std::unordered_map<uint8_t*, Unit> g_units;
 std::vector<bool> g_logged;
 double g_freq = 0.0;
 std::unordered_map<uint8_t*, std::array<float, 3>> g_throws; // ForceThrow: velocities to set on the unit's next update
+std::mutex g_throwMutex; // ForceThrow comes from the hit handlers' threads
 double g_throwUntil = 0.0;  // ForceThrowing: carry thrown units until then
 
 double Now()
@@ -173,11 +175,13 @@ void ForceUnit(unsigned char* unit, int kind)
 			}
 		}
 	}
+	std::unique_lock<std::mutex> throwLock(g_throwMutex);
 	auto thrown = g_throws.find(unit);
 	if (thrown != g_throws.end()) {
 		set = true;
 		memcpy(to, thrown->second.data(), 12);
 		g_throws.erase(thrown);
+		throwLock.unlock();
 		u.air = to[1] > 0.0f;
 		XLS_LOG_INFO("mods: force: a %s thrown (%.0f, %.0f, %.0f) cm/s at %.0f %.0f %.0f.", KindName(kind), to[0], to[1], to[2], pos[0], pos[1], pos[2]);
 	}
@@ -299,6 +303,7 @@ void ForceThrow(unsigned char* unit, const float vel[3])
 	if (!unit || !g_freq) {
 		return;
 	}
+	std::lock_guard<std::mutex> lock(g_throwMutex);
 	g_throws[unit] = {vel[0], vel[1], vel[2]};
 	g_throwUntil = Now() + 10.0;
 }
