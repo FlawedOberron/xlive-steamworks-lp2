@@ -967,7 +967,7 @@ DWORD WINAPI SyncThread(LPVOID)
 		std::string now = Format(r);
 		if (now != logged) {
 			logged = now;
-			XLS_LOG_INFO("mods: rules: unlimited ammo %s, unlimited grenades %s, secondary kind 0x%02x, ammo supply %d magazines (0 = default), survival %s (%d lives), harmonizer %s, grappling %s, hit stagger %s.", r.ammo ? "on" : "off", r.grenades ? "on" : "off", r.secondary, r.supply, r.survival ? "on" : "off", r.lives, r.harmonizer ? "on" : "off", kGrappleNames[r.grapple % kGrappleValues], kStaggerNames[r.stagger % kStaggerValues]);
+			XLS_LOG_INFO("mods: rules: unlimited ammo %s, unlimited grenades %s, secondary kind 0x%02x, ammo supply %d magazines (0 = default), survival %s (%d lives), harmonizer %s, grappling %s, stagger bullet %s / explosion %s / anchor %s / melee %s, massive shot %s at %s.", r.ammo ? "on" : "off", r.grenades ? "on" : "off", r.secondary, r.supply, r.survival ? "on" : "off", r.lives, r.harmonizer ? "on" : "off", kGrappleNames[r.grapple % kGrappleValues], kStaggerNames[r.stagger % kStaggerValues], kStaggerNames[r.staggerExplosion % kStaggerValues], kStaggerNames[r.staggerAnchor % kStaggerValues], kStaggerNames[r.staggerMelee % kStaggerValues], kMassiveNames[r.massive % kMassiveValues], kThresholdNames[r.massiveThreshold % kThresholdValues]);
 		}
 	}
 }
@@ -3277,6 +3277,7 @@ const uint8_t kScoreRows[] = {0x01, 0x0e, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x1e};
 
 enum SetupPage { kSetupTop, kSetupOptions, kSetupSection, kSetupTypes, kSetupEntries, kSetupName, kSetupBots, kSetupRadar, kSetupAnchor, kSetupStagger };
 enum SetupKind { kKindValue, kKindNav, kKindHeader, kKindOwn };
+const int kOwnBulletStagger = 100; // a kKindOwn row's arg for the rules byte 0x36 (not an extras key)
 enum SetupAction { kActNone, kActTypes, kActType, kActOptions, kActCreate, kActSection, kActDefault, kActProfile, kActBots, kActRadar, kActAnchor, kActStagger };
 const char* const kBotRuleKeys[] = {"bots", "botDifficulty", "botBrain", "botPersona", "botTaunts", "radar", "radarPlayers", "radarVs", "anchorRange", "anchorSpeed", "fallStagger", "grenadeCount", "grenadePickup", "quickResupply", "rounds", "switchSides", "radarTeam",
 	"explosionStagger", "anchorStagger", "meleeStagger", "massiveShot", "massiveThreshold"};
@@ -3452,9 +3453,8 @@ void SetupBuild(const uint8_t* rules)
 	case kSetupStagger: {
 		g_setupTitle = "Stagger";
 		std::map<std::string, int>& x = GameRulesExtras();
-		if (StockRow(c, 0x36)) {
-			valueRow(0x36); // Bullet Stagger (and any hit not told apart)
-		}
+		// Bullet Stagger (rules byte 0x36, any hit not told apart): our own row, the game's stepper only knows its own pages
+		navRow(kKindOwn, kActNone, kOwnBulletStagger, "Bullet Stagger", kStaggerNames[rules[0x36] % kStaggerValues]);
 		navRow(kKindOwn, kActNone, 17, "Explosion Stagger", kStaggerNames[x["explosionStagger"] % kStaggerValues]);
 		navRow(kKindOwn, kActNone, 18, "Anchor Stagger", kStaggerNames[x["anchorStagger"] % kStaggerValues]);
 		navRow(kKindOwn, kActNone, 19, "Melee Stagger", kStaggerNames[x["meleeStagger"] % kStaggerValues]);
@@ -3541,8 +3541,9 @@ void SetupShow(uint8_t* screen, const uint8_t* rules)
 		values += (r ? "|" : "") + row.value;
 		int kind = 0; // for the Flash: 1 a value row of ours, 2 can go left, 4 can go right
 		if (row.kind == kKindOwn) {
-			int value = GameRulesExtras()[kBotRuleKeys[row.arg]];
-			kind = 1 | (value > 0 ? 2 : 0) | (value < kBotRuleCounts[row.arg] - 1 ? 4 : 0);
+			bool bullet = row.arg == kOwnBulletStagger;
+			int value = bullet ? rules[0x36] % kStaggerValues : GameRulesExtras()[kBotRuleKeys[row.arg]];
+			kind = 1 | (value > 0 ? 2 : 0) | (value < (bullet ? kStaggerValues : kBotRuleCounts[row.arg]) - 1 ? 4 : 0);
 			if (row.arg == 0 && g_setupBotMatch) {
 				kind = 1; // a Bot Match has bots: the row shows it, no arrows
 			}
@@ -4053,7 +4054,19 @@ void __attribute__((thiscall)) CreateTick(uint8_t* screen)
 	}
 	if (now.kind == kKindOwn) {
 		int dir = (pressed & kKeyRight) || (clicked && mouse == kMouseValueR) ? 1 : (pressed & kKeyLeft) || (clicked && mouse == kMouseValueL) ? -1 : 0;
-		if (dir && !(now.arg == 0 && g_setupBotMatch)) {
+		if (dir && now.arg == kOwnBulletStagger) {
+			int at = rules[0x36] % kStaggerValues + dir;
+			if (at >= 0 && at < kStaggerValues) {
+				rules[0x36] = (uint8_t)at;
+				g_menu[kRowStagger] = at;
+				g_menuSeen = true;
+				g_setupEdited = true;
+				GameRulesSaveCurrent(rules, g_setupProfile, g_setupEdited);
+				MenuSound(screen, kSoundMove);
+				SetupShow(screen, rules);
+			}
+		}
+		else if (dir && !(now.arg == 0 && g_setupBotMatch)) {
 			int& value = GameRulesExtras()[kBotRuleKeys[now.arg]];
 			int at = value + dir;
 			if (at >= 0 && at < kBotRuleCounts[now.arg]) {
