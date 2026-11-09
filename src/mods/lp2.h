@@ -22,6 +22,7 @@ const char* BuildName(int build);
 // (" 1.000" / " 1.100" in .rdata). Hooks use their table's row for it.
 int GameBuild();
 void CrashLogInstall(); // logs faults (module + offset, registers, call trail) to the xlive log
+void MemoryLogNow(const char* why); // address space free / largest block / limit to the log
 
 // Hooks the game's file opens so files in enabled mod folders replace the game's own
 // (mods/<name>/nativePC/... overrides <game>/nativePC/...). Called from DllMain.

@@ -149,10 +149,107 @@ void Terminate()
 	abort();
 }
 
+namespace {
+
+// Address space: LP2 is 32-bit, 2 GB unless the exe is Large Address Aware (4 GB on a 64-bit system). The game's
+// "ERR08 : Memory overrun" (a failed CreateTexture2D / allocation) is most likely that running out, so the log shows
+// the limit at start, then free space and the largest free block (big textures need one piece) every 30 s while it
+// moved by 64 MB or more, and at every game message box.
+struct Space {
+	uint64_t limitMb, freeMb, largestMb, reservedMb, committedMb;
+};
+
+Space MeasureSpace()
+{
+	Space s{};
+	MEMORYSTATUSEX ms{sizeof ms};
+	if (GlobalMemoryStatusEx(&ms)) {
+		s.limitMb = ms.ullTotalVirtual >> 20;
+	}
+	SYSTEM_INFO si;
+	GetSystemInfo(&si);
+	uintptr_t at = (uintptr_t)si.lpMinimumApplicationAddress, end = (uintptr_t)si.lpMaximumApplicationAddress;
+	uint64_t free = 0, largest = 0, reserved = 0, committed = 0;
+	MEMORY_BASIC_INFORMATION mbi;
+	while (at < end && VirtualQuery((void*)at, &mbi, sizeof mbi) == sizeof mbi) {
+		if (mbi.State == MEM_FREE) {
+			free += mbi.RegionSize;
+			largest = mbi.RegionSize > largest ? mbi.RegionSize : largest;
+		}
+		else if (mbi.State == MEM_RESERVE) {
+			reserved += mbi.RegionSize;
+		}
+		else {
+			committed += mbi.RegionSize;
+		}
+		uintptr_t next = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+		if (next <= at) {
+			break;
+		}
+		at = next;
+	}
+	s.freeMb = free >> 20;
+	s.largestMb = largest >> 20;
+	s.reservedMb = reserved >> 20;
+	s.committedMb = committed >> 20;
+	return s;
+}
+
+void LogSpace(const char* why, const Space& s)
+{
+	XLS_LOG_INFO("memory (%s): %llu MB free of %llu MB (largest free block %llu MB), %llu MB committed, %llu MB reserved.", why,
+	             (unsigned long long)s.freeMb, (unsigned long long)s.limitMb, (unsigned long long)s.largestMb,
+	             (unsigned long long)s.committedMb, (unsigned long long)s.reservedMb);
+}
+
+DWORD WINAPI SpaceThread(LPVOID)
+{
+	uint64_t lastFree = ~0ull, lowest = ~0ull;
+	for (;; Sleep(30000)) {
+		Space s = MeasureSpace();
+		lowest = s.freeMb < lowest ? s.freeMb : lowest;
+		if (lastFree == ~0ull || s.freeMb + 64 <= lastFree || s.freeMb >= lastFree + 64) {
+			LogSpace(s.freeMb == lowest ? "now, the lowest so far" : "now", s);
+			lastFree = s.freeMb;
+		}
+	}
+	return 0;
+}
+
+}
+
+void MemoryLogNow(const char* why)
+{
+	LogSpace(why, MeasureSpace());
+}
+
+namespace {
+
+void SpaceStart()
+{
+	HMODULE exe = GetModuleHandleW(nullptr);
+	bool laa = false;
+	if (exe) {
+		auto* dos = (IMAGE_DOS_HEADER*)exe;
+		auto* nt = (IMAGE_NT_HEADERS*)((uint8_t*)exe + dos->e_lfanew);
+		laa = (nt->FileHeader.Characteristics & IMAGE_FILE_LARGE_ADDRESS_AWARE) != 0;
+	}
+	Space s = MeasureSpace();
+	XLS_LOG_INFO("memory: the exe is %sLarge Address Aware; this process can use %llu MB%s.", laa ? "" : "not ",
+	             (unsigned long long)s.limitMb,
+	             s.limitMb < 3000 ? " (2 GB: big mods can run out, see the LAA section of LP2-MODS.md)" : "");
+	if (HANDLE t = CreateThread(nullptr, 0, SpaceThread, nullptr, 0, nullptr)) {
+		CloseHandle(t);
+	}
+}
+
+}
+
 void CrashLogInstall()
 {
 	AddVectoredExceptionHandler(0, Handler);
 	std::set_terminate(Terminate);
+	SpaceStart();
 }
 
 }

@@ -279,6 +279,7 @@ void CopyToClipboard(HWND owner, const std::wstring& text)
 int WINAPI HookMessageBoxA(HWND owner, LPCSTR text, LPCSTR caption, UINT type)
 {
 	XLS_LOG_ERROR("game message box \"%s\": %s", caption ? caption : "", text ? text : "");
+	MemoryLogNow("at the message box");
 	if (!text || (type & MB_TYPEMASK) != MB_OK) {
 		return g_messageBoxA(owner, text, caption, type);
 	}
