@@ -3963,6 +3963,306 @@ void __attribute__((thiscall)) CreateTick(uint8_t* screen)
 	}
 }
 
+using IsHostFn = char(__attribute__((thiscall)) *)(void*);
+IsHostFn g_isHost = nullptr;
+uint8_t** g_lobbySession = nullptr;
+
+// Lobby Match Settings: the host changes our own rules from the lobby, on the overlay, without backing out to Create Match.
+// Every row here reaches the other players the way our rules always do (SyncThread publishes Own() as member data, clients
+// take the owner's), so nothing new goes over the network. The game's own rules (time, score, map, mode) stay in its
+// Game Options for now: a client's copy of those comes from the session, not from us.
+// F1 (or the Save Profile button) opens and closes it; up / down pick a row, left / right change it, Back closes it.
+// While it's open the lobby gets no input.
+struct LobbyRow {
+	const char* section;
+	const char* label;
+	int menuRow; // a g_menu row (kRowDefs), or -1
+	int own;     // a kBotRuleKeys index, or -1
+};
+const LobbyRow kLobbyRows[] = {
+	{"Rounds", "Rounds", -1, 14},
+	{"Rounds", "Switch Side Every # Rounds", -1, 15},
+	{"Player", "Default Secondary", kRowSecondary, -1},
+	{"Player", "Harmonizer", kRowHarmonizer, -1},
+	{"Player", "Grenades at Spawn", -1, 11},
+	{"Stagger", "Bullet Stagger", kRowStagger, -1},
+	{"Stagger", "Explosion Stagger", -1, 17},
+	{"Stagger", "Anchor Stagger", -1, 18},
+	{"Stagger", "Melee Stagger", -1, 19},
+	{"Stagger", "Fall Stagger", -1, 10},
+	{"Weapons", "Infinite Ammo", kRowInfinite, -1},
+	{"Weapons", "Ammo Supply", kRowSupply, -1},
+	{"Weapons", "Grenade Pickups", -1, 12},
+	{"Weapons", "Quick Resupply", -1, 13},
+	{"Anchor", "Range", -1, 8},
+	{"Anchor", "Speed", -1, 9},
+	{"Radar", "Radar", -1, 5},
+	{"Radar", "Players Show", -1, 6},
+	{"Radar", "VS Show", -1, 7},
+	{"Radar", "Team Colours", -1, 16},
+	{"Bots", "Bots", -1, 0},
+	{"Bots", "Difficulty", -1, 1},
+	{"Bots", "Brain", -1, 2},
+	{"Bots", "Personality", -1, 3},
+	{"Bots", "Taunts", -1, 4},
+};
+const int kLobbyRowCount = (int)(sizeof(kLobbyRows) / sizeof(kLobbyRows[0]));
+
+std::string OwnValueName(int own, int v)
+{
+	switch (own) {
+	case 0: return v ? "Fill to " + std::to_string(g_matchDesired) + " Players" : "Off";
+	case 1: return kDifficultyNames[v & 3];
+	case 2: return kBrainNames[v & 1];
+	case 3: return kPersonaNames[v % 6];
+	case 4: return kTauntNames[v & 3];
+	case 5: return kRadarNames[v % 3];
+	case 6: case 7: return kDetectNames[v % 4];
+	case 8: return kGrappleNames[v % kGrappleValues];
+	case 9: return kGrappleNames[(v + 1) % kGrappleValues];
+	case 10: return kStaggerNames[v & 3];
+	case 11: return v ? std::to_string(v - 1) : "Default";
+	case 12: return v ? std::to_string(v) : "Default";
+	case 13: case 16: return v ? "On" : "Off";
+	case 14: return RoundsName(v);
+	case 15: return v ? std::to_string(v) : "Never";
+	default: return kStaggerNames[v % kStaggerValues];
+	}
+}
+
+std::string MenuValueName(int row, int v)
+{
+	switch (row) {
+	case kRowSecondary: return kSecondaryNames[v % kSecondaryValues];
+	case kRowInfinite: return kInfiniteNames[v % kInfiniteValues];
+	case kRowSupply: return kSupplyNames[v % kSupplyValues];
+	case kRowStagger: return kStaggerNames[v % kStaggerValues];
+	default: return v ? "On" : "Off";
+	}
+}
+
+struct LobbyLine {
+	std::string section, label, value;
+};
+std::mutex g_lobbyPanelMutex;
+std::vector<LobbyLine> g_lobbyLines; // the draw's copy
+int g_lobbyCursorShown = 0;
+std::atomic<bool> g_lobbyPanelOpen{false}, g_lobbyHost{false};
+std::atomic<DWORD> g_lobbySeenAt{0};
+int g_lobbyCursor = 0;
+bool g_lobbyChanged = false, g_lobbyCarry = false; // carry: the next create screen takes the panel's g_menu rows
+uint32_t g_lobbyButtonsWas = 0;
+bool g_lobbyKeyWas = false;
+
+void LobbyPanelSnapshot()
+{
+	std::map<std::string, int>& x = GameRulesExtras();
+	std::vector<LobbyLine> lines;
+	for (const LobbyRow& r : kLobbyRows) {
+		std::string value = r.own >= 0 ? OwnValueName(r.own, x[kBotRuleKeys[r.own]]) : MenuValueName(r.menuRow, g_menu[r.menuRow]);
+		lines.push_back({r.section, r.label, value});
+	}
+	std::lock_guard<std::mutex> lock(g_lobbyPanelMutex);
+	g_lobbyLines.swap(lines);
+	g_lobbyCursorShown = g_lobbyCursor;
+}
+
+void LobbyPanelStep(int dir)
+{
+	const LobbyRow& r = kLobbyRows[g_lobbyCursor];
+	bool changed = false;
+	if (r.own >= 0) {
+		int& value = GameRulesExtras()[kBotRuleKeys[r.own]];
+		int at = value + dir;
+		if (at >= 0 && at < kBotRuleCounts[r.own]) {
+			value = at;
+			BotRulesSync();
+			changed = true;
+		}
+	}
+	else {
+		int n = kRowDefs[r.menuRow].values, was = g_menu[r.menuRow] % n, at = was + dir;
+		if (r.menuRow == kRowSupply) { // least to most, no wrap, as on the create screen
+			at = at < 0 || at >= n ? was : at;
+		}
+		else {
+			at = (at + n) % n;
+		}
+		g_menu[r.menuRow] = at;
+		g_menuSeen = true;
+		changed = at != was;
+	}
+	if (changed) {
+		g_lobbyChanged = true;
+		XLS_LOG_INFO("mods: lobby settings: %s %s.", r.label, (r.own >= 0 ? OwnValueName(r.own, GameRulesExtras()[kBotRuleKeys[r.own]]) : MenuValueName(r.menuRow, g_menu[r.menuRow])).c_str());
+	}
+}
+
+// The panel's changes into current.json, so a fresh start loads them (the file's own rule bytes, ours written over).
+void LobbyPanelSave()
+{
+	if (!g_lobbyChanged) {
+		return;
+	}
+	g_lobbyChanged = false;
+	g_lobbyCarry = true;
+	g_setupEdited = true;
+	std::map<std::string, int> keep = GameRulesExtras();
+	uint8_t rules[0x40] = {};
+	std::string profile;
+	bool edited = false;
+	bool have = GameRulesLoadCurrent(rules, &profile, &edited);
+	GameRulesExtras() = keep; // the load puts the file's extras back
+	BotRulesSync();
+	if (!have) {
+		XLS_LOG_WARN("mods: lobby settings: no current.json to save into (rules kept for this session).");
+		return;
+	}
+	for (int i = 0; i < kRows; i++) {
+		rules[kRowDefs[i].offset] = (uint8_t)g_menu[i];
+	}
+	GameRulesSaveCurrent(rules, profile, true);
+	XLS_LOG_INFO("mods: lobby settings: saved to current.json.");
+}
+
+// From the lobby's input, each tick. True while the panel is open (the lobby then gets no input).
+bool LobbyPanelTick()
+{
+	g_lobbySeenAt = GetTickCount();
+	bool host = g_isHost && g_lobbySession && *g_lobbySession && g_isHost(*g_lobbySession) == 1;
+	g_lobbyHost = host;
+	if (!host || !g_input || !*g_input) {
+		if (g_lobbyPanelOpen) {
+			g_lobbyPanelOpen = false;
+			LobbyPanelSave();
+		}
+		return false;
+	}
+	uint32_t pressed = *(uint32_t*)(*g_input + kInputPressed);
+	uint32_t buttons = *(uint32_t*)(*g_input + kInputButtons);
+	uint32_t down = buttons & ~g_lobbyButtonsWas;
+	g_lobbyButtonsWas = buttons;
+	if (down) {
+		static int logged = 0;
+		if (logged++ < 20) {
+			XLS_LOG_INFO("mods: lobby settings: buttons %08x pressed (keys %08x).", down, pressed);
+		}
+	}
+	HWND front = GetForegroundWindow();
+	DWORD process = 0;
+	GetWindowThreadProcessId(front, &process);
+	bool key = process == GetCurrentProcessId() && (GetAsyncKeyState(VK_F1) & 0x8000);
+	bool toggle = (key && !g_lobbyKeyWas) || (down & kButtonSave);
+	g_lobbyKeyWas = key;
+	if (!g_lobbyPanelOpen) {
+		if (toggle) {
+			g_lobbyPanelOpen = true;
+			g_lobbyCursor = std::min(g_lobbyCursor, kLobbyRowCount - 1);
+			LobbyPanelSnapshot();
+			XLS_LOG_INFO("mods: lobby settings: opened.");
+			return true;
+		}
+		return false;
+	}
+	if (toggle || (down & kButtonBack)) {
+		g_lobbyPanelOpen = false;
+		LobbyPanelSave();
+		XLS_LOG_INFO("mods: lobby settings: closed.");
+		return true;
+	}
+	if (pressed & kKeyStepUp) {
+		g_lobbyCursor = (g_lobbyCursor + kLobbyRowCount - 1) % kLobbyRowCount;
+	}
+	else if (pressed & kKeyStepDown) {
+		g_lobbyCursor = (g_lobbyCursor + 1) % kLobbyRowCount;
+	}
+	else if (pressed & (kKeyLeft | kKeyRight)) {
+		LobbyPanelStep(pressed & kKeyRight ? 1 : -1);
+	}
+	LobbyPanelSnapshot();
+	return true;
+}
+
+void LobbyPanelDraw(float width, float height)
+{
+	if (!g_lobbyHost || GetTickCount() - g_lobbySeenAt > 500) {
+		return;
+	}
+	ImFont* font = UiFont(false);
+	ImFont* big = UiFont(true);
+	if (!font || !big) {
+		return;
+	}
+	float scale = height / 720.0f;
+	ImDrawList* dl = ImGui::GetForegroundDrawList();
+	const ImU32 back = IM_COL32(8, 20, 32, 215), edge = IM_COL32(120, 200, 230, 140), text = IM_COL32(235, 248, 255, 255),
+	            dim = IM_COL32(150, 180, 200, 255), head = IM_COL32(120, 200, 230, 255), pick = IM_COL32(40, 110, 160, 200);
+	if (!g_lobbyPanelOpen) {
+		const char* hint = "F1  Match Settings";
+		ImVec2 t = font->CalcTextSizeA(font->FontSize, FLT_MAX, 0, hint);
+		float pad = 8 * scale, x = width - t.x - pad * 2 - 16 * scale, y = 16 * scale;
+		dl->AddRectFilled(ImVec2(x, y), ImVec2(x + t.x + pad * 2, y + t.y + pad), back, 5 * scale);
+		dl->AddText(font, font->FontSize, ImVec2(x + pad, y + pad / 2), text, hint);
+		return;
+	}
+	std::vector<LobbyLine> lines;
+	int cursor = 0;
+	{
+		std::lock_guard<std::mutex> lock(g_lobbyPanelMutex);
+		lines = g_lobbyLines;
+		cursor = g_lobbyCursorShown;
+	}
+	if (lines.empty()) {
+		return;
+	}
+	// rows and their section headers as one list, a window of it around the cursor
+	struct Item {
+		bool header;
+		int row;
+	};
+	std::vector<Item> items;
+	int cursorItem = 0;
+	for (int i = 0; i < (int)lines.size(); i++) {
+		if (i == 0 || lines[i].section != lines[i - 1].section) {
+			items.push_back({true, i});
+		}
+		if (i == cursor) {
+			cursorItem = (int)items.size();
+		}
+		items.push_back({false, i});
+	}
+	float line = font->FontSize * 1.35f, pad = 14 * scale, w = 520 * scale;
+	int visible = std::max(6, (int)((height * 0.7f - big->FontSize - line * 2) / line));
+	int first = std::clamp(cursorItem - visible / 2, 0, std::max(0, (int)items.size() - visible));
+	int shown = std::min(visible, (int)items.size() - first);
+	float h = pad * 2 + big->FontSize + line * 0.5f + shown * line + line * 1.5f;
+	float x = (width - w) / 2, y = (height - h) / 2;
+	dl->AddRectFilled(ImVec2(x, y), ImVec2(x + w, y + h), back, 8 * scale);
+	dl->AddRect(ImVec2(x, y), ImVec2(x + w, y + h), edge, 8 * scale, 0, 1.5f * scale);
+	dl->AddText(big, big->FontSize, ImVec2(x + pad, y + pad), text, "Match Settings");
+	float cy = y + pad + big->FontSize + line * 0.5f;
+	for (int k = first; k < first + shown; k++, cy += line) {
+		const Item& it = items[k];
+		const LobbyLine& l = lines[it.row];
+		if (it.header) {
+			dl->AddText(font, font->FontSize, ImVec2(x + pad, cy + (line - font->FontSize) / 2), head, l.section.c_str());
+			continue;
+		}
+		bool on = it.row == cursor;
+		if (on) {
+			dl->AddRectFilled(ImVec2(x + pad / 2, cy), ImVec2(x + w - pad / 2, cy + line), pick, 4 * scale);
+		}
+		float ty = cy + (line - font->FontSize) / 2;
+		dl->AddText(font, font->FontSize, ImVec2(x + pad + 16 * scale, ty), on ? text : dim, l.label.c_str());
+		std::string value = on ? "<  " + l.value + "  >" : l.value;
+		ImVec2 v = font->CalcTextSizeA(font->FontSize, FLT_MAX, 0, value.c_str());
+		dl->AddText(font, font->FontSize, ImVec2(x + w - pad - v.x, ty), on ? text : dim, value.c_str());
+	}
+	const char* help = "Up/Down select   Left/Right change   Back / F1 close";
+	ImVec2 hs = font->CalcTextSizeA(font->FontSize, FLT_MAX, 0, help);
+	dl->AddText(font, font->FontSize, ImVec2(x + (w - hs.x) / 2, y + h - pad - font->FontSize), dim, help);
+}
+
 // Bots in player matches (Public and System Link; Ranked has its own lobby screen, uIdBattleRankLobby). Campaign co-op already
 // does this: its host marks free slots AI (FUN_00828ca0), sends the mask (message 7, FUN_01011df0) and every client marks the
 // same slots (FUN_01012710 case 7). Ours does the same just before the host's match start (FUN_00e97130).
@@ -3974,7 +4274,6 @@ using SlotAiFn = void(__attribute__((thiscall)) *)(uint8_t*, uint32_t);
 using NetMakeFn = uint8_t*(__cdecl*)(uint32_t);
 using NetSendFn = void(__cdecl*)(uint8_t*);
 using NetFillFn = void(__attribute__((thiscall)) *)(uint8_t*, uint32_t);
-using IsHostFn = char(__attribute__((thiscall)) *)(void*);
 LobbyFn g_lobbyInputOriginal = nullptr, g_lobbyPromptOriginal = nullptr;
 LobbyTickFn g_lobbyStartOriginal = nullptr, g_lobbyLeaveOriginal = nullptr;
 SlotAiFn g_slotAi = nullptr;
@@ -4007,8 +4306,6 @@ void __attribute__((thiscall)) SlotAiLook(uint8_t* slots, uint32_t slot)
 NetMakeFn g_netMake = nullptr;
 NetSendFn g_netSend = nullptr;
 NetFillFn g_netFill = nullptr;
-IsHostFn g_isHost = nullptr;
-uint8_t** g_lobbySession = nullptr;
 uint8_t** g_lobbySlots = nullptr;
 const uint32_t kLobbyMembers = 0x5b0, kLobbyPhase = 0x1a, kLobbyStep = 0x1b, kSlotsMax = 0x70, kSlotsTeams = 0x87, kSlotOccupied = 0x1ac, kSlotAi = 0x1b1, kLobbyLeaveState = 0x19;
 const uint32_t kNetMessage = 0x42000002;
@@ -4039,11 +4336,34 @@ void LobbyBoosted(uint8_t* screen, int mode, LobbyFn original)
 
 void __attribute__((thiscall)) LobbyInput(uint8_t* screen, int mode)
 {
+	if (LobbyPanelTick() && g_input && *g_input) {
+		// the panel has the input: the lobby runs on with none
+		uint32_t& pressed = *(uint32_t*)(*g_input + kInputPressed);
+		uint32_t& buttons = *(uint32_t*)(*g_input + kInputButtons);
+		uint32_t heldPressed = pressed, heldButtons = buttons;
+		pressed = 0;
+		buttons = 0;
+		LobbyBoosted(screen, mode, g_lobbyInputOriginal);
+		pressed = heldPressed;
+		buttons = heldButtons;
+		return;
+	}
 	LobbyBoosted(screen, mode, g_lobbyInputOriginal);
 }
 
 void __attribute__((thiscall)) LobbyPrompt(uint8_t* screen, int mode)
 {
+	if (g_lobbyPanelOpen && g_input && *g_input) {
+		uint32_t& pressed = *(uint32_t*)(*g_input + kInputPressed);
+		uint32_t& buttons = *(uint32_t*)(*g_input + kInputButtons);
+		uint32_t heldPressed = pressed, heldButtons = buttons;
+		pressed = 0;
+		buttons = 0;
+		LobbyBoosted(screen, mode, g_lobbyPromptOriginal);
+		pressed = heldPressed;
+		buttons = heldButtons;
+		return;
+	}
 	LobbyBoosted(screen, mode, g_lobbyPromptOriginal);
 }
 
@@ -4180,6 +4500,9 @@ void BotsLobbyInstall(uint8_t* base, int build)
 	g_lobbyPromptOriginal = (LobbyFn)Detour(base + (kPrompt[build] - 0x400000), kPromptPrologue, sizeof(kPromptPrologue), (void*)&LobbyPrompt);
 	g_lobbyStartOriginal = (LobbyTickFn)Detour(base + (kStart[build] - 0x400000), kStartPrologue, sizeof(kStartPrologue), (void*)&LobbyStart);
 	g_lobbyLeaveOriginal = (LobbyTickFn)Detour(base + (kLeave[build] - 0x400000), kLeavePrologue, sizeof(kLeavePrologue), (void*)&LobbyLeave);
+	if (g_lobbyInputOriginal && g_input) {
+		UiAddLayer("lobby settings", LobbyPanelDraw);
+	}
 	if (!g_lobbyInputOriginal || !g_lobbyPromptOriginal || !g_lobbyStartOriginal || !g_lobbyLeaveOriginal) {
 		XLS_LOG_WARN("mods: bots: lobby code not recognised: input %d, prompt %d, start %d, leave %d.", g_lobbyInputOriginal != nullptr,
 		             g_lobbyPromptOriginal != nullptr, g_lobbyStartOriginal != nullptr, g_lobbyLeaveOriginal != nullptr);
@@ -4198,6 +4521,12 @@ void __attribute__((thiscall)) PushRules(void* screen, uint8_t* rules)
 	g_pushRulesOriginal(screen, rules);
 	if (!rules) {
 		return;
+	}
+	if (g_lobbyCarry) { // rows changed from the lobby's Match Settings since this screen was last up
+		g_lobbyCarry = false;
+		for (int i = 0; i < kRows; i++) {
+			rules[kRowDefs[i].offset] = (uint8_t)g_menu[i];
+		}
 	}
 	if (rules[kRuleOldGrenades] == 1) { // saved with the separate Unlimited Grenades row
 		rules[kRowDefs[kRowInfinite].offset] = (rules[kRowDefs[kRowInfinite].offset] & kInfiniteAmmo) | kInfiniteGrenades;
