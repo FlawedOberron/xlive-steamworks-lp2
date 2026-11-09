@@ -4744,6 +4744,11 @@ int RulesSlotOf(const uint8_t* character)
 	return -1;
 }
 
+unsigned char* RulesController(int slot)
+{
+	return g_controllers && slot >= 0 && slot < 16 ? g_controllers[slot] : nullptr;
+}
+
 int RulesLocalSlot()
 {
 	return g_localIndex;

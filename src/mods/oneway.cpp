@@ -198,6 +198,7 @@ void __fastcall CharUpdate(uint8_t* unit)
 	if (g_force || ForceThrowing()) {
 		ForceUnit(unit, Kind(unit, false));
 	}
+	JeepUnit(unit);
 }
 
 void __fastcall ShellUpdate(uint8_t* unit)

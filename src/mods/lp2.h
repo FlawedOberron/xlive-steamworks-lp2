@@ -174,6 +174,7 @@ void ScriptSetMap(const MapPhysics* physics);
 // The jeep test (jeep_drive.cpp): JeepSetMap at area load (online map number, -1 none), JeepFrame from the HUD update.
 void JeepSetMap(int onlineMap);
 void JeepFrame();
+void JeepUnit(unsigned char* unit); // every character's update (oneway.cpp), after the game's own
 void ScriptCharacter(unsigned char* character);
 bool ScriptVolumeOn(int sid);
 // A script volume's setting (ScriptSetting) as a script has set it (fading to it), else base.
@@ -186,6 +187,7 @@ void MenuSound(void* screen, uint32_t id);
 std::string MapsOnlineText(uint32_t id); // the game's MsgOnline text in its language, "" before it has asked for one
 const char* RulesBattleMessage(uint32_t id); // MsgBattle: the Eliminated text while a battle message is being formatted, else null
 int RulesSlotOf(const uint8_t* character); // the match slot whose body it is, -1 none (AI, akrid)
+unsigned char* RulesController(int slot); // the slot's entry (pad, +0x480 player, +0x484 camera), null none
 int RulesLocalSlot();                      // the local player's match slot, -1 not known
 // the local player's camera (eye, look-at point, up; fov as the game holds it): false when there is none
 bool RulesCamera(float eye[3], float target[3], float up[3], float* fov);

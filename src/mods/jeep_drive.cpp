@@ -22,6 +22,7 @@
 #include <string.h>
 
 #include <algorithm>
+#include <unordered_map>
 #include <vector>
 
 namespace xls::mods {
@@ -56,13 +57,21 @@ bool g_on = false;              // jeep.txt, read at map load
 float g_lift = 0.0f;            // jeep.txt "height=<cm>": raises the VS above the ground point (its model's origin height)
 float g_turn = 0.0f;            // jeep.txt "yaw=<degrees>": the model's facing against the jeep's (+Z forward)
 
-jeep::Params g_params;
-jeep::State g_state;
-unsigned char* g_vs = nullptr;  // the VS being driven
-bool g_quatMode = false;        // +0x40 holds a rotation quaternion (checked on entry): write it; else SetAngle (yaw)
-double g_last = 0.0, g_logAt = 0.0;
-double g_hitAt[16];
-float g_prevPos[16][3];
+jeep::Params g_params;          // shared (Init fills the derived values)
+
+// every VS on the map is a jeep: its own state, stepped from its update (after the game's own move, which we replace)
+struct Car {
+	jeep::State state;
+	bool quatMode = false;      // +0x40 holds a rotation quaternion (checked at first sight): written; else SetAngle (yaw)
+	double last = 0.0, seen = 0.0;
+	double hitAt[16] = {};
+	float prevPos[16][3];
+};
+std::unordered_map<unsigned char*, Car> g_cars;
+unsigned char* g_driven = nullptr; // the VS the local player rides (HUD frame), gets the keys
+jeep::Input g_input;            // the local driver's input, this frame
+const char* g_how = "";         // how the ride was found (logged)
+double g_logAt = 0.0, g_probeAt = 0.0;
 double g_freq = 0.0;
 
 double Now()
@@ -232,61 +241,117 @@ float Len(const float* q, int n)
 	return sqrtf(s);
 }
 
-void Enter(unsigned char* vs)
+
+template <typename T>
+bool Read(const void* at, T* out)
 {
-	g_vs = vs;
-	const float* pos = (const float*)(vs + 0x30);
-	float q[4];
-	memcpy(q, vs + 0x40, 16);
-	g_quatMode = fabsf(Len(q, 4) - 1.0f) < 0.02f;
-	float yaw = 0.0f;
-	if (g_quatMode) {
-		yaw = jeep::Yaw(jeep::Quat{q[0], q[1], q[2], q[3]});
-	}
-	else {
-		float eye[3], target[3], up[3], fov;
-		if (RulesCamera(eye, target, up, &fov)) {
-			yaw = atan2f(target[0] - eye[0], target[2] - eye[2]);
-		}
-	}
-	g_params = jeep::Params();
-	jeep::Init(&g_params, &g_state, {pos[0], pos[1] + kFoot + 20.0f, pos[2]}, yaw);
-	g_last = Now();
-	XLS_LOG_INFO("mods: jeep: driving the VS at %.0f %.0f %.0f (+0x40 %.3f %.3f %.3f %.3f, %s; yaw %.0f deg; type byte +0x1f %u).", pos[0],
-		pos[1], pos[2], q[0], q[1], q[2], q[3], g_quatMode ? "a quaternion: written each frame" : "not a quaternion: SetAngle, yaw only",
-		yaw * 57.2958f, vs[0x1f]);
+	SIZE_T got = 0;
+	return (uintptr_t)at >= 0x10000 && ReadProcessMemory(GetCurrentProcess(), at, out, sizeof(T), &got) && got == sizeof(T);
 }
 
-void RunOvers(int self)
+bool IsVs(unsigned char* p)
+{
+	uint8_t type = 0;
+	return Read(p + 0x1f, &type) && type == 2;
+}
+
+float Dist2(const unsigned char* a, const unsigned char* b)
+{
+	const float* p = (const float*)(a + 0x30);
+	const float* q = (const float*)(b + 0x30);
+	return (p[0] - q[0]) * (p[0] - q[0]) + (p[1] - q[1]) * (p[1] - q[1]) + (p[2] - q[2]) * (p[2] - q[2]);
+}
+
+// The VS the local player rides, or null: the body itself (if the game swaps it), the body the camera follows, or a
+// pointer to one of the map's VS in the human / the slot's entry while the human is on it (within 3 m).
+unsigned char* FindRide(int self)
+{
+	unsigned char* ctl = RulesController(self);
+	unsigned char* body = RulesBody(self);
+	if (!ctl || (uintptr_t)body < 0x10000) {
+		return nullptr;
+	}
+	if (IsVs(body)) {
+		g_how = "the player's body";
+		return body;
+	}
+	unsigned char *cam = nullptr, *watched = nullptr;
+	if (Read(ctl + 0x484, &cam) && Read(cam + 0x200, &watched) && watched != body && IsVs(watched)) {
+		g_how = "the camera's body";
+		return watched;
+	}
+	for (auto& [vs, car] : g_cars) {
+		if (Dist2(vs, body) > 300.0f * 300.0f) {
+			continue;
+		}
+		for (unsigned char* obj : {body, ctl}) {
+			uint32_t span = obj == body ? 0x2400 : 0x600;
+			for (uint32_t off = 0; off < span; off += 4) {
+				unsigned char* p = nullptr;
+				if (Read(obj + off, &p) && p == vs) {
+					static char how[64];
+					snprintf(how, sizeof(how), "%s +0x%x", obj == body ? "the human" : "the slot's entry", off);
+					g_how = how;
+					return vs;
+				}
+			}
+		}
+	}
+	return nullptr;
+}
+
+void Pose(unsigned char* vs, Car& car)
+{
+	Vec3 foot = jeep::ToWorld(car.state, {0, -kFoot + g_lift, 0});
+	float pos[3] = {foot.x, foot.y, foot.z};
+	if (car.quatMode) {
+		CharacterPlace(vs, pos, nullptr);
+		jeep::Quat r = car.state.rot;
+		if (g_turn != 0.0f) { // r * (turn about Y)
+			float s = sinf(g_turn / 2), c = cosf(g_turn / 2);
+			r = {r.x * c - r.z * s, r.y * c + r.w * s, r.z * c + r.x * s, r.w * c - r.y * s};
+		}
+		float q[4] = {r.x, r.y, r.z, r.w};
+		memcpy(vs + 0x40, q, 16);
+	}
+	else {
+		float euler[3] = {0.0f, jeep::Yaw(car.state.rot) + g_turn, 0.0f};
+		CharacterPlace(vs, pos, euler);
+	}
+}
+
+void RunOvers(unsigned char* vs, Car& car, float dt)
 {
 	double now = Now();
 	for (int slot = 0; slot < 16; slot++) {
-		unsigned char* ch = slot == self ? nullptr : RulesBody(slot);
-		if (!ch || (uintptr_t)ch < 0x10000 || ch[0x1f] != 1) {
-			g_prevPos[slot][0] = NAN;
+		unsigned char* ch = RulesBody(slot);
+		if (!ch || (uintptr_t)ch < 0x10000 || ch[0x1f] != 1 || (vs == g_driven && slot == RulesLocalSlot())) {
+			car.prevPos[slot][0] = NAN;
 			continue;
 		}
 		const float* p = (const float*)(ch + 0x30);
 		jeep::Unit u;
 		u.pos = {p[0], p[1], p[2]};
-		float dt = (float)(now - g_last);
-		if (g_prevPos[slot][0] == g_prevPos[slot][0] && dt > 0.0f) {
-			u.vel = {(p[0] - g_prevPos[slot][0]) / dt, (p[1] - g_prevPos[slot][1]) / dt, (p[2] - g_prevPos[slot][2]) / dt};
+		if (car.prevPos[slot][0] == car.prevPos[slot][0] && dt > 0.0f) {
+			u.vel = {(p[0] - car.prevPos[slot][0]) / dt, (p[1] - car.prevPos[slot][1]) / dt, (p[2] - car.prevPos[slot][2]) / dt};
 		}
-		memcpy(g_prevPos[slot], p, 12);
+		memcpy(car.prevPos[slot], p, 12);
+		Vec3 d = Sub(u.pos, car.state.pos);
+		if (Dot(d, d) > 600.0f * 600.0f || now - car.hitAt[slot] < kRunOverCooldown) {
+			continue;
+		}
+		if (Dot(d, d) < 150.0f * 150.0f && fabsf(car.state.speed) < 300.0f) {
+			continue; // a rider (or someone getting in)
+		}
 		CharacterVitals v;
-		if (!CharacterStats(ch, &v) || v.life <= 0.0f || now - g_hitAt[slot] < kRunOverCooldown) {
+		if (!CharacterStats(ch, &v) || v.life <= 0.0f) {
 			continue;
 		}
-		Vec3 d = Sub(u.pos, g_state.pos);
-		if (Dot(d, d) > 600.0f * 600.0f) {
-			continue;
-		}
-		jeep::RunOverResult r = jeep::RunOver(g_params, &g_state, u);
+		jeep::RunOverResult r = jeep::RunOver(g_params, &car.state, u);
 		if (r.impact == jeep::Impact::None) {
 			continue;
 		}
-		g_hitAt[slot] = now;
+		car.hitAt[slot] = now;
 		float vel[3] = {r.unitVel.x, r.unitVel.y, r.unitVel.z};
 		ForceThrow(ch, vel);
 		float damage = 0.0f;
@@ -309,7 +374,8 @@ void RunOvers(int self)
 
 void JeepSetMap(int onlineMap)
 {
-	g_vs = nullptr;
+	g_cars.clear();
+	g_driven = nullptr;
 	g_on = GetFileAttributesW((Cfg().modCacheDir + L"jeep.txt").c_str()) != INVALID_FILE_ATTRIBUTES;
 	g_lift = 0.0f;
 	g_turn = 0.0f;
@@ -352,42 +418,119 @@ void JeepSetMap(int onlineMap)
 			XLS_LOG_INFO("mods: jeep: ModCache\\jeep.txt is on, but online map %d has no %ls: no jeep here.", onlineMap, name);
 		}
 	}
-	for (int i = 0; i < 16; i++) {
-		g_hitAt[i] = 0.0;
-		g_prevPos[i][0] = NAN;
+	g_params = jeep::Params();
+	jeep::State scratch;
+	jeep::Init(&g_params, &scratch, {}, 0.0f); // derived spring / drive values
+}
+
+// Every VS's update (oneway.cpp's wrapper, after the game's own): the jeep model moves it instead.
+void JeepUnit(unsigned char* vs)
+{
+	if (!g_on || !g_haveGround || vs[0x1f] != 2) {
+		return;
+	}
+	double now = Now();
+	auto it = g_cars.find(vs);
+	if (it == g_cars.end() || now - it->second.seen > 1.0) { // new (or its address reused)
+		if (g_cars.size() > 256) {
+			for (auto c = g_cars.begin(); c != g_cars.end();) {
+				c = now - c->second.seen > 1.0 ? g_cars.erase(c) : std::next(c);
+			}
+		}
+		Car& car = g_cars[vs];
+		car = Car();
+		for (auto& p : car.prevPos) {
+			p[0] = NAN;
+		}
+		const float* pos = (const float*)(vs + 0x30);
+		float q[4];
+		memcpy(q, vs + 0x40, 16);
+		car.quatMode = fabsf(Len(q, 4) - 1.0f) < 0.02f;
+		float yaw = car.quatMode ? jeep::Yaw(jeep::Quat{q[0], q[1], q[2], q[3]}) : 0.0f;
+		jeep::Init(&g_params, &car.state, {pos[0], pos[1] + kFoot + 20.0f - g_lift, pos[2]}, yaw);
+		car.last = car.seen = now;
+		XLS_LOG_INFO("mods: jeep: a jeep at %.0f %.0f %.0f (+0x40 %.3f %.3f %.3f %.3f: %s, yaw %.0f); %u on the map.", pos[0], pos[1], pos[2],
+			q[0], q[1], q[2], q[3], car.quatMode ? "a quaternion" : "not a quaternion: SetAngle, yaw only", yaw * 57.2958f,
+			(unsigned)g_cars.size());
+		return;
+	}
+	Car& car = it->second;
+	car.seen = now;
+	float dt = (float)std::min(0.1, now - car.last);
+	if (dt <= 0.0f) {
+		return;
+	}
+	car.last = now;
+	jeep::Input in;
+	if (vs == g_driven) {
+		in = g_input;
+	}
+	else {
+		in.lookYaw = jeep::Yaw(car.state.rot); // nobody driving: rolls, settles, brakes gently
+		in.throttle = fabsf(car.state.speed) > 50.0f && car.state.speed > 0 ? -0.15f : 0.0f;
+	}
+	jeep::Step(g_params, &car.state, in, dt, Ray, nullptr);
+	if (fabsf(car.state.speed) > g_params.runOverMin * 0.5f) {
+		RunOvers(vs, car, dt);
+	}
+	Pose(vs, car);
+	if (vs == g_driven && now >= g_logAt) {
+		g_logAt = now + 2.0;
+		Vec3 u = jeep::Rotate(car.state.rot, {0, 1, 0});
+		XLS_LOG_INFO("mods: jeep: driving: at %.0f %.0f %.0f, %.0f cm/s, %d wheel(s) down%s, up %.2f, yaw %.0f (want %.0f), throttle %.0f.",
+			car.state.pos.x, car.state.pos.y, car.state.pos.z, car.state.speed, car.state.groundedWheels, car.state.airborne ? ", airborne" : "", u.y,
+			jeep::Yaw(car.state.rot) * 57.2958f, in.lookYaw * 57.2958f, in.throttle);
 	}
 }
 
+// The HUD update: which jeep the local player drives, and their keys.
 void JeepFrame()
 {
 	if (!g_on || !g_haveGround) {
 		return;
 	}
 	int self = RulesLocalSlot();
-	unsigned char* body = self >= 0 ? RulesBody(self) : nullptr;
-	if (!body || (uintptr_t)body < 0x10000 || body[0x1f] != 2) {
-		if (g_vs) {
-			XLS_LOG_INFO("mods: jeep: left the VS.");
-			g_vs = nullptr;
-		}
-		return;
+	unsigned char* ride = self >= 0 ? FindRide(self) : nullptr;
+	if (ride && g_cars.find(ride) == g_cars.end()) {
+		ride = nullptr; // not updated through our hook yet
 	}
-	if (body != g_vs) {
-		Enter(body);
-		return;
+	if (ride != g_driven) {
+		if (ride) {
+			XLS_LOG_INFO("mods: jeep: driving the jeep at %.0f %.0f %.0f (found as %s).", ((float*)(ride + 0x30))[0], ((float*)(ride + 0x30))[1],
+				((float*)(ride + 0x30))[2], g_how);
+		}
+		else {
+			XLS_LOG_INFO("mods: jeep: out of the jeep.");
+		}
+		g_driven = ride;
 	}
 	double now = Now();
-	float dt = (float)std::min(0.1, now - g_last);
-	if (dt <= 0.0f) {
+	if (!ride && now >= g_probeAt && self >= 0) {
+		// not riding as far as we can tell: say what we see when a jeep is close (finding the ride pointer)
+		g_probeAt = now + 3.0;
+		unsigned char* body = RulesBody(self);
+		for (auto& [vs, car] : g_cars) {
+			if ((uintptr_t)body >= 0x10000 && Dist2(vs, body) < 400.0f * 400.0f) {
+				unsigned char *ctl = RulesController(self), *cam = nullptr, *watched = nullptr;
+				Read(ctl + 0x484, &cam);
+				Read(cam + 0x200, &watched);
+				XLS_LOG_INFO("mods: jeep: probe: a jeep %.0f cm from the local player (slot %d, body type %u, camera on %s), not seen as riding it.",
+					sqrtf(Dist2(vs, body)), self, body[0x1f], watched == body ? "the body" : watched == vs ? "the jeep" : "something else");
+				break;
+			}
+		}
+	}
+	if (!ride) {
 		return;
 	}
+	Car& car = g_cars[ride];
 	jeep::Input in;
-	float camYaw = jeep::Yaw(g_state.rot);
+	float camYaw = jeep::Yaw(car.state.rot);
 	float eye[3], target[3], up[3], fov;
 	if (RulesCamera(eye, target, up, &fov)) {
 		camYaw = atan2f(target[0] - eye[0], target[2] - eye[2]);
 	}
-	in.lookYaw = jeep::Yaw(g_state.rot); // no keys: coast straight
+	in.lookYaw = jeep::Yaw(car.state.rot); // no keys: coast straight
 	if (GameFocused()) {
 		// WASD is a direction relative to the camera: the jeep turns towards it and drives (D: 90 degrees right of the
 		// camera, W+D: 45). S alone brakes / reverses; S with A / D reverses steering that way
@@ -407,33 +550,7 @@ void JeepFrame()
 		in.airPitch = (Key(VK_UP) ? 1.0f : 0.0f) - (Key(VK_DOWN) ? 1.0f : 0.0f);
 		in.airRoll = (Key(VK_RIGHT) ? 1.0f : 0.0f) - (Key(VK_LEFT) ? 1.0f : 0.0f);
 	}
-	jeep::Step(g_params, &g_state, in, dt, Ray, nullptr);
-	RunOvers(self);
-	g_last = now;
-
-	Vec3 foot = jeep::ToWorld(g_state, {0, -kFoot + g_lift, 0});
-	float pos[3] = {foot.x, foot.y, foot.z};
-	if (g_quatMode) {
-		CharacterPlace(g_vs, pos, nullptr);
-		jeep::Quat r = g_state.rot;
-		if (g_turn != 0.0f) { // r * (turn about Y)
-			float s = sinf(g_turn / 2), c = cosf(g_turn / 2);
-			r = {r.x * c - r.z * s, r.y * c + r.w * s, r.z * c + r.x * s, r.w * c - r.y * s};
-		}
-		float q[4] = {r.x, r.y, r.z, r.w};
-		memcpy(g_vs + 0x40, q, 16);
-	}
-	else {
-		float euler[3] = {0.0f, jeep::Yaw(g_state.rot) + g_turn, 0.0f};
-		CharacterPlace(g_vs, pos, euler);
-	}
-	if (now >= g_logAt) {
-		g_logAt = now + 2.0;
-		Vec3 u = jeep::Rotate(g_state.rot, {0, 1, 0});
-		XLS_LOG_INFO("mods: jeep: at %.0f %.0f %.0f, %.0f cm/s, %d wheel(s) down%s, up %.2f, yaw %.0f (look %.0f), throttle %.0f.", pos[0],
-			pos[1], pos[2], g_state.speed, g_state.groundedWheels, g_state.airborne ? ", airborne" : "", u.y,
-			jeep::Yaw(g_state.rot) * 57.2958f, in.lookYaw * 57.2958f, in.throttle);
-	}
+	g_input = in;
 }
 
 }
