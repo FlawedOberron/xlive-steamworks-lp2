@@ -195,7 +195,7 @@ void __fastcall CharUpdate(uint8_t* unit)
 	if (!g_volumes.empty()) {
 		Check(unit, false);
 	}
-	if (g_force) {
+	if (g_force || ForceThrowing()) {
 		ForceUnit(unit, Kind(unit, false));
 	}
 }

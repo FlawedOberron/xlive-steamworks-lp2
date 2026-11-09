@@ -349,6 +349,20 @@ void CharacterAddEnergy(unsigned char* ch, float amount)
 	*energy = top > 0.0f && v > top ? top : v;
 }
 
+void CharacterPlace(unsigned char* ch, const float pos[3], const float* euler)
+{
+	if (!ch || !g_build) {
+		return;
+	}
+	for (uint32_t at : {0x30u, 0xd0u, g_build->oldPos, g_build->oldWorldPos}) {
+		memcpy(ch + at, pos, 12);
+	}
+	if (g_setAngle && euler) {
+		float e[4] = {euler[0], euler[1], euler[2], 0.0f};
+		g_setAngle(ch, nullptr, e);
+	}
+}
+
 void CharacterTeleport(unsigned char* ch, const float pos[3], float yaw)
 {
 	// the position (+0x30), its world copy (+0xd0) and both "old" ones the move sweeps collision from: no drag back

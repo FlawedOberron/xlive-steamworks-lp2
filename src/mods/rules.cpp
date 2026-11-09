@@ -1566,6 +1566,7 @@ void __attribute__((thiscall)) HudUpdate(uint8_t* hud)
 	}
 	LivesTick();
 	ModeFrame();
+	JeepFrame();
 	uint8_t** entry = (uint8_t**)(hud + kHudEntry);
 	uint8_t* own = *entry;
 	bool out = self >= 0 && self < 16 && own && own == g_controllers[self] && ((g_survival && SlotOut(self)) || RulesHeld(self));

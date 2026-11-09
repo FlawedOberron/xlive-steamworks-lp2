@@ -90,6 +90,9 @@ struct CharacterVitals {
 bool CharacterStats(const unsigned char* character, CharacterVitals* out);
 void CharacterDamage(unsigned char* character, float amount);    // the game's damage (deaths, kill feed, network)
 void CharacterAddEnergy(unsigned char* character, float amount); // T-Eng, kept within 0..its maximum
+// A character / VS moved without collision drag (all four position copies) and, euler not null, turned as the set
+// spawner turns units (radians, x pitch / y yaw / z roll as the game's SetAngle takes them).
+void CharacterPlace(unsigned char* character, const float pos[3], const float* euler);
 void CharacterTeleport(unsigned char* character, const float pos[3], float yaw); // cm, game axes; yaw degrees as
                                                                                  // the markers' (NaN: keep facing)
 // Map packages' one-way volumes (oneway.cpp): characters', VS's and shells' updates wrapped; OnewaySetMap at area load.
@@ -99,6 +102,10 @@ void OnewayInstall(unsigned char* base);
 void ForceInstall(unsigned char* base);
 void ForceUnit(unsigned char* unit, int kind);
 void ForceSetMap(const MapPhysics* physics);
+// A character thrown (cm/s, game axes) on its next update and carried through the air as a force volume's launch
+// (the jeep's run-overs); ForceThrowing: one was thrown in the last 10 s (the update wrapper keeps calling ForceUnit).
+void ForceThrow(unsigned char* unit, const float vel[3]);
+bool ForceThrowing();
 // zones.cpp: bot zone outlines drawn as fences on the overlay (script node zoneoutline). ZonesShow: every zone whose
 // name or tag matches the pattern (* ?), rgb rrggbb, height cm, seconds (0: until hidden); host side, sent to all
 // scripts.cpp: game modes (<game>\Modes\<name>.lp2mode "compiled"; mode.txt in the game folder names the one to run:
@@ -164,6 +171,9 @@ bool SpawnObject(int kind, int item, const float pos[3], float yaw);
 // per-character update (gravity.cpp); ScriptVolumeOn(sid): whether a script volume's effects are on (-1: not a script's).
 void ScriptsInit();
 void ScriptSetMap(const MapPhysics* physics);
+// The jeep test (jeep_drive.cpp): JeepSetMap at area load (online map number, -1 none), JeepFrame from the HUD update.
+void JeepSetMap(int onlineMap);
+void JeepFrame();
 void ScriptCharacter(unsigned char* character);
 bool ScriptVolumeOn(int sid);
 // A script volume's setting (ScriptSetting) as a script has set it (fading to it), else base.

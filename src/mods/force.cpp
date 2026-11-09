@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include <array>
 #include <unordered_map>
 #include <vector>
 
@@ -77,6 +78,8 @@ float g_gravity = 1.0f;
 std::unordered_map<uint8_t*, Unit> g_units;
 std::vector<bool> g_logged;
 double g_freq = 0.0;
+std::unordered_map<uint8_t*, std::array<float, 3>> g_throws; // ForceThrow: velocities to set on the unit's next update
+double g_throwUntil = 0.0;  // ForceThrowing: carry thrown units until then
 
 double Now()
 {
@@ -106,11 +109,11 @@ void SetGrenadeVelocity(uint8_t* shell, const float v[3])
 
 void ForceUnit(unsigned char* unit, int kind)
 {
-	if (g_volumes.empty() || !kind || !g_build) {
+	double now = Now();
+	if ((g_volumes.empty() && now > g_throwUntil) || !kind || !g_build) {
 		return;
 	}
 	float* pos = (float*)(unit + 0x30);
-	double now = Now();
 	if (g_units.size() > 4096) {
 		for (auto it = g_units.begin(); it != g_units.end();) {
 			it = now - it->second.at > kStale ? g_units.erase(it) : std::next(it);
@@ -169,6 +172,14 @@ void ForceUnit(unsigned char* unit, int kind)
 				}
 			}
 		}
+	}
+	auto thrown = g_throws.find(unit);
+	if (thrown != g_throws.end()) {
+		set = true;
+		memcpy(to, thrown->second.data(), 12);
+		g_throws.erase(thrown);
+		u.air = to[1] > 0.0f;
+		XLS_LOG_INFO("mods: force: a %s thrown (%.0f, %.0f, %.0f) cm/s at %.0f %.0f %.0f.", KindName(kind), to[0], to[1], to[2], pos[0], pos[1], pos[2]);
 	}
 	bool pushed = set || add[0] != 0.0f || add[1] != 0.0f || add[2] != 0.0f;
 
@@ -283,12 +294,27 @@ void ForceInstall(unsigned char* base)
 	XLS_LOG_INFO("mods: force: installed (%s).", BuildName(b));
 }
 
+void ForceThrow(unsigned char* unit, const float vel[3])
+{
+	if (!unit || !g_freq) {
+		return;
+	}
+	g_throws[unit] = {vel[0], vel[1], vel[2]};
+	g_throwUntil = Now() + 10.0;
+}
+
+bool ForceThrowing()
+{
+	return g_freq && Now() < g_throwUntil;
+}
+
 void ForceSetMap(const MapPhysics* physics)
 {
 	g_volumes = physics ? physics->force : std::vector<ForceVolume>();
 	g_gravity = physics ? physics->gravity : 1.0f;
 	g_logged.assign(g_volumes.size(), false);
 	g_units.clear();
+	g_throws.clear();
 	if (!g_volumes.empty()) {
 		XLS_LOG_INFO("mods: force: %u volume(s).", (unsigned)g_volumes.size());
 	}

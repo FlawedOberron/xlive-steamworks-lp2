@@ -94,6 +94,7 @@ void __cdecl AreaFlags(const char* area)
 	DamageSetMap(g_active ? &g_physics : nullptr);
 	OnewaySetMap(g_active ? &g_physics : nullptr);
 	ScriptSetMap(g_active ? &g_physics : nullptr);
+	JeepSetMap(episode == 7 ? map : -1);
 	if (!g_active) {
 		return;
 	}
