@@ -333,6 +333,11 @@ bool PackagesSlotBound(int slot);
 // by step (+1 / -1), or with enter picks the first (step > 0) or last one; false when there is no
 // package that way (the picker then moves on to the stock maps).
 bool PackagesPick(int step, bool enter);
+// The lobby's Match Settings: our own packages (index into the package list, name), the one slot 13 holds now, and
+// picking one outright (bound and published as a pick in the picker is).
+std::vector<std::pair<int, std::string>> PackagesOwn();
+int PackagesPicked();
+void PackagesPickIndex(int index);
 // The name of the package bound to slot 13 / 14 (stays valid), or nullptr.
 const char* PackagesSlotName(int slot);
 // The name for slot in a "13=<name>\n14=<name>" value (another player's published map names), or "".

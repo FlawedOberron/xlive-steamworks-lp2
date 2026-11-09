@@ -184,6 +184,12 @@ float ScriptValue(int sid, int setting, float base);
 int RulesStep(int rule, int key, uint8_t* value, const std::function<int()>& original); // -1 not ours, 0 unchanged, 1 changed, 2 changed by original (sound made)
 const char* RulesMessage(uint32_t id);
 void MenuSound(void* screen, uint32_t id);
+struct LobbyMap {
+	uint8_t map;   // rules byte 0x1b
+	int package;   // ours (slot 13): its package index, else -1
+	std::string name;
+};
+std::vector<LobbyMap> MapsLobbyChoices(const uint8_t* rules);
 std::string MapsOnlineText(uint32_t id); // the game's MsgOnline text in its language, "" before it has asked for one
 const char* RulesBattleMessage(uint32_t id); // MsgBattle: the Eliminated text while a battle message is being formatted, else null
 int RulesSlotOf(const uint8_t* character); // the match slot whose body it is, -1 none (AI, akrid)

@@ -1,5 +1,6 @@
 #include "mods/lp2.h"
 #include "mods/package.h"
+#include "mods/packages.h"
 #include "mods/parts.h"
 #include "mods/flash/botrows.h"
 #include "mods/flash/setup.h"
@@ -4048,48 +4049,152 @@ using IsHostFn = char(__attribute__((thiscall)) *)(void*);
 IsHostFn g_isHost = nullptr;
 uint8_t** g_lobbySession = nullptr;
 
-// Lobby Match Settings: the host changes our own rules from the lobby, on the overlay, without backing out to Create Match.
-// Every row here reaches the other players the way our rules always do (SyncThread publishes Own() as member data, clients
-// take the owner's), so nothing new goes over the network. The game's own rules (time, score, map, mode) stay in its
-// Game Options for now: a client's copy of those comes from the session, not from us.
-// F1 (or the Save Profile button) opens and closes it; up / down pick a row, left / right change it, Back closes it.
-// While it's open the lobby gets no input.
+// Lobby Match Settings: the host changes the match's rules from the lobby, on the overlay, without backing out to Create
+// Match. F1 opens and closes it (the pad's Y is the lobby's gamer card); up / down pick a row, left / right change it,
+// Back closes it. While it's open the lobby gets no input. Nothing changes until it closes.
+//   The game's own rules: the lobby's rule block (match setup +0x5e, 0x38 bytes, the create screen's layout; every
+//   machine has one). The host's goes to the others as member data "srules" and each one writes it into its own block
+//   while in the lobby, so nothing rests on how the game sends it. The game's push (FUN_00e8c270) fills in the bytes it
+//   derives (category, random weapon / grenade / layout flags, map size). Mode, players and private slots stay as made.
+//   Map: the stock maps the host has and our packages; a package is picked (and published, so players without it
+//   download it; the start waits for them) only when the panel closes, so scrolling past maps doesn't start downloads.
+//   Our rules: extras and the g_menu rows, sent as they always are (SyncThread, member data "rules").
+// On close the rules go to current.json and the next Create Match starts from them.
+const uint32_t kSetupBlock = 0x5e;
+const int kBlockSize = 0x38;
+void LobbyBlockDerive(uint8_t* block); // after the push hook
+
+enum LobbyKind { kLobbyOwn, kLobbyMenu, kLobbyStock, kLobbyMap };
 struct LobbyRow {
 	const char* section;
 	const char* label;
-	int menuRow; // a g_menu row (kRowDefs), or -1
-	int own;     // a kBotRuleKeys index, or -1
+	int kind;
+	int arg; // extras index, g_menu row or rules offset
 };
-const LobbyRow kLobbyRows[] = {
-	{"Rounds", "Rounds", -1, 14},
-	{"Rounds", "Switch Side Every # Rounds", -1, 15},
-	{"Player", "Default Secondary", kRowSecondary, -1},
-	{"Player", "Harmonizer", kRowHarmonizer, -1},
-	{"Player", "Grenades at Spawn", -1, 11},
-	{"Stagger", "Bullet Stagger", kRowStagger, -1},
-	{"Stagger", "Explosion Stagger", -1, 17},
-	{"Stagger", "Anchor Stagger", -1, 18},
-	{"Stagger", "Melee Stagger", -1, 19},
-	{"Stagger", "Massive Shot", -1, 20},
-	{"Stagger", "Massive Shot Threshold", -1, 21},
-	{"Stagger", "Fall Stagger Threshold", -1, 10},
-	{"Weapons", "Infinite Ammo", kRowInfinite, -1},
-	{"Weapons", "Ammo Supply", kRowSupply, -1},
-	{"Weapons", "Grenade Pickups", -1, 12},
-	{"Weapons", "Quick Resupply", -1, 13},
-	{"Anchor", "Range", -1, 8},
-	{"Anchor", "Speed", -1, 9},
-	{"Radar", "Radar", -1, 5},
-	{"Radar", "Players Show", -1, 6},
-	{"Radar", "VS Show", -1, 7},
-	{"Radar", "Team Colours", -1, 16},
-	{"Bots", "Bots", -1, 0},
-	{"Bots", "Difficulty", -1, 1},
-	{"Bots", "Brain", -1, 2},
-	{"Bots", "Personality", -1, 3},
-	{"Bots", "Taunts", -1, 4},
+const LobbyRow kLobbyOwnRows[] = {
+	{"Rounds", "Rounds", kLobbyOwn, 14},
+	{"Rounds", "Switch Side Every # Rounds", kLobbyOwn, 15},
+	{"Player", "Default Secondary", kLobbyMenu, kRowSecondary},
+	{"Player", "Harmonizer", kLobbyMenu, kRowHarmonizer},
+	{"Player", "Grenades at Spawn", kLobbyOwn, 11},
+	{"Stagger", "Bullet Stagger", kLobbyMenu, kRowStagger},
+	{"Stagger", "Explosion Stagger", kLobbyOwn, 17},
+	{"Stagger", "Anchor Stagger", kLobbyOwn, 18},
+	{"Stagger", "Melee Stagger", kLobbyOwn, 19},
+	{"Stagger", "Massive Shot", kLobbyOwn, 20},
+	{"Stagger", "Massive Shot Threshold", kLobbyOwn, 21},
+	{"Stagger", "Fall Stagger Threshold", kLobbyOwn, 10},
+	{"Weapons", "Infinite Ammo", kLobbyMenu, kRowInfinite},
+	{"Weapons", "Ammo Supply", kLobbyMenu, kRowSupply},
+	{"Weapons", "Grenade Pickups", kLobbyOwn, 12},
+	{"Weapons", "Quick Resupply", kLobbyOwn, 13},
+	{"Anchor", "Range", kLobbyOwn, 8},
+	{"Anchor", "Speed", kLobbyOwn, 9},
+	{"Radar", "Radar", kLobbyOwn, 5},
+	{"Radar", "Players Show", kLobbyOwn, 6},
+	{"Radar", "VS Show", kLobbyOwn, 7},
+	{"Radar", "Team Colours", kLobbyOwn, 16},
+	{"Bots", "Bots", kLobbyOwn, 0},
+	{"Bots", "Difficulty", kLobbyOwn, 1},
+	{"Bots", "Brain", kLobbyOwn, 2},
+	{"Bots", "Personality", kLobbyOwn, 3},
+	{"Bots", "Taunts", kLobbyOwn, 4},
 };
-const int kLobbyRowCount = (int)(sizeof(kLobbyRows) / sizeof(kLobbyRows[0]));
+
+// A stock rule's texts and range, by its OnlineRule item (RuleItem): MsgOnline value base (-1: the number itself),
+// first and last stored value, and the stored -> shown remap some rows have (FUN_00e8c270).
+struct StockRange {
+	int base, lo, hi;
+};
+StockRange StockRangeOf(int item)
+{
+	switch (item) {
+	case 4: return {91, 0, 4};    // Battle Gauge
+	case 5: return {96, 0, 5};    // Kills
+	case 6: return {102, 0, 5};   // Points
+	case 7: return {108, 0, 2};   // VS Leader
+	case 8: return {111, 0, 3};   // Control Time
+	case 9: return {115, 0, 3};   // Goals
+	case 10: return {119, 0, 2};  // Fugitive Selection
+	case 11: return {122, 2, 5};  // Rounds (Battle Series): shown as value - 2
+	case 15: return {149, 0, 5};  // Default Weapons
+	case 16: return {155, 0, 5};  // Time Limit
+	case 17: return {430, 0, 4};  // Layout
+	case 18: return {165, 0, 2};  // Friendly Fire (remapped)
+	case 21: return {177, 0, 6};  // Default Grenades (remapped)
+	case 22: return {188, 0, 3};  // Set Weapons
+	case 23: return {192, 0, 3};  // Set Grenades
+	case 24: return {196, 0, 3};  // Set VSs
+	case 26: return {-1, 2, 16};  // Players Desired
+	case 31: return {168, 0, 3};  // Teamkill Penalty 1
+	case 32: return {172, 0, 4};  // Teamkill Penalty 2
+	default: return {kMsgOffOn, 0, 1};
+	}
+}
+
+std::string StockValueName(uint8_t offset, const uint8_t* block)
+{
+	int item = RuleItem(offset, block), v = (int8_t)block[offset];
+	StockRange r = StockRangeOf(item);
+	if (r.base < 0) {
+		return std::to_string(v);
+	}
+	int shown = item == 11 ? v - 2 : item == 18 ? (v >= 0 && v < 3 ? "\x01\x02\x00"[v] : v) : item == 21 ? (v >= 0 && v < 7 ? "\x06\x00\x01\x02\x03\x04\x05"[v] : v) : v;
+	std::string text = MapsOnlineText(r.base + shown);
+	return text.empty() ? std::to_string(v) : text;
+}
+
+struct LobbyLine {
+	std::string section, label, value;
+	int kind, arg;
+};
+std::mutex g_lobbyPanelMutex;
+std::vector<LobbyLine> g_lobbyLines; // the draw's copy
+int g_lobbyCursorShown = 0;
+std::atomic<bool> g_lobbyPanelOpen{false}, g_lobbyHost{false};
+std::atomic<DWORD> g_lobbySeenAt{0};
+int g_lobbyCursor = 0;
+bool g_lobbyChanged = false, g_lobbyStockChanged = false, g_lobbyCarry = false;
+uint8_t g_lobbyBlock[kBlockSize];      // the panel's copy of the rule block while it's open
+uint8_t g_lobbyCarryBlock[kBlockSize]; // the last closed panel's rules, for the next create screen
+std::vector<LobbyMap> g_lobbyMaps;
+int g_lobbyMapAt = 0;
+bool g_lobbyKeyWas = false;
+uint8_t* g_lobbyScreen = nullptr; // for the menu sounds
+std::string g_lobbyPublished;
+std::mutex g_hostBlockMutex;
+std::string g_hostBlock; // the lobby owner's "srules" (hex)
+uint64_t g_hostBlockFrom = 0;
+std::string g_hostBlockApplied;
+
+uint8_t* LobbySlots()
+{
+	return g_ruleSlots && *g_ruleSlots ? *g_ruleSlots : nullptr;
+}
+
+std::string Hex(const uint8_t* bytes, int n)
+{
+	std::string out;
+	for (int i = 0; i < n; i++) {
+		out += FormatA("%02x", bytes[i]);
+	}
+	return out;
+}
+
+bool Unhex(const std::string& text, uint8_t* out, int n)
+{
+	if ((int)text.size() != n * 2) {
+		return false;
+	}
+	for (int i = 0; i < n; i++) {
+		unsigned v = 0;
+		if (sscanf(text.c_str() + i * 2, "%2x", &v) != 1) {
+			return false;
+		}
+		out[i] = (uint8_t)v;
+	}
+	return true;
+}
 
 std::string OwnValueName(int own, int v)
 {
@@ -4125,143 +4230,251 @@ std::string MenuValueName(int row, int v)
 	}
 }
 
-struct LobbyLine {
-	std::string section, label, value;
-};
-std::mutex g_lobbyPanelMutex;
-std::vector<LobbyLine> g_lobbyLines; // the draw's copy
-int g_lobbyCursorShown = 0;
-std::atomic<bool> g_lobbyPanelOpen{false}, g_lobbyHost{false};
-std::atomic<DWORD> g_lobbySeenAt{0};
-int g_lobbyCursor = 0;
-bool g_lobbyChanged = false, g_lobbyCarry = false; // carry: the next create screen takes the panel's g_menu rows
-uint32_t g_lobbyButtonsWas = 0;
-bool g_lobbyKeyWas = false;
+// The stock rows the block's mode has (the create screen's row table), less the ones we don't change here.
+bool LobbyStockShown(uint8_t offset, const uint8_t* b, int c)
+{
+	if (offset == 0x12 || offset == 0x13 || offset == kRuleHalftime || offset == 0x1b) {
+		return false;
+	}
+	for (const Row& r : kRowDefs) {
+		if (r.offset == offset) {
+			return false; // ours: a g_menu row
+		}
+	}
+	if ((offset == kRuleRespawn && SurvivalOn(b) && b[kRuleSub] == kSubKills) || (offset == 0x01 && b[kRuleMain] == 4)) {
+		return false;
+	}
+	return offset == 0x01 || StockRow(c, offset);
+}
+
+std::vector<LobbyLine> LobbyBuild()
+{
+	std::map<std::string, int>& x = GameRulesExtras();
+	const uint8_t* b = g_lobbyBlock;
+	int c = RowCategory(b);
+	std::vector<LobbyLine> lines;
+	if (!g_lobbyMaps.empty()) {
+		lines.push_back({"Match", MapsOnlineText(38 + 14).empty() ? "Map" : MapsOnlineText(38 + 14), g_lobbyMaps[g_lobbyMapAt].name, kLobbyMap, 0});
+	}
+	auto stock = [&](const char* section, uint8_t offset) {
+		if (LobbyStockShown(offset, b, c)) {
+			std::string label = MapsOnlineText(38 + RuleItem(offset, b));
+			lines.push_back({section, label.empty() ? FormatA("Rule %02x", offset) : label, StockValueName(offset, b), kLobbyStock, offset});
+		}
+	};
+	for (uint8_t offset : kScoreRows) {
+		stock("Match", offset);
+	}
+	for (const Section& sec : kSections) {
+		for (uint8_t offset : sec.offsets) {
+			stock(sec.name, offset);
+		}
+		for (const LobbyRow& r : kLobbyOwnRows) {
+			if (strcmp(r.section, sec.name) == 0) {
+				int v = r.kind == kLobbyOwn ? x[kBotRuleKeys[r.arg]] : (int)g_menu[r.arg];
+				lines.push_back({r.section, r.label, r.kind == kLobbyOwn ? OwnValueName(r.arg, v) : MenuValueName(r.arg, v), r.kind, r.arg});
+			}
+		}
+	}
+	for (const LobbyRow& r : kLobbyOwnRows) { // our sections the stock list doesn't have
+		bool known = false;
+		for (const Section& sec : kSections) {
+			known |= strcmp(r.section, sec.name) == 0;
+		}
+		if (!known) {
+			int v = r.kind == kLobbyOwn ? x[kBotRuleKeys[r.arg]] : (int)g_menu[r.arg];
+			lines.push_back({r.section, r.label, r.kind == kLobbyOwn ? OwnValueName(r.arg, v) : MenuValueName(r.arg, v), r.kind, r.arg});
+		}
+	}
+	return lines;
+}
 
 void LobbyPanelSnapshot()
 {
-	std::map<std::string, int>& x = GameRulesExtras();
-	std::vector<LobbyLine> lines;
-	for (const LobbyRow& r : kLobbyRows) {
-		std::string value = r.own >= 0 ? OwnValueName(r.own, x[kBotRuleKeys[r.own]]) : MenuValueName(r.menuRow, g_menu[r.menuRow]);
-		lines.push_back({r.section, r.label, value});
-	}
+	std::vector<LobbyLine> lines = LobbyBuild();
+	g_lobbyCursor = std::clamp(g_lobbyCursor, 0, std::max(0, (int)lines.size() - 1));
 	std::lock_guard<std::mutex> lock(g_lobbyPanelMutex);
 	g_lobbyLines.swap(lines);
 	g_lobbyCursorShown = g_lobbyCursor;
 }
 
-void LobbyPanelStep(int dir)
+void LobbyPanelStep(const LobbyLine& row, int dir)
 {
-	const LobbyRow& r = kLobbyRows[g_lobbyCursor];
 	bool changed = false;
-	if (r.own >= 0) {
-		int& value = GameRulesExtras()[kBotRuleKeys[r.own]];
+	if (row.kind == kLobbyOwn) {
+		int& value = GameRulesExtras()[kBotRuleKeys[row.arg]];
 		int at = value + dir;
-		if (at >= 0 && at < kBotRuleCounts[r.own]) {
+		if (at >= 0 && at < kBotRuleCounts[row.arg]) {
 			value = at;
 			BotRulesSync();
 			changed = true;
 		}
 	}
-	else {
-		int n = kRowDefs[r.menuRow].values, was = g_menu[r.menuRow] % n, at = was + dir;
-		if (r.menuRow == kRowSupply) { // least to most, no wrap, as on the create screen
-			at = at < 0 || at >= n ? was : at;
-		}
-		else {
-			at = (at + n) % n;
-		}
-		g_menu[r.menuRow] = at;
+	else if (row.kind == kLobbyMenu) {
+		int n = kRowDefs[row.arg].values, was = g_menu[row.arg] % n, at = was + dir;
+		at = row.arg == kRowSupply ? (at < 0 || at >= n ? was : at) : (at + n) % n; // supply: least to most, no wrap
+		g_menu[row.arg] = at;
 		g_menuSeen = true;
 		changed = at != was;
 	}
+	else if (row.kind == kLobbyStock) {
+		uint8_t offset = (uint8_t)row.arg;
+		StockRange r = StockRangeOf(RuleItem(offset, g_lobbyBlock));
+		int hi = r.base < 0 ? std::max<int>(r.lo, std::min<int>(r.hi, g_lobbyBlock[0x12])) : r.hi; // desired: up to max players
+		int v = (int8_t)g_lobbyBlock[offset] + dir;
+		if (v >= r.lo && v <= hi) {
+			g_lobbyBlock[offset] = (uint8_t)v;
+			g_lobbyStockChanged = changed = true;
+		}
+	}
+	else if (row.kind == kLobbyMap && !g_lobbyMaps.empty()) {
+		int n = (int)g_lobbyMaps.size();
+		g_lobbyMapAt = (g_lobbyMapAt + dir + n) % n;
+		g_lobbyBlock[0x1b] = g_lobbyMaps[g_lobbyMapAt].map;
+		g_lobbyStockChanged = changed = true;
+	}
 	if (changed) {
 		g_lobbyChanged = true;
-		XLS_LOG_INFO("mods: lobby settings: %s %s.", r.label, (r.own >= 0 ? OwnValueName(r.own, GameRulesExtras()[kBotRuleKeys[r.own]]) : MenuValueName(r.menuRow, g_menu[r.menuRow])).c_str());
+		MenuSound(g_lobbyScreen, kSoundMove);
 	}
 }
 
-// The panel's changes into current.json, so a fresh start loads them (the file's own rule bytes, ours written over).
-void LobbyPanelSave()
+void LobbyPanelOpen()
 {
-	if (!g_lobbyChanged) {
+	uint8_t* slots = LobbySlots();
+	if (slots) {
+		memcpy(g_lobbyBlock, slots + kSetupBlock, kBlockSize);
+	}
+	g_lobbyMaps = slots ? MapsLobbyChoices(g_lobbyBlock) : std::vector<LobbyMap>();
+	g_lobbyMapAt = 0;
+	int picked = PackagesPicked();
+	for (int i = 0; i < (int)g_lobbyMaps.size(); i++) {
+		const LobbyMap& m = g_lobbyMaps[i];
+		if (m.map == g_lobbyBlock[0x1b] && (m.package < 0 || m.package == picked)) {
+			g_lobbyMapAt = i;
+			break;
+		}
+	}
+	g_lobbyStockChanged = false;
+	g_lobbyPanelOpen = true;
+	LobbyPanelSnapshot();
+	XLS_LOG_INFO("mods: lobby settings: opened (%d maps to pick from).", (int)g_lobbyMaps.size());
+}
+
+// Close: the stock rules into the lobby's block, the map picked, everything saved to current.json and kept for Create Match.
+void LobbyPanelClose()
+{
+	g_lobbyPanelOpen = false;
+	uint8_t* slots = LobbySlots();
+	if (g_lobbyChanged && slots) {
+		for (int i = 0; i < kRows; i++) {
+			g_lobbyBlock[kRowDefs[i].offset] = (uint8_t)g_menu[i];
+		}
+		if (g_lobbyStockChanged) {
+			const LobbyMap* map = g_lobbyMaps.empty() ? nullptr : &g_lobbyMaps[g_lobbyMapAt];
+			if (map && map->package >= 0 && map->package != PackagesPicked()) {
+				PackagesPickIndex(map->package);
+				XLS_LOG_INFO("mods: lobby settings: map package \"%s\" picked.", map->name.c_str());
+			}
+			LobbyBlockDerive(g_lobbyBlock);
+		}
+		memcpy(slots + kSetupBlock, g_lobbyBlock, kBlockSize);
+		memcpy(g_lobbyCarryBlock, g_lobbyBlock, kBlockSize);
+		g_lobbyCarry = true;
+		g_setupEdited = true;
+		GameRulesSaveCurrent(g_lobbyBlock, g_setupProfile, true);
+		XLS_LOG_INFO("mods: lobby settings: rules changed (%s), saved to current.json.", Hex(g_lobbyBlock, kBlockSize).c_str());
+	}
+	g_lobbyChanged = g_lobbyStockChanged = false;
+	XLS_LOG_INFO("mods: lobby settings: closed.");
+}
+
+// A client: the lobby owner's rule block into ours, while in the lobby.
+void LobbyBlockFollow(uint8_t* slots)
+{
+	std::string want;
+	{
+		std::lock_guard<std::mutex> lock(g_hostBlockMutex);
+		CSteamID lobby = SessionPresenceLobby();
+		uint64_t host = lobby.IsValid() && SteamReady() && SteamMatchmaking() ? LobbyOwner(SteamMatchmaking(), lobby).ConvertToUint64() : 0;
+		if (!host || host != g_hostBlockFrom) {
+			return;
+		}
+		want = g_hostBlock;
+	}
+	uint8_t block[kBlockSize];
+	if (want == g_hostBlockApplied || !Unhex(want, block, kBlockSize)) {
 		return;
 	}
-	g_lobbyChanged = false;
-	g_lobbyCarry = true;
-	g_setupEdited = true;
-	std::map<std::string, int> keep = GameRulesExtras();
-	uint8_t rules[0x40] = {};
-	std::string profile;
-	bool edited = false;
-	bool have = GameRulesLoadCurrent(rules, &profile, &edited);
-	GameRulesExtras() = keep; // the load puts the file's extras back
-	BotRulesSync();
-	if (!have) {
-		XLS_LOG_WARN("mods: lobby settings: no current.json to save into (rules kept for this session).");
-		return;
+	g_hostBlockApplied = want;
+	if (memcmp(slots + kSetupBlock, block, kBlockSize) != 0) {
+		memcpy(slots + kSetupBlock, block, kBlockSize);
+		XLS_LOG_INFO("mods: lobby settings: the host's rules (%s) taken.", want.c_str());
 	}
-	for (int i = 0; i < kRows; i++) {
-		rules[kRowDefs[i].offset] = (uint8_t)g_menu[i];
-	}
-	GameRulesSaveCurrent(rules, profile, true);
-	XLS_LOG_INFO("mods: lobby settings: saved to current.json.");
 }
 
 // From the lobby's input, each tick. True while the panel is open (the lobby then gets no input).
-bool LobbyPanelTick()
+bool LobbyPanelTick(uint8_t* screen)
 {
+	g_lobbyScreen = screen;
 	g_lobbySeenAt = GetTickCount();
 	bool host = g_isHost && g_lobbySession && *g_lobbySession && g_isHost(*g_lobbySession) == 1;
 	g_lobbyHost = host;
+	uint8_t* slots = LobbySlots();
+	if (slots && !host) {
+		LobbyBlockFollow(slots);
+	}
+	if (slots && host) {
+		std::string now = Hex(slots + kSetupBlock, kBlockSize);
+		if (now != g_lobbyPublished) {
+			g_lobbyPublished = now;
+			MemberDataSet("srules", now);
+		}
+	}
 	if (!host || !g_input || !*g_input) {
 		if (g_lobbyPanelOpen) {
-			g_lobbyPanelOpen = false;
-			LobbyPanelSave();
+			LobbyPanelClose();
 		}
 		return false;
 	}
 	uint32_t pressed = *(uint32_t*)(*g_input + kInputPressed);
 	uint32_t buttons = *(uint32_t*)(*g_input + kInputButtons);
-	uint32_t down = buttons & ~g_lobbyButtonsWas;
-	g_lobbyButtonsWas = buttons;
-	if (down) {
-		static int logged = 0;
-		if (logged++ < 20) {
-			XLS_LOG_INFO("mods: lobby settings: buttons %08x pressed (keys %08x).", down, pressed);
-		}
-	}
 	HWND front = GetForegroundWindow();
 	DWORD process = 0;
 	GetWindowThreadProcessId(front, &process);
 	bool key = process == GetCurrentProcessId() && (GetAsyncKeyState(VK_F1) & 0x8000);
-	bool toggle = (key && !g_lobbyKeyWas) || (down & kButtonSave);
+	bool toggle = key && !g_lobbyKeyWas;
 	g_lobbyKeyWas = key;
 	if (!g_lobbyPanelOpen) {
 		if (toggle) {
-			g_lobbyPanelOpen = true;
-			g_lobbyCursor = std::min(g_lobbyCursor, kLobbyRowCount - 1);
-			LobbyPanelSnapshot();
-			XLS_LOG_INFO("mods: lobby settings: opened.");
+			LobbyPanelOpen();
 			return true;
 		}
 		return false;
 	}
-	if (toggle || (down & kButtonBack)) {
-		g_lobbyPanelOpen = false;
-		LobbyPanelSave();
-		XLS_LOG_INFO("mods: lobby settings: closed.");
+	if (toggle || (buttons & kButtonBack)) {
+		LobbyPanelClose();
 		return true;
 	}
-	if (pressed & kKeyStepUp) {
-		g_lobbyCursor = (g_lobbyCursor + kLobbyRowCount - 1) % kLobbyRowCount;
+	int count = 0;
+	LobbyLine row{};
+	{
+		std::lock_guard<std::mutex> lock(g_lobbyPanelMutex);
+		count = (int)g_lobbyLines.size();
+		if (g_lobbyCursor < count) {
+			row = g_lobbyLines[g_lobbyCursor];
+		}
 	}
-	else if (pressed & kKeyStepDown) {
-		g_lobbyCursor = (g_lobbyCursor + 1) % kLobbyRowCount;
+	if (count && (pressed & kKeyStepUp)) {
+		g_lobbyCursor = (g_lobbyCursor + count - 1) % count;
+		MenuSound(g_lobbyScreen, kSoundMove);
 	}
-	else if (pressed & (kKeyLeft | kKeyRight)) {
-		LobbyPanelStep(pressed & kKeyRight ? 1 : -1);
+	else if (count && (pressed & kKeyStepDown)) {
+		g_lobbyCursor = (g_lobbyCursor + 1) % count;
+		MenuSound(g_lobbyScreen, kSoundMove);
+	}
+	else if (count && (pressed & (kKeyLeft | kKeyRight))) {
+		LobbyPanelStep(row, pressed & kKeyRight ? 1 : -1);
 	}
 	LobbyPanelSnapshot();
 	return true;
@@ -4420,7 +4633,7 @@ void LobbyBoosted(uint8_t* screen, int mode, LobbyFn original)
 
 void __attribute__((thiscall)) LobbyInput(uint8_t* screen, int mode)
 {
-	if (LobbyPanelTick() && g_input && *g_input) {
+	if (LobbyPanelTick(screen) && g_input && *g_input) {
 		// the panel has the input: the lobby runs on with none
 		uint32_t& pressed = *(uint32_t*)(*g_input + kInputPressed);
 		uint32_t& buttons = *(uint32_t*)(*g_input + kInputButtons);
@@ -4596,6 +4809,15 @@ void BotsLobbyInstall(uint8_t* base, int build)
 using PushRulesFn = void(__attribute__((thiscall)) *)(void*, uint8_t*);
 using SetNumberFn = void(__attribute__((thiscall)) *)(void*, uint32_t, uint32_t);
 PushRulesFn g_pushRulesOriginal = nullptr;
+
+// The bytes the game derives from the rules (category, the random flags, map size): its own push works them out
+// (and sets the create screen's Flash numbers, which nothing shows outside that screen).
+void LobbyBlockDerive(uint8_t* block)
+{
+	if (g_pushRulesOriginal) {
+		g_pushRulesOriginal(nullptr, block);
+	}
+}
 SetNumberFn g_setNumber = nullptr;
 
 const uint8_t kPushRulesPrologue[] = {0x83, 0xec, 0x20, 0x53, 0x55, 0x56}; // sub esp,0x20; push ebx; push ebp; push esi
@@ -4606,11 +4828,9 @@ void __attribute__((thiscall)) PushRules(void* screen, uint8_t* rules)
 	if (!rules) {
 		return;
 	}
-	if (g_lobbyCarry) { // rows changed from the lobby's Match Settings since this screen was last up
+	if (g_lobbyCarry) { // the rules last set in the lobby's Match Settings: the next create screen starts from them
 		g_lobbyCarry = false;
-		for (int i = 0; i < kRows; i++) {
-			rules[kRowDefs[i].offset] = (uint8_t)g_menu[i];
-		}
+		memcpy(rules, g_lobbyCarryBlock, kBlockSize);
 	}
 	if (rules[kRuleOldGrenades] == 1) { // saved with the separate Unlimited Grenades row
 		rules[kRowDefs[kRowInfinite].offset] = (rules[kRowDefs[kRowInfinite].offset] & kInfiniteAmmo) | kInfiniteGrenades;
@@ -4977,6 +5197,15 @@ void RulesInstall(unsigned char* base)
 		XLS_LOG_WARN("mods: rules: add-ammo hook failed.");
 		return;
 	}
+	MemberDataListen("srules", [](uint64_t steamId, XUID, const std::string& value) {
+		std::lock_guard<std::mutex> lock(g_hostBlockMutex);
+		CSteamID lobby = SessionPresenceLobby();
+		uint64_t host = lobby.IsValid() && SteamReady() && SteamMatchmaking() ? LobbyOwner(SteamMatchmaking(), lobby).ConvertToUint64() : 0;
+		if (host && steamId == host) {
+			g_hostBlock = value;
+			g_hostBlockFrom = steamId;
+		}
+	});
 	MemberDataListen("rules", [](uint64_t steamId, XUID, const std::string& value) {
 		std::lock_guard<std::mutex> lock(g_mutex);
 		g_memberRules[steamId] = Parse(value);

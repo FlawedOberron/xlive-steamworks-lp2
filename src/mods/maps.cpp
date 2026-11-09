@@ -670,6 +670,29 @@ bool MapsTryInstall(unsigned char* base)
 	return false;
 }
 
+// The lobby's Match Settings: the maps the host can pick for the rules' mode, in the picker's order: the stock maps
+// this player has, then our packages (as slot 13). Slot 14 isn't offered.
+std::vector<LobbyMap> MapsLobbyChoices(const uint8_t* rules)
+{
+	std::vector<LobbyMap> out;
+	uint8_t* game = g_build >= 0 ? *(uint8_t**)(uintptr_t)kPickerVas[g_build].game : nullptr;
+	bool vs = rules[0x16] == 1 && rules[0x17] == 3;
+	for (uint8_t v : kMapOrder) {
+		if (v == 13) {
+			for (const auto& own : PackagesOwn()) {
+				out.push_back({13, own.first, own.second});
+			}
+			continue;
+		}
+		if (v == 14 || !game || !MapAvailable(game, v, vs ? 1 : 0)) {
+			continue;
+		}
+		std::string name = MapsOnlineText(126 + v);
+		out.push_back({v, -1, name.empty() ? "Map " + std::to_string(v) : name});
+	}
+	return out;
+}
+
 void MenuSound(void* screen, uint32_t id)
 {
 	MenuSoundAt(screen, id);

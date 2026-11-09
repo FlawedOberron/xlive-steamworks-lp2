@@ -1370,6 +1370,36 @@ bool PackagesPick(int step, bool enter)
 	return true;
 }
 
+std::vector<std::pair<int, std::string>> PackagesOwn()
+{
+	PackagesLoad();
+	std::lock_guard<std::recursive_mutex> lock(g_mutex);
+	std::vector<std::pair<int, std::string>> out;
+	for (size_t i = 0; i < g_all.size(); i++) {
+		if (!g_all[i].remote) {
+			out.push_back({(int)i, g_all[i].name});
+		}
+	}
+	return out;
+}
+
+int PackagesPicked()
+{
+	std::lock_guard<std::recursive_mutex> lock(g_mutex);
+	return g_default[0];
+}
+
+void PackagesPickIndex(int index)
+{
+	std::lock_guard<std::recursive_mutex> lock(g_mutex);
+	if (index < 0 || index >= (int)g_all.size() || g_all[index].remote) {
+		return;
+	}
+	g_default[0] = index;
+	g_pickedAt = GetTickCount();
+	g_picked = index;
+}
+
 std::string PackagesNameIn(const std::string& value, int slot)
 {
 	std::string key = FormatA("%d=", slot);
