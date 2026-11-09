@@ -171,11 +171,20 @@ const char* const kGrappleNames[] = {"Off", "1/4", "1/2", "Default", "2X", "3X",
 const float kGrappleScales[] = {0.0f, 0.25f, 0.5f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f};
 const int kGrappleDefault = 3, kAnchorSpeedDefault = 2, kAnchorSpeedValues = 12;
 const int kGrappleValues = (int)(sizeof(kGrappleScales) / sizeof(kGrappleScales[0]));
-// Hit Stagger: the stagger (shrink) points a hit takes off a character, times the scale (see StaggerAdd).
-// 0-3 as before the split (saved rules keep their meaning), then the increases
-const char* const kStaggerNames[] = {"Default", "Reduced", "Low", "Off", "Increased", "High", "Extreme"};
-const float kStaggerScales[] = {1.0f, 0.66f, 0.33f, 0.0f, 1.5f, 2.0f, 3.0f};
-const int kStaggerValues = (int)(sizeof(kStaggerScales) / sizeof(kStaggerScales[0]));
+// Hit Stagger: what a soldier does when a hit of each kind (bullet, explosion, anchor, melee) takes stagger points (see
+// StaggerAdd). The points only decide when, and one hit is enough for most, so the rows pick the reaction instead.
+const char* const kStaggerNames[] = {"Default", "Off", "Occasional", "Flinch", "Knock-back", "Knockdown"};
+const int kStaggerValues = (int)(sizeof(kStaggerNames) / sizeof(kStaggerNames[0]));
+enum { kReactDefault, kReactOff, kReactOccasional, kReactFlinch, kReactBack, kReactDown };
+const DWORD kOccasionalMs = 1500; // Occasional: at most one reaction this often
+// Thresholds (Fall Stagger, Massive Shot Threshold): the game's limit times the scale, higher is harder to reach.
+const char* const kThresholdNames[] = {"Default", "0.5x", "0.75x", "1.25x", "1.5x", "2x", "3x", "Never"};
+const float kThresholdScales[] = {1.0f, 0.5f, 0.75f, 1.25f, 1.5f, 2.0f, 3.0f, 1000000.0f};
+const int kThresholdValues = (int)(sizeof(kThresholdScales) / sizeof(kThresholdScales[0]));
+// Massive Shot: bullets filling the knock-back (blown) pool, as a shotgun blast does.
+const char* const kMassiveNames[] = {"Default", "Off", "Knock-back", "Knockdown"};
+const int kMassiveValues = 4;
+enum { kMassiveDefault, kMassiveOff, kMassiveBack, kMassiveDown };
 // Infinite Ammo: one row for both rules, bit 0 ammo, bit 1 grenades. Rules byte 0x30 held Unlimited
 // Grenades before (moved into bit 1 when a saved match is loaded) and is free now.
 const char* const kInfiniteNames[] = {"Off", "Weapons", "Grenades", "All"};
@@ -249,9 +258,10 @@ struct Rules {
 	bool harmonizer = false; // the Campaign's Harmonizer (auto heal when low) in VS matches too
 	int grapple = kGrappleDefault; // kGrappleScales index
 	int anchorSpeed = kAnchorSpeedDefault; // the same, less Off
-	int fall = 0; // kFallScales index
-	int stagger = 0; // kStaggerScales index: bullets (and any hit not told apart)
-	int staggerExplosion = 0, staggerAnchor = 0, staggerMelee = 0; // kStaggerScales indexes per hit kind
+	int fall = 0; // kThresholdScales index
+	int stagger = 0; // kStaggerNames index: bullets (and any hit not told apart)
+	int staggerExplosion = 0, staggerAnchor = 0, staggerMelee = 0; // kStaggerNames indexes per hit kind
+	int massive = 0, massiveThreshold = 0; // kMassiveNames, kThresholdScales indexes
 	int radar = 1, detectPlayers = 0, detectVs = 0, radarTeam = 1; // radar.cpp
 	int grenadeCount = 0;  // 0 the game's amounts, else 1 + the count (so 1 is none)
 	int grenadePickup = 0; // 0 the game's amounts, else the count
@@ -273,6 +283,7 @@ uint8_t** g_game = nullptr;
 std::atomic<int> g_grapple{kGrappleDefault};
 std::atomic<int> g_stagger{0}, g_staggerExplosion{0}, g_staggerAnchor{0}, g_staggerMelee{0};
 std::atomic<int> g_staggerExplosionRule{0}, g_staggerAnchorRule{0}, g_staggerMeleeRule{0}; // the setup rows (extras)
+std::atomic<int> g_massive{0}, g_massiveThreshold{0}, g_massiveRule{0}, g_massiveThresholdRule{0};
 std::atomic<bool> g_survival{false};
 std::atomic<bool> g_offline{true}; // not in a lobby (training): the bots run on this PC
 // Training's AI Enemy Battle rows (see BotCursor): armed while that screen was the last one used
@@ -321,7 +332,7 @@ const uint8_t* WeaponEntry(const uint8_t* weapon)
 
 std::string Format(const Rules& r)
 {
-	return FormatA("ammo=%d;grenades=%d;secondary=%d;magazines=%d;survival=%d;lives=%d;team=%d;harmonizer=%d;grapple=%d;stagger=%d;radar=%d;detectp=%d;detectv=%d;anchor=%d;fall=%d;gcount=%d;gpick=%d;qres=%d;rnd=%d;sw=%d;rteam=%d;sexp=%d;sanc=%d;smel=%d", r.ammo, r.grenades, r.secondary, r.supply, r.survival, r.lives, r.team, r.harmonizer, r.grapple, r.stagger, r.radar, r.detectPlayers, r.detectVs, r.anchorSpeed, r.fall, r.grenadeCount, r.grenadePickup, r.quickResupply, r.rounds, r.switchEvery, r.radarTeam, r.staggerExplosion, r.staggerAnchor, r.staggerMelee);
+	return FormatA("ammo=%d;grenades=%d;secondary=%d;magazines=%d;survival=%d;lives=%d;team=%d;harmonizer=%d;grapple=%d;stagger=%d;radar=%d;detectp=%d;detectv=%d;anchor=%d;fall=%d;gcount=%d;gpick=%d;qres=%d;rnd=%d;sw=%d;rteam=%d;sexp=%d;sanc=%d;smel=%d;mshot=%d;mthr=%d", r.ammo, r.grenades, r.secondary, r.supply, r.survival, r.lives, r.team, r.harmonizer, r.grapple, r.stagger, r.radar, r.detectPlayers, r.detectVs, r.anchorSpeed, r.fall, r.grenadeCount, r.grenadePickup, r.quickResupply, r.rounds, r.switchEvery, r.radarTeam, r.staggerExplosion, r.staggerAnchor, r.staggerMelee, r.massive, r.massiveThreshold);
 }
 
 Rules Parse(const std::string& s)
@@ -346,7 +357,7 @@ Rules Parse(const std::string& s)
 	};
 	r.radar = small("radar=", 3, 1);
 	r.anchorSpeed = small("anchor=", kAnchorSpeedValues, kAnchorSpeedDefault);
-	r.fall = small("fall=", 4, 0);
+	r.fall = small("fall=", kThresholdValues, 0);
 	r.grenadeCount = small("gcount=", 12, 0);
 	r.grenadePickup = small("gpick=", 11, 0);
 	r.quickResupply = small("qres=", 2, 0);
@@ -358,6 +369,8 @@ Rules Parse(const std::string& s)
 	r.staggerExplosion = small("sexp=", kStaggerValues, 0);
 	r.staggerAnchor = small("sanc=", kStaggerValues, 0);
 	r.staggerMelee = small("smel=", kStaggerValues, 0);
+	r.massive = small("mshot=", kMassiveValues, 0);
+	r.massiveThreshold = small("mthr=", kThresholdValues, 0);
 	size_t livesAt = s.find("lives=");
 	r.lives = livesAt == std::string::npos ? 0 : atoi(s.c_str() + livesAt + 6);
 	at = s.find("magazines=");
@@ -389,6 +402,8 @@ Rules Own()
 	r.staggerExplosion = g_staggerExplosionRule;
 	r.staggerAnchor = g_staggerAnchorRule;
 	r.staggerMelee = g_staggerMeleeRule;
+	r.massive = g_massiveRule;
+	r.massiveThreshold = g_massiveThresholdRule;
 	if (g_menuSeen) {
 		r.ammo = (g_menu[kRowInfinite] & kInfiniteAmmo) != 0;
 		r.grenades = (g_menu[kRowInfinite] & kInfiniteGrenades) != 0;
@@ -481,7 +496,6 @@ const float kGrappleStock = 1100.0f;
 // (cJump mSpd.y, +0x17c8) with a shared -40.0: at or past it the heavy landing (motion 0x53, the stagger), otherwise the light
 // one (0x0c). These compares read ours instead. Others read the constant for other things and keep it.
 const float kFallStock = -40.0f;
-const float kFallScales[] = {1.0f, 1.5f, 2.0f, 1000000.0f}; // the names are kStaggerNames: Default, Reduced, Low, Off
 volatile float g_fallThreshold = kFallStock;
 struct FallSites {
 	uint32_t constant, first, last;
@@ -691,43 +705,104 @@ int StaggerKindOf(int pool)
 	return kStaggerBullet;
 }
 
+// Per character: when it last reacted (Occasional) and when we last forced a reaction (one per hit: a hit can take from more
+// than one pool, and a shotgun's pellets come as many hits).
+struct StaggerSeen {
+	DWORD reacted = 0, forced = 0;
+};
+std::mutex g_staggerSeenMutex;
+std::map<void*, StaggerSeen> g_staggerSeen;
+const DWORD kStaggerSameHitMs = 100;
+
+void StaggerLog(const char* format, const char* kind, const char* what)
+{
+	static LONG logged = 0;
+	if (InterlockedIncrement(&logged) <= 100) {
+		XLS_LOG_INFO(format, kind, what);
+	}
+}
+
+StaggerSeen StaggerSeenGet(void* character)
+{
+	std::lock_guard<std::mutex> lock(g_staggerSeenMutex);
+	if (g_staggerSeen.size() > 512) {
+		g_staggerSeen.clear();
+	}
+	return g_staggerSeen[character];
+}
+
+void StaggerSeenSet(void* character, bool reacted, bool forced, DWORD now)
+{
+	std::lock_guard<std::mutex> lock(g_staggerSeenMutex);
+	StaggerSeen& seen = g_staggerSeen[character];
+	seen.reacted = reacted ? now : seen.reacted;
+	seen.forced = forced ? now : seen.forced;
+}
+
+// Soldiers in versus only (the rules are VS rules; VS and Akrid keep the game's). Refills (positive) pass as they are.
 template <int Pool>
 bool __attribute__((thiscall)) StaggerAdd(void* character, uint32_t delta, uint32_t b)
 {
-	int16_t points = (int16_t)delta, before = points;
-	int kind = kStaggerBullet, setting = 0;
-	float scale = 1.0f;
-	if (points < 0) {
-		kind = StaggerKindOf(Pool);
-		setting = kind == kStaggerExplosion ? g_staggerExplosion : kind == kStaggerAnchor ? g_staggerAnchor : kind == kStaggerMelee ? g_staggerMelee : g_stagger;
-		scale = kStaggerScales[setting % kStaggerValues];
+	int16_t points = (int16_t)delta;
+	if (points >= 0 || ((uint8_t*)character)[0x1f] != 1) {
+		return g_staggerOriginal[Pool](character, delta, b);
 	}
-	if (points < 0 && scale != 1.0f) {
-		points = (int16_t)std::max(-30000.0f, points * scale);
-		delta = (uint16_t)points;
-		if (points == 0) {
-			return true; // nothing taken off: still standing
+	int kind = StaggerKindOf(Pool);
+	DWORD now = GetTickCount();
+	if (kind == kStaggerBullet && Pool == 1) {
+		// Massive Shot: bullets into the knock-back pool. The threshold divides the points (2x: twice the pellets).
+		int massive = g_massive % kMassiveValues;
+		float threshold = kThresholdScales[g_massiveThreshold % kThresholdValues];
+		if (massive == kMassiveOff || threshold > 1000.0f) {
+			return true;
 		}
-	}
-	bool standing = g_staggerOriginal[Pool](character, delta, b);
-	// stagger is all or nothing per pool, so the increases also escalate the reaction: High also takes the points from
-	// the knock-back (blown) pool, Extreme sets off the knockdown (third) pool. Soldiers only, from the flinch (shrink)
-	// call, so each hit escalates once.
-	if (Pool == 0 && points < 0 && ((uint8_t*)character)[0x1f] == 1 && setting >= 5 && g_staggerOriginal[1] && g_staggerOriginal[2]) {
-		bool up = setting == 6 ? g_staggerOriginal[2](character, (uint16_t)(int16_t)-1000, b) : g_staggerOriginal[1](character, delta, b);
-		if (!up) {
-			standing = false;
-			XLS_LOG_INFO("mods: rules: hit stagger: a %s hit escalated to %s.", kStaggerKindNames[kind], setting == 6 ? "a knockdown" : "a knock-back");
+		int16_t scaled = (int16_t)std::max(-30000.0f, points / threshold);
+		if (scaled == 0) {
+			return true;
 		}
-	}
-	if (!standing && points < 0) {
-		static LONG logged = 0;
-		if (InterlockedIncrement(&logged) <= 100) {
-			XLS_LOG_INFO("mods: rules: hit stagger: a %s hit staggered kind %u (%s pool %d, x%.2f -> %d).", kStaggerKindNames[kind],
-			             (unsigned)((uint8_t*)character)[0x1f], kStaggerPools[Pool], before, scale, points);
+		bool standing = g_staggerOriginal[1](character, (uint16_t)scaled, b);
+		if (!standing) {
+			if (massive == kMassiveDown && g_staggerOriginal[2]) {
+				g_staggerOriginal[2](character, (uint16_t)(int16_t)-30000, b);
+			}
+			StaggerLog("mods: rules: hit stagger: a massive %s shot: %s.", kStaggerKindNames[kind], massive == kMassiveDown ? "knockdown" : "knock-back");
 		}
+		return standing;
 	}
-	return standing;
+	int setting = (kind == kStaggerExplosion ? g_staggerExplosion : kind == kStaggerAnchor ? g_staggerAnchor : kind == kStaggerMelee ? g_staggerMelee : g_stagger) % kStaggerValues;
+	switch (setting) {
+	case kReactDefault: {
+		bool standing = g_staggerOriginal[Pool](character, delta, b);
+		if (!standing) {
+			StaggerLog("mods: rules: hit stagger: a %s hit: the game's %s.", kStaggerKindNames[kind], kStaggerPools[Pool]);
+		}
+		return standing;
+	}
+	case kReactOff:
+		return true;
+	case kReactOccasional: {
+		if (now - StaggerSeenGet(character).reacted < kOccasionalMs) {
+			return true;
+		}
+		bool standing = g_staggerOriginal[Pool](character, delta, b);
+		if (!standing) {
+			StaggerSeenSet(character, true, false, now);
+			StaggerLog("mods: rules: hit stagger: a %s hit: occasional %s.", kStaggerKindNames[kind], kStaggerPools[Pool]);
+		}
+		return standing;
+	}
+	default: {
+		// one reaction per hit, from its own pool: the pool emptied whatever its points
+		int target = setting == kReactFlinch ? 0 : setting == kReactBack ? 1 : 2;
+		if (!g_staggerOriginal[target] || now - StaggerSeenGet(character).forced < kStaggerSameHitMs) {
+			return true;
+		}
+		StaggerSeenSet(character, true, true, now);
+		bool standing = g_staggerOriginal[target](character, (uint16_t)(int16_t)-30000, b);
+		StaggerLog("mods: rules: hit stagger: a %s hit: %s.", kStaggerKindNames[kind], kStaggerNames[setting]);
+		return target == Pool ? standing : true;
+	}
+	}
 }
 
 void StaggerInstall(uint8_t* base, int build)
@@ -832,12 +907,14 @@ DWORD WINAPI SyncThread(LPVOID)
 		g_grapple = r.grapple;
 		bool versus = g_game && *g_game && (*g_game)[0x256] != 0; // these two leave the Campaign as it is
 		g_anchorSpeed = kAnchorSpeedStock * (versus ? kGrappleScales[(r.anchorSpeed + 1) % kGrappleValues] : 1.0f);
-		g_fallThreshold = kFallStock * (versus ? kFallScales[r.fall & 3] : 1.0f);
+		g_fallThreshold = kFallStock * (versus ? kThresholdScales[r.fall % kThresholdValues] : 1.0f);
 		g_grappleLimit = kGrappleStock * kGrappleScales[r.grapple % kGrappleValues];
 		g_stagger = r.stagger;
 		g_staggerExplosion = r.staggerExplosion;
 		g_staggerAnchor = r.staggerAnchor;
 		g_staggerMelee = r.staggerMelee;
+		g_massive = r.massive;
+		g_massiveThreshold = r.massiveThreshold;
 		g_grenadeCount = r.grenades ? 0 : r.grenadeCount; // infinite grenades: the counts are hidden and mean nothing
 		g_grenadePickup = r.grenades ? 0 : r.grenadePickup;
 		RadarRulesSet(r.radar, r.detectPlayers, r.detectVs, r.radarTeam);
@@ -3160,8 +3237,8 @@ enum SetupPage { kSetupTop, kSetupOptions, kSetupSection, kSetupTypes, kSetupEnt
 enum SetupKind { kKindValue, kKindNav, kKindHeader, kKindOwn };
 enum SetupAction { kActNone, kActTypes, kActType, kActOptions, kActCreate, kActSection, kActDefault, kActProfile, kActBots, kActRadar, kActAnchor, kActStagger };
 const char* const kBotRuleKeys[] = {"bots", "botDifficulty", "botBrain", "botPersona", "botTaunts", "radar", "radarPlayers", "radarVs", "anchorRange", "anchorSpeed", "fallStagger", "grenadeCount", "grenadePickup", "quickResupply", "rounds", "switchSides", "radarTeam",
-	"explosionStagger", "anchorStagger", "meleeStagger"};
-const int kBotRuleCounts[] = {2, 4, 2, 6, 4, 3, 4, 4, 13, 12, 4, 12, 11, 2, 14, 11, 2, 7, 7, 7};
+	"explosionStagger", "anchorStagger", "meleeStagger", "massiveShot", "massiveThreshold"};
+const int kBotRuleCounts[] = {2, 4, 2, 6, 4, 3, 4, 4, 13, 12, kThresholdValues, 12, 11, 2, 14, 11, 2, kStaggerValues, kStaggerValues, kStaggerValues, kMassiveValues, kThresholdValues};
 const char* const kRadarNames[] = {"Always On", "Near Data Post", "Hidden"};
 const char* const kDetectNames[] = {"Always Show", "Moving & Shooting", "Running & Shooting", "Shooting"};
 struct SetupRow {
@@ -3339,7 +3416,9 @@ void SetupBuild(const uint8_t* rules)
 		navRow(kKindOwn, kActNone, 17, "Explosion Stagger", kStaggerNames[x["explosionStagger"] % kStaggerValues]);
 		navRow(kKindOwn, kActNone, 18, "Anchor Stagger", kStaggerNames[x["anchorStagger"] % kStaggerValues]);
 		navRow(kKindOwn, kActNone, 19, "Melee Stagger", kStaggerNames[x["meleeStagger"] % kStaggerValues]);
-		navRow(kKindOwn, kActNone, 10, "Fall Stagger", kStaggerNames[x["fallStagger"] & 3]);
+		navRow(kKindOwn, kActNone, 20, "Massive Shot", kMassiveNames[x["massiveShot"] % kMassiveValues]);
+		navRow(kKindOwn, kActNone, 21, "Massive Shot Threshold", kThresholdNames[x["massiveThreshold"] % kThresholdValues]);
+		navRow(kKindOwn, kActNone, 10, "Fall Stagger Threshold", kThresholdNames[x["fallStagger"] % kThresholdValues]);
 		break;
 	}
 	case kSetupAnchor: {
@@ -3667,6 +3746,8 @@ void BotRulesSync()
 	g_anchorRangeRule = x["anchorRange"];
 	g_anchorSpeedRule = x["anchorSpeed"];
 	g_fallRule = x["fallStagger"];
+	g_massiveRule = x["massiveShot"];
+	g_massiveThresholdRule = x["massiveThreshold"];
 	g_grenadeCountRule = x["grenadeCount"];
 	g_grenadePickupRule = x["grenadePickup"];
 	g_quickResupplyRule = x["quickResupply"];
@@ -3989,7 +4070,9 @@ const LobbyRow kLobbyRows[] = {
 	{"Stagger", "Explosion Stagger", -1, 17},
 	{"Stagger", "Anchor Stagger", -1, 18},
 	{"Stagger", "Melee Stagger", -1, 19},
-	{"Stagger", "Fall Stagger", -1, 10},
+	{"Stagger", "Massive Shot", -1, 20},
+	{"Stagger", "Massive Shot Threshold", -1, 21},
+	{"Stagger", "Fall Stagger Threshold", -1, 10},
 	{"Weapons", "Infinite Ammo", kRowInfinite, -1},
 	{"Weapons", "Ammo Supply", kRowSupply, -1},
 	{"Weapons", "Grenade Pickups", -1, 12},
@@ -4020,7 +4103,8 @@ std::string OwnValueName(int own, int v)
 	case 6: case 7: return kDetectNames[v % 4];
 	case 8: return kGrappleNames[v % kGrappleValues];
 	case 9: return kGrappleNames[(v + 1) % kGrappleValues];
-	case 10: return kStaggerNames[v & 3];
+	case 10: case 21: return kThresholdNames[v % kThresholdValues];
+	case 20: return kMassiveNames[v % kMassiveValues];
 	case 11: return v ? std::to_string(v - 1) : "Default";
 	case 12: return v ? std::to_string(v) : "Default";
 	case 13: case 16: return v ? "On" : "Off";
