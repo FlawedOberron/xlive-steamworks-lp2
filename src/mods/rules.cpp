@@ -172,8 +172,9 @@ const float kGrappleScales[] = {0.0f, 0.25f, 0.5f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f,
 const int kGrappleDefault = 3, kAnchorSpeedDefault = 2, kAnchorSpeedValues = 12;
 const int kGrappleValues = (int)(sizeof(kGrappleScales) / sizeof(kGrappleScales[0]));
 // Hit Stagger: the stagger (shrink) points a hit takes off a character, times the scale (see StaggerAdd).
-const char* const kStaggerNames[] = {"Default", "Reduced", "Low", "Off"};
-const float kStaggerScales[] = {1.0f, 0.66f, 0.33f, 0.0f};
+// 0-3 as before the split (saved rules keep their meaning), then the increases
+const char* const kStaggerNames[] = {"Default", "Reduced", "Low", "Off", "Increased", "High", "Extreme"};
+const float kStaggerScales[] = {1.0f, 0.66f, 0.33f, 0.0f, 1.5f, 2.0f, 3.0f};
 const int kStaggerValues = (int)(sizeof(kStaggerScales) / sizeof(kStaggerScales[0]));
 // Infinite Ammo: one row for both rules, bit 0 ammo, bit 1 grenades. Rules byte 0x30 held Unlimited
 // Grenades before (moved into bit 1 when a saved match is loaded) and is free now.
@@ -230,7 +231,7 @@ const Row kRowDefs[] = {
 	{kPageSettings3, 0x31, kSupplyValues, 503, 78, kMsgSupply, "Ammo Supply"},
 	{kPageSettings3, 0x34, 2, 504, 81, kMsgOffOn, "Harmonizer"},
 	{kPageSettings3, 0x35, 6, 505, 82, kMsgGrapple, "Grappling"},
-	{kPageSettings2, 0x36, kStaggerValues, 506, 83, kMsgStagger, "Hit Stagger"},
+	{kPageSettings2, 0x36, kStaggerValues, 506, 83, kMsgStagger, "Bullet Stagger"},
 };
 const int kRows = (int)(sizeof(kRowDefs) / sizeof(kRowDefs[0]));
 enum { kRowSecondary, kRowInfinite, kRowSupply, kRowHarmonizer, kRowGrapple, kRowStagger };
@@ -249,7 +250,8 @@ struct Rules {
 	int grapple = kGrappleDefault; // kGrappleScales index
 	int anchorSpeed = kAnchorSpeedDefault; // the same, less Off
 	int fall = 0; // kFallScales index
-	int stagger = 0; // kStaggerScales index
+	int stagger = 0; // kStaggerScales index: bullets (and any hit not told apart)
+	int staggerExplosion = 0, staggerAnchor = 0, staggerMelee = 0; // kStaggerScales indexes per hit kind
 	int radar = 1, detectPlayers = 0, detectVs = 0, radarTeam = 1; // radar.cpp
 	int grenadeCount = 0;  // 0 the game's amounts, else 1 + the count (so 1 is none)
 	int grenadePickup = 0; // 0 the game's amounts, else the count
@@ -269,7 +271,8 @@ std::atomic<int> g_supply{0};
 std::atomic<bool> g_harmonizer{false};
 uint8_t** g_game = nullptr;
 std::atomic<int> g_grapple{kGrappleDefault};
-std::atomic<int> g_stagger{0};
+std::atomic<int> g_stagger{0}, g_staggerExplosion{0}, g_staggerAnchor{0}, g_staggerMelee{0};
+std::atomic<int> g_staggerExplosionRule{0}, g_staggerAnchorRule{0}, g_staggerMeleeRule{0}; // the setup rows (extras)
 std::atomic<bool> g_survival{false};
 std::atomic<bool> g_offline{true}; // not in a lobby (training): the bots run on this PC
 // Training's AI Enemy Battle rows (see BotCursor): armed while that screen was the last one used
@@ -318,7 +321,7 @@ const uint8_t* WeaponEntry(const uint8_t* weapon)
 
 std::string Format(const Rules& r)
 {
-	return FormatA("ammo=%d;grenades=%d;secondary=%d;magazines=%d;survival=%d;lives=%d;team=%d;harmonizer=%d;grapple=%d;stagger=%d;radar=%d;detectp=%d;detectv=%d;anchor=%d;fall=%d;gcount=%d;gpick=%d;qres=%d;rnd=%d;sw=%d;rteam=%d", r.ammo, r.grenades, r.secondary, r.supply, r.survival, r.lives, r.team, r.harmonizer, r.grapple, r.stagger, r.radar, r.detectPlayers, r.detectVs, r.anchorSpeed, r.fall, r.grenadeCount, r.grenadePickup, r.quickResupply, r.rounds, r.switchEvery, r.radarTeam);
+	return FormatA("ammo=%d;grenades=%d;secondary=%d;magazines=%d;survival=%d;lives=%d;team=%d;harmonizer=%d;grapple=%d;stagger=%d;radar=%d;detectp=%d;detectv=%d;anchor=%d;fall=%d;gcount=%d;gpick=%d;qres=%d;rnd=%d;sw=%d;rteam=%d;sexp=%d;sanc=%d;smel=%d", r.ammo, r.grenades, r.secondary, r.supply, r.survival, r.lives, r.team, r.harmonizer, r.grapple, r.stagger, r.radar, r.detectPlayers, r.detectVs, r.anchorSpeed, r.fall, r.grenadeCount, r.grenadePickup, r.quickResupply, r.rounds, r.switchEvery, r.radarTeam, r.staggerExplosion, r.staggerAnchor, r.staggerMelee);
 }
 
 Rules Parse(const std::string& s)
@@ -352,6 +355,9 @@ Rules Parse(const std::string& s)
 	r.detectPlayers = small("detectp=", 4, 0);
 	r.detectVs = small("detectv=", 4, 0);
 	r.radarTeam = small("rteam=", 2, 1);
+	r.staggerExplosion = small("sexp=", kStaggerValues, 0);
+	r.staggerAnchor = small("sanc=", kStaggerValues, 0);
+	r.staggerMelee = small("smel=", kStaggerValues, 0);
 	size_t livesAt = s.find("lives=");
 	r.lives = livesAt == std::string::npos ? 0 : atoi(s.c_str() + livesAt + 6);
 	at = s.find("magazines=");
@@ -380,6 +386,9 @@ Rules Own()
 	r.quickResupply = g_quickResupplyRule;
 	r.rounds = g_roundsRule;
 	r.switchEvery = g_switchRule;
+	r.staggerExplosion = g_staggerExplosionRule;
+	r.staggerAnchor = g_staggerAnchorRule;
+	r.staggerMelee = g_staggerMeleeRule;
 	if (g_menuSeen) {
 		r.ammo = (g_menu[kRowInfinite] & kInfiniteAmmo) != 0;
 		r.grenades = (g_menu[kRowInfinite] & kInfiniteGrenades) != 0;
@@ -649,65 +658,63 @@ const uint32_t kStaggerAdd[kBuildCount] = {0x9b72a0, 0x9a7a20, 0x9b75c0, 0x9a7b7
 const uint32_t kStaggerPoolOffset[3] = {0, 0xb0, 0x160};
 const char* const kStaggerPools[3] = {"shrink", "blown", "third"};
 
+// The hit's kind, from what called the pools (bot match log 2026-11-09, game-settings-plan.md): melee and anchor hits come
+// through their own functions, whose return addresses are on the stack; the third pool is the explosions' knock; the
+// rest are bullets. Return addresses (VAs) per build, DX11 Steam found in the log, the rest ported (sigport.py).
+enum StaggerKind { kStaggerBullet, kStaggerExplosion, kStaggerAnchor, kStaggerMelee };
+const char* const kStaggerKindNames[] = {"bullet", "explosion", "anchor", "melee"};
+const uint32_t kStaggerMeleeRet[kBuildCount] = {0x8472a7, 0x837e57, 0x8474a7, 0x837f97};  // FUN_00847270's call (DX11)
+const uint32_t kStaggerAnchorRet[kBuildCount] = {0x834650, 0x825860, 0x834880, 0x825910}; // FUN_008345c0's call (DX11)
+int g_staggerBuild = -1;
+
+int StaggerKindOf(int pool)
+{
+	if (pool == 2) {
+		return kStaggerExplosion;
+	}
+	if (g_staggerBuild < 0) {
+		return kStaggerBullet;
+	}
+	uintptr_t base = (uintptr_t)GetModuleHandleW(nullptr) - 0x400000;
+	uintptr_t melee = kStaggerMeleeRet[g_staggerBuild] + base, anchor = kStaggerAnchorRet[g_staggerBuild] + base;
+	NT_TIB* tib = (NT_TIB*)NtCurrentTeb();
+	uintptr_t* sp = (uintptr_t*)__builtin_frame_address(0);
+	uintptr_t* top = (uintptr_t*)tib->StackBase;
+	for (int k = 0; k < 200 && sp + k < top; k++) {
+		if (sp[k] == melee) {
+			return kStaggerMelee;
+		}
+		if (sp[k] == anchor) {
+			return kStaggerAnchor;
+		}
+	}
+	return kStaggerBullet;
+}
+
 template <int Pool>
 bool __attribute__((thiscall)) StaggerAdd(void* character, uint32_t delta, uint32_t b)
 {
 	int16_t points = (int16_t)delta, before = points;
-	float scale = kStaggerScales[g_stagger % kStaggerValues];
+	int kind = kStaggerBullet;
+	float scale = 1.0f;
+	if (points < 0) {
+		kind = StaggerKindOf(Pool);
+		int setting = kind == kStaggerExplosion ? g_staggerExplosion : kind == kStaggerAnchor ? g_staggerAnchor : kind == kStaggerMelee ? g_staggerMelee : g_stagger;
+		scale = kStaggerScales[setting % kStaggerValues];
+	}
 	if (points < 0 && scale != 1.0f) {
-		points = (int16_t)(points * scale);
+		points = (int16_t)std::max(-30000.0f, points * scale);
 		delta = (uint16_t)points;
 		if (points == 0) {
 			return true; // nothing taken off: still standing
 		}
 	}
 	bool standing = g_staggerOriginal[Pool](character, delta, b);
-	if (points < 0) {
-		// every hit (capped): the call chain tells the hit kinds apart (bullet / explosion / anchor / melee handlers),
-		// for the stagger split. Return addresses into the exe found on the stack above us, as RVAs + 0x400000.
-		{
-			static uintptr_t lo = 0, hi = 0;
-			if (!lo) {
-				uint8_t* exe = (uint8_t*)GetModuleHandleW(nullptr);
-				IMAGE_NT_HEADERS* nt = (IMAGE_NT_HEADERS*)(exe + ((IMAGE_DOS_HEADER*)exe)->e_lfanew);
-				lo = (uintptr_t)exe + 0x1000;
-				hi = (uintptr_t)exe + nt->OptionalHeader.SizeOfImage;
-			}
-			uintptr_t chain[6] = {};
-			int n = 0;
-			uintptr_t* sp = (uintptr_t*)__builtin_frame_address(0);
-			for (int k = 0; k < 160 && n < 6; k++) {
-				uintptr_t v = 0;
-				if (!ReadGame(sp + k, &v)) {
-					break;
-				}
-				if (v >= lo && v < hi) {
-					uint8_t op[5] = {};
-					// a return address follows a call: e8 rel32 (5 bytes back) or ff /2 (2, 3 or 6 back)
-					if (ReadGame((uint8_t(*)[5])(v - 5), &op) && (op[0] == 0xe8 || op[3] == 0xff || op[2] == 0xff || (op[0] == 0xff))) {
-						chain[n++] = v - (uintptr_t)GetModuleHandleW(nullptr) + 0x400000;
-					}
-				}
-			}
-			// each distinct path: its first 3 hits, then every 50th (bots' gunfire doesn't crowd out the rarer kinds)
-			static std::mutex lock;
-			static std::vector<std::pair<std::array<uintptr_t, 7>, int>> seen;
-			int count = 0;
-			{
-				std::lock_guard<std::mutex> g(lock);
-				std::array<uintptr_t, 7> key = {(uintptr_t)Pool, chain[0], chain[1], chain[2], chain[3], chain[4], chain[5]};
-				auto it = std::find_if(seen.begin(), seen.end(), [&](const auto& e) { return e.first == key; });
-				if (it == seen.end() && seen.size() < 200) {
-					seen.push_back({key, 0});
-					it = seen.end() - 1;
-				}
-				count = it != seen.end() ? ++it->second : 0;
-			}
-			if (count > 0 && (count <= 3 || count % 50 == 0)) {
-				XLS_LOG_INFO("mods: rules: hit stagger: %s %d (scaled %d, x%.2f) on kind %u%s; path seen %d times; calls %x %x %x %x %x %x.",
-				             kStaggerPools[Pool], before, points, scale, (unsigned)((uint8_t*)character)[0x1f], standing ? "" : ", ran out: staggered",
-				             count, (unsigned)chain[0], (unsigned)chain[1], (unsigned)chain[2], (unsigned)chain[3], (unsigned)chain[4], (unsigned)chain[5]);
-			}
+	if (!standing && points < 0) {
+		static LONG logged = 0;
+		if (InterlockedIncrement(&logged) <= 100) {
+			XLS_LOG_INFO("mods: rules: hit stagger: a %s hit staggered kind %u (%s pool %d, x%.2f -> %d).", kStaggerKindNames[kind],
+			             (unsigned)((uint8_t*)character)[0x1f], kStaggerPools[Pool], before, scale, points);
 		}
 	}
 	return standing;
@@ -715,6 +722,7 @@ bool __attribute__((thiscall)) StaggerAdd(void* character, uint32_t delta, uint3
 
 void StaggerInstall(uint8_t* base, int build)
 {
+	g_staggerBuild = build >= 0 && build < kBuildCount ? build : -1;
 	bool dx9 = build == 1 || build == 3;
 	const uint8_t prologue[] = {0x56, 0x8b, 0xf1, 0x8b, 0x8e, (uint8_t)(dx9 ? 0xb4 : 0xc4), 0x0c, 0x00, 0x00}; // push esi; mov esi,ecx; mov ecx,[esi+0xcc4]
 	const uint8_t third[] = {0x56, 0x8b, 0xf1, 0x83, 0xbe, (uint8_t)(dx9 ? 0xe0 : 0xf0), 0x17, 0x00, 0x00, 0x00}; // push esi; mov esi,ecx; cmp [esi+0x17f0],0
@@ -817,6 +825,9 @@ DWORD WINAPI SyncThread(LPVOID)
 		g_fallThreshold = kFallStock * (versus ? kFallScales[r.fall & 3] : 1.0f);
 		g_grappleLimit = kGrappleStock * kGrappleScales[r.grapple % kGrappleValues];
 		g_stagger = r.stagger;
+		g_staggerExplosion = r.staggerExplosion;
+		g_staggerAnchor = r.staggerAnchor;
+		g_staggerMelee = r.staggerMelee;
 		g_grenadeCount = r.grenades ? 0 : r.grenadeCount; // infinite grenades: the counts are hidden and mean nothing
 		g_grenadePickup = r.grenades ? 0 : r.grenadePickup;
 		RadarRulesSet(r.radar, r.detectPlayers, r.detectVs, r.radarTeam);
@@ -3138,8 +3149,9 @@ const uint8_t kScoreRows[] = {0x01, 0x0e, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x1e};
 enum SetupPage { kSetupTop, kSetupOptions, kSetupSection, kSetupTypes, kSetupEntries, kSetupName, kSetupBots, kSetupRadar, kSetupAnchor };
 enum SetupKind { kKindValue, kKindNav, kKindHeader, kKindOwn };
 enum SetupAction { kActNone, kActTypes, kActType, kActOptions, kActCreate, kActSection, kActDefault, kActProfile, kActBots, kActRadar, kActAnchor };
-const char* const kBotRuleKeys[] = {"bots", "botDifficulty", "botBrain", "botPersona", "botTaunts", "radar", "radarPlayers", "radarVs", "anchorRange", "anchorSpeed", "fallStagger", "grenadeCount", "grenadePickup", "quickResupply", "rounds", "switchSides", "radarTeam"};
-const int kBotRuleCounts[] = {2, 4, 2, 6, 4, 3, 4, 4, 13, 12, 4, 12, 11, 2, 14, 11, 2};
+const char* const kBotRuleKeys[] = {"bots", "botDifficulty", "botBrain", "botPersona", "botTaunts", "radar", "radarPlayers", "radarVs", "anchorRange", "anchorSpeed", "fallStagger", "grenadeCount", "grenadePickup", "quickResupply", "rounds", "switchSides", "radarTeam",
+	"explosionStagger", "anchorStagger", "meleeStagger"};
+const int kBotRuleCounts[] = {2, 4, 2, 6, 4, 3, 4, 4, 13, 12, 4, 12, 11, 2, 14, 11, 2, 7, 7, 7};
 const char* const kRadarNames[] = {"Always On", "Near Data Post", "Hidden"};
 const char* const kDetectNames[] = {"Always Show", "Moving & Shooting", "Running & Shooting", "Shooting"};
 struct SetupRow {
@@ -3244,6 +3256,9 @@ void SetupBuild(const uint8_t* rules)
 		navRow(kKindNav, kActRadar, 0, "Radar", kRadarNames[g_radarMode % 3]);
 		navRow(kKindNav, kActAnchor, 0, "Anchor", ">");
 		navRow(kKindOwn, kActNone, 10, "Fall Stagger", kStaggerNames[GameRulesExtras()["fallStagger"] & 3]);
+		navRow(kKindOwn, kActNone, 17, "Explosion Stagger", kStaggerNames[GameRulesExtras()["explosionStagger"] % kStaggerValues]);
+		navRow(kKindOwn, kActNone, 18, "Anchor Stagger", kStaggerNames[GameRulesExtras()["anchorStagger"] % kStaggerValues]);
+		navRow(kKindOwn, kActNone, 19, "Melee Stagger", kStaggerNames[GameRulesExtras()["meleeStagger"] % kStaggerValues]);
 		navRow(kKindNav, kActCreate, 0, "Begin Match", "");
 		break;
 	case kSetupSection:
@@ -3636,6 +3651,9 @@ void BotRulesSync()
 	g_quickResupplyRule = x["quickResupply"];
 	g_roundsRule = x["rounds"];
 	g_switchRule = x["switchSides"];
+	g_staggerExplosionRule = x["explosionStagger"];
+	g_staggerAnchorRule = x["anchorStagger"];
+	g_staggerMeleeRule = x["meleeStagger"];
 }
 
 // Keep what carries between types, take the entry's rules, tell the game.
