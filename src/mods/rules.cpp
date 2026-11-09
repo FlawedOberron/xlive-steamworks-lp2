@@ -3710,6 +3710,26 @@ void SetupWriteTable()
 	VirtualProtect(g_rowTable, sizeof(g_stockRows), old, &old);
 }
 
+// The help line (stock, thiscall(screen)): the cursor row's rule offset indexes a short table of ticker messages
+// (DX9 0x17d9780), which ends at offset 0x30, so our rows past it (Bullet Stagger 0x36 and others) read the row table
+// after it as an index (Gato 2026-11-09: 0x2827). The ticker (DX9 FUN_00e7cb20) then indexes a 35-entry local array
+// with it: a crash on DX9, garbage on DX11. Any index outside 0..34 becomes 0 (no message).
+CreateTickFn g_createHelpOriginal = nullptr;
+const uint8_t kCreateHelpPrologue[] = {0x56, 0x8b, 0xf1, 0x8b, 0x86, 0x18, 0x04, 0x00, 0x00}; // push esi; mov esi,ecx; mov eax,[esi+0x418]
+
+void __attribute__((thiscall)) CreateHelp(uint8_t* screen)
+{
+	g_createHelpOriginal(screen);
+	int16_t& id = *(int16_t*)(screen + kCreateHelpId);
+	if (id < 0 || id > 34) {
+		static LONG logged = 0;
+		if (InterlockedIncrement(&logged) <= 5) {
+			XLS_LOG_INFO("mods: rules: create screen help message %d out of range (row offset past the game's table), none shown.", id);
+		}
+		id = 0;
+	}
+}
+
 void SetupSelect(uint8_t* screen)
 {
 	SetupAt& at = g_setupStack.back();
@@ -5433,6 +5453,10 @@ void RulesInstall(unsigned char* base)
 		g_createTickOriginal = (CreateTickFn)Detour(base + (kCreateTick[build] - 0x400000), kCreateTickPrologue, sizeof(kCreateTickPrologue), (void*)&CreateTick);
 		g_createRefresh = (CreateRefreshFn)(base + (kCreateRefresh[build] - 0x400000));
 		g_createHelp = (CreateTickFn)(base + (kCreateHelp[build] - 0x400000));
+		g_createHelpOriginal = (CreateTickFn)Detour((uint8_t*)g_createHelp, kCreateHelpPrologue, sizeof(kCreateHelpPrologue), (void*)&CreateHelp);
+		if (!g_createHelpOriginal) {
+			XLS_LOG_WARN("mods: rules: create screen help line not guarded (code not recognised).");
+		}
 		g_createArrows = (CreateTickFn)(base + (kCreateArrows[build] - 0x400000));
 		static const uint32_t kCreateCheck[kBuildCount] = {0xe8cb60, 0xe7cad0, 0xe9c950, 0xe8cab0};
 		g_createCheck = (CreateCheckFn)(base + (kCreateCheck[build] - 0x400000));
