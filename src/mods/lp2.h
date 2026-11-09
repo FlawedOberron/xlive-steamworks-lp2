@@ -131,6 +131,7 @@ int ZonesShow(const char* pattern, bool show, uint32_t rgb, float height, float 
 void ZonesPack(std::vector<uint8_t>* m);
 void ZonesUnpack(const uint8_t*& p, const uint8_t* end);
 void BotsSetMap(const MapPhysics* physics); // the package's bot zones (none: areas from the start points)
+bool StockNavZones(int map, struct NavZones* out); // a stock online map's bot zones (stocknav.cpp), false: none
 float RulesGrappleRange(); // the match's anchor reach, cm (0: grappling off)
 
 // Game versions that may play together (sessions.compatible_versions; versions.cpp).

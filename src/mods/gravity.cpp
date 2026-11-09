@@ -93,6 +93,16 @@ void __cdecl AreaFlags(const char* area)
 	WaterSetMap(g_active ? &g_physics : nullptr);
 	DamageSetMap(g_active ? &g_physics : nullptr);
 	OnewaySetMap(g_active ? &g_physics : nullptr);
+	if (!g_active && episode == 7) {
+		// a stock online map (System Link or online): its embedded bot zones, as a package's
+		MapPhysics stock;
+		if (StockNavZones(map, &stock.nav)) {
+			BotsSetMap(&stock);
+			ZonesSetMap(&stock);
+			XLS_LOG_INFO("mods: stock nav: map %d has %u bot zones, %u links.", map, (unsigned)stock.nav.zones.size(),
+				(unsigned)stock.nav.links.size());
+		}
+	}
 	ScriptSetMap(g_active ? &g_physics : nullptr);
 	JeepSetMap(episode == 7 ? map : -1);
 	if (!g_active) {
