@@ -68,6 +68,7 @@ function lp2SetupFit(row, value)
       row.lp2Width = field._width;
       row.lp2Format = field.getTextFormat();
       row.lp2Right = row.mc_arrowR._x + row.mc_arrowR._width;
+      row.lp2ArrowX = row.mc_arrowL._x;
       if(row.lp2Right < field._x + field._width)
       {
          row.lp2Right = field._x + field._width;
@@ -76,6 +77,7 @@ function lp2SetupFit(row, value)
    title._width = row.lp2Title;
    field._x = row.lp2X;
    field._width = row.lp2Width;
+   row.mc_arrowL._x = row.lp2ArrowX;
    field.setNewTextFormat(row.lp2Format);
    field.setTextFormat(row.lp2Format);
    if(value == "")
@@ -86,9 +88,24 @@ function lp2SetupFit(row, value)
    {
       field._x = row.lp2Right - 74;
       field._width = 60;
+      title._width = field._x - title._x;
       var far = field.getTextFormat();
       far.align = "right";
       field.setTextFormat(far);
+   }
+   else if(field.textWidth > row.lp2Width - 8)
+   {
+      // a long value (a game mode, a profile name): the field grows left into the label's unused room, the left arrow with it
+      var right = row.lp2X + row.lp2Width;
+      var left = title._x + Math.min(title.textWidth + 8,row.lp2Title) + 16;
+      if(left < right - field.textWidth - 12)
+      {
+         left = right - field.textWidth - 12;
+      }
+      field._x = left;
+      field._width = right - left;
+      title._width = left - title._x;
+      row.mc_arrowL._x = row.lp2ArrowX - (row.lp2X - left);
    }
 }
 function lp2SetupText()

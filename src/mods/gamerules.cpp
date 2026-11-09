@@ -26,12 +26,10 @@ const int kMain = 0x16, kSub = 0x17, kSurvival = 0x32, kMap = 0x1b;
 const std::vector<GameType> kTypes = {
 	{"elimination-gauge", 0, 0, false},
 	{"elimination-kills", 0, 1, false},
-	{"elimination-survival", 0, 1, true},
 	{"elimination-points", 0, 2, false},
 	{"elimination-random", 0, 3, false},
 	{"team-elimination-gauge", 1, 0, false},
 	{"team-elimination-kills", 1, 1, false},
-	{"team-elimination-survival", 1, 1, true},
 	{"team-elimination-points", 1, 2, false},
 	{"team-elimination-vs", 1, 3, false},
 	{"team-elimination-random", 1, 4, false},
@@ -181,7 +179,7 @@ int GameTypeOf(const uint8_t* rules)
 {
 	for (size_t i = 0; i < kTypes.size(); i++) {
 		const GameType& t = kTypes[i];
-		if (t.main == rules[kMain] && (t.main >= 3 || t.sub == rules[kSub]) && t.survival == (rules[kSurvival] == 1)) {
+		if (t.main == rules[kMain] && (t.main >= 3 || t.sub == rules[kSub])) { // Survival (rules byte 0x32) is a game mode now: a saved 1 reads as Kills
 			return (int)i;
 		}
 	}

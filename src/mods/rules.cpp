@@ -714,6 +714,27 @@ struct StaggerSeen {
 std::mutex g_staggerSeenMutex;
 std::map<void*, StaggerSeen> g_staggerSeen;
 const DWORD kStaggerSameHitMs = 100;
+// The hit handler (uCharacterBase::vf151) counts a reaction level from the pools' answers: shrink out = 1, blown out +1,
+// third out +1 and a knockdown (FUN_009b8bb0, which only it calls). The level then sizes the local player's camera shake and
+// rumble (FUN_009d2860) and a meter (FUN_009b9190); the flinch and knock-back are set by the pools themselves.
+using KnockdownFn = void(__attribute__((thiscall)) *)(void*);
+using HitShakeFn = void(__attribute__((thiscall)) *)(void*, uint32_t);
+const uint32_t kStaggerKnockdown[kBuildCount] = {0x9b8bb0, 0x9a9330, 0x9b8ed0, 0x9a9480};
+const uint32_t kHitShake[kBuildCount] = {0x9d2860, 0x9c2ea0, 0x9d27c0, 0x9c2c20};
+KnockdownFn g_knockdown = nullptr;
+HitShakeFn g_hitShakeOriginal = nullptr;
+// This thread's last hit: no reaction wanted (Off, or Occasional waiting), so the shake goes too
+thread_local bool t_hitQuiet = false;
+thread_local DWORD t_hitAt = 0;
+
+void __attribute__((thiscall)) HitShake(void* character, uint32_t level)
+{
+	bool quiet = t_hitQuiet && GetTickCount() - t_hitAt < 50;
+	t_hitQuiet = false;
+	if (!quiet) {
+		g_hitShakeOriginal(character, level);
+	}
+}
 
 void StaggerLog(const char* format, const char* kind, const char* what)
 {
@@ -771,6 +792,8 @@ bool __attribute__((thiscall)) StaggerAdd(void* character, uint32_t delta, uint3
 		return standing;
 	}
 	int setting = (kind == kStaggerExplosion ? g_staggerExplosion : kind == kStaggerAnchor ? g_staggerAnchor : kind == kStaggerMelee ? g_staggerMelee : g_stagger) % kStaggerValues;
+	t_hitAt = now;
+	t_hitQuiet = setting == kReactOff || (setting == kReactOccasional && now - StaggerSeenGet(character).reacted < kOccasionalMs);
 	switch (setting) {
 	case kReactDefault: {
 		bool standing = g_staggerOriginal[Pool](character, delta, b);
@@ -793,21 +816,39 @@ bool __attribute__((thiscall)) StaggerAdd(void* character, uint32_t delta, uint3
 		return standing;
 	}
 	default: {
-		// one reaction per hit, from its own pool: the pool emptied whatever its points
+		// one reaction per hit, whatever its points: the target pool emptied (and the knockdown call, which only the hit
+		// handler makes), and the answers say "out" up to the target so the handler's level matches
 		int target = setting == kReactFlinch ? 0 : setting == kReactBack ? 1 : 2;
-		if (!g_staggerOriginal[target] || now - StaggerSeenGet(character).forced < kStaggerSameHitMs) {
-			return true;
+		if (!g_staggerOriginal[target] || (target == 2 && !g_knockdown)) {
+			return g_staggerOriginal[Pool](character, delta, b);
 		}
-		StaggerSeenSet(character, true, true, now);
-		bool standing = g_staggerOriginal[target](character, (uint16_t)(int16_t)-30000, b);
-		StaggerLog("mods: rules: hit stagger: a %s hit: %s.", kStaggerKindNames[kind], kStaggerNames[setting]);
-		return target == Pool ? standing : true;
+		bool first = now - StaggerSeenGet(character).forced >= kStaggerSameHitMs;
+		if (first) {
+			StaggerSeenSet(character, true, true, now);
+			g_staggerOriginal[target](character, (uint16_t)(int16_t)-30000, b);
+			if (target == 2 && Pool != 2) {
+				g_knockdown(character);
+			}
+			StaggerLog("mods: rules: hit stagger: a %s hit: %s.", kStaggerKindNames[kind], kStaggerNames[setting]);
+			return Pool > target;
+		}
+		return Pool == 2 ? true : Pool > target; // the same hit's later pools (the third: its knockdown is done)
 	}
 	}
 }
 
 void StaggerInstall(uint8_t* base, int build)
 {
+	if (build >= 0 && build < kBuildCount) {
+		const uint8_t kd[] = {0x56, 0x8b, 0xf1}; // push esi; mov esi,ecx
+		uint8_t* at = base + (kStaggerKnockdown[build] - 0x400000);
+		g_knockdown = memcmp(at, kd, sizeof(kd)) == 0 ? (KnockdownFn)at : nullptr;
+		const uint8_t shake[] = {0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf0}; // push ebp; mov ebp,esp; and esp,-16
+		g_hitShakeOriginal = (HitShakeFn)Detour(base + (kHitShake[build] - 0x400000), shake, sizeof(shake), (void*)&HitShake);
+		if (!g_knockdown || !g_hitShakeOriginal) {
+			XLS_LOG_WARN("mods: rules: stagger knockdown %s, hit shake %s.", g_knockdown ? "found" : "not found", g_hitShakeOriginal ? "hooked" : "not hooked");
+		}
+	}
 	g_staggerBuild = build >= 0 && build < kBuildCount ? build : -1;
 	bool dx9 = build == 1 || build == 3;
 	const uint8_t prologue[] = {0x56, 0x8b, 0xf1, 0x8b, 0x8e, (uint8_t)(dx9 ? 0xb4 : 0xc4), 0x0c, 0x00, 0x00}; // push esi; mov esi,ecx; mov ecx,[esi+0xcc4]
@@ -5368,23 +5409,10 @@ int RulesStep(int rule, int key, uint8_t* value, const std::function<int()>& ori
 	if (rule == kRuleSub && (key == 10 || key == 11) && value[kRuleMain - kRuleSub] <= 1) {
 		uint8_t& survival = value[kRuleSurvival - kRuleSub];
 		bool on = *value == kSubKills && survival == 1;
-		int changed = 0;
-		if (key == 10 && *value == kSubKills && !on) { // Kills -> Survival
-			survival = 1;
-			changed = 1;
-		}
-		else if (key == 11 && on) { // Survival -> Kills
-			survival = 0;
-			changed = 1;
-		}
-		else {
-			uint8_t was = *value;
-			survival = 0;
-			changed = original() ? 2 : 0; // 2: the game's step (it made the sound)
-			if (changed && key == 11 && was == kSubPoints && *value == kSubKills) { // Points -> Survival
-				survival = 1;
-			}
-		}
+		// Survival is a game mode now (Modes\Survival.lp2mode), not a sub-type: the steps pass it by
+		(void)on;
+		survival = 0;
+		int changed = original() ? 2 : 0; // 2: the game's step (it made the sound)
 		bool was = g_menuSurvival;
 		g_menuSurvival = SurvivalOn(value - kRuleSub);
 		g_menuTeam = value[kRuleMain - kRuleSub] == 1;
