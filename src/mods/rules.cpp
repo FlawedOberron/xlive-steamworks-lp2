@@ -175,22 +175,24 @@ const int kGrappleValues = (int)(sizeof(kGrappleScales) / sizeof(kGrappleScales[
 // Hit Stagger: what a soldier does when a hit of each kind (bullet, explosion, anchor, melee) takes stagger points (see
 // StaggerAdd). The points only decide when, and one hit is enough for most, so the rows pick the reaction instead.
 // the pools: shrink = flinch, blown = knockdown, third = the electric stun (FUN_009b8bb0; user test 2026-11-09)
-const char* const kStaggerNames[] = {"Default", "Off", "Occasional", "Flinch", "Knockdown", "Stun"};
+// Knockdown Pull / Push: the knockdown plus a throw toward / away from the attacker (Knockdown Force), see KnockdownThrow
+const char* const kStaggerNames[] = {"Default", "Off", "Occasional", "Flinch", "Knockdown", "Knockdown Pull", "Knockdown Push", "Stun"};
 const int kStaggerValues = (int)(sizeof(kStaggerNames) / sizeof(kStaggerNames[0]));
-enum { kReactDefault, kReactOff, kReactOccasional, kReactFlinch, kReactBack, kReactDown };
+enum { kReactDefault, kReactOff, kReactOccasional, kReactFlinch, kReactBack, kReactBackPull, kReactBackPush, kReactDown };
 const DWORD kOccasionalMs = 1500; // Occasional: at most one reaction this often
 // Thresholds (Fall Stagger, Massive Shot Threshold): the game's limit times the scale, higher is harder to reach.
 const char* const kThresholdNames[] = {"Default", "0.5x", "0.75x", "1.25x", "1.5x", "2x", "3x", "Never"};
 const float kThresholdScales[] = {1.0f, 0.5f, 0.75f, 1.25f, 1.5f, 2.0f, 3.0f, 1000000.0f};
 const int kThresholdValues = (int)(sizeof(kThresholdScales) / sizeof(kThresholdScales[0]));
 // Massive Shot: bullets filling the knock-back (blown) pool, as a shotgun blast does.
-const char* const kMassiveNames[] = {"Default", "Off", "Knockdown", "Stun"};
-const int kMassiveValues = 4;
-enum { kMassiveDefault, kMassiveOff, kMassiveBack, kMassiveDown };
-// Knockdown Push: a soldier knocked down is thrown away from the attacker and up (cm/s, force.cpp ForceThrow).
-const char* const kPushNames[] = {"Off", "Light", "Medium", "Heavy", "Launch"};
-const float kPushOut[] = {0.0f, 450.0f, 700.0f, 1000.0f, 1400.0f}, kPushUp[] = {0.0f, 300.0f, 450.0f, 600.0f, 1000.0f};
-const int kPushValues = 5;
+const char* const kMassiveNames[] = {"Default", "Off", "Knockdown", "Knockdown Pull", "Knockdown Push", "Stun"};
+const int kMassiveValues = 6;
+enum { kMassiveDefault, kMassiveOff, kMassiveBack, kMassiveBackPull, kMassiveBackPush, kMassiveDown };
+// Knockdown Force: how hard Knockdown Pull / Push throw (cm/s along the ground, and up; force.cpp ForceThrow). Rule key
+// knockdownPush / kpush= (it was the push's own row first).
+const char* const kPushNames[] = {"Light", "Medium", "Heavy", "Launch"};
+const float kPushOut[] = {450.0f, 700.0f, 1000.0f, 1400.0f}, kPushUp[] = {300.0f, 450.0f, 600.0f, 1000.0f};
+const int kPushValues = 4;
 // Infinite Ammo: one row for both rules, bit 0 ammo, bit 1 grenades. Rules byte 0x30 held Unlimited
 // Grenades before (moved into bit 1 when a saved match is loaded) and is free now.
 const char* const kInfiniteNames[] = {"Off", "Weapons", "Grenades", "All"};
@@ -770,46 +772,121 @@ void StaggerSeenSet(void* character, bool reacted, bool forced, DWORD now)
 	seen.forced = forced ? now : seen.forced;
 }
 
-// The hit handler (uCharacterBase::vf151, thiscall(character, 4 args) -> float): its third argument is the attacker
-// (it keeps the attacker's id, +0x1c, at +0x1d58). Kept for this thread while it runs, for the knockdown push's direction.
+// The hit handler (uCharacterBase::vf151, thiscall(character, 4 args) -> float): its third argument is the attacker,
+// a character (type +0x1f 1-3) or a shot (type 4, its owner at +0x24; the handler itself follows it so). Kept for this
+// thread while it runs (the knockdown throw's direction), and per character for the fall kill credit (FallCredit).
 using HitHandlerFn = float(__attribute__((thiscall)) *)(void*, uint32_t, uint32_t, uint32_t, uint32_t);
 const uint32_t kHitHandler[kBuildCount] = {0x9d4210, 0x9c4850, 0x9d4170, 0x9c45d0};
 HitHandlerFn g_hitHandlerOriginal = nullptr;
 thread_local uint8_t* t_attacker = nullptr;
+// No flinch for this hit (Bullet Off, or Occasional waiting): the handler sets "was hit" (+0xd7c bit 8, DX9 +0xd6c)
+// on every hit, and the player's think (cThinkPlVsCF::vf14) turns it into the flinch the next frame; cleared after.
+thread_local bool t_noFlinch = false;
+const DWORD kFallCreditMs = 5000;
+struct LastHit {
+	DWORD at;
+	int slot;
+};
+std::mutex g_lastHitMutex;
+std::map<void*, LastHit> g_lastHit;
+
+uint8_t* AttackerBody(uint8_t* attacker)
+{
+	if ((uintptr_t)attacker < 0x10000) {
+		return nullptr;
+	}
+	if (attacker[0x1f] == 4) {
+		attacker = *(uint8_t**)(attacker + 0x24);
+		if ((uintptr_t)attacker < 0x10000) {
+			return nullptr;
+		}
+	}
+	uint8_t type = attacker[0x1f];
+	uint32_t state = *(uint32_t*)(attacker + 4) & 7;
+	return type >= 1 && type <= 3 && (state == 1 || state == 2) ? attacker : nullptr;
+}
 
 float __attribute__((thiscall)) HitHandler(void* character, uint32_t a, uint32_t b, uint32_t attacker, uint32_t d)
 {
 	uint8_t* was = t_attacker;
-	t_attacker = (uint8_t*)(uintptr_t)attacker;
+	uint8_t* body = AttackerBody((uint8_t*)(uintptr_t)attacker);
+	t_attacker = body;
+	t_noFlinch = false;
 	float result = g_hitHandlerOriginal(character, a, b, attacker, d);
+	if (t_noFlinch) {
+		bool dx9 = g_staggerBuild == 1 || g_staggerBuild == 3;
+		*(uint32_t*)((uint8_t*)character + (dx9 ? 0xd6c : 0xd7c)) &= ~8u;
+		t_noFlinch = false;
+	}
 	t_attacker = was;
+	if (body && body != character && ((uint8_t*)character)[0x1f] == 1) {
+		int slot = RulesSlotOf(body);
+		if (slot >= 0 && slot != RulesSlotOf((uint8_t*)character)) {
+			std::lock_guard<std::mutex> lock(g_lastHitMutex);
+			if (g_lastHit.size() > 256) {
+				g_lastHit.clear();
+			}
+			g_lastHit[character] = {GetTickCount(), slot};
+		}
+	}
 	return result;
 }
 
-// A soldier knocked down: thrown back from the attacker (straight up when there's none to go by) and up.
-void KnockdownPush(void* character, const char* why)
+// A death with no hit (a fall, a kill zone): the game's think (DX9 FUN_00902bc0, thiscall(think, character, hit), hit
+// null) takes the killer from the character's "burn attacker" slot (+0x166c DX9 / +0x167c DX11) when +1 is set, as a
+// burn death does. A soldier hit by another player in the last 5 s gets that player there first, so the fall counts as
+// their kill. Resets at the next spawn (the game's).
+using DeathThinkFn = void(__attribute__((thiscall)) *)(void*, uint8_t*, void*);
+const uint32_t kDeathThink[kBuildCount] = {0x912590, 0x902bc0, 0x912800, 0x902de0};
+DeathThinkFn g_deathThinkOriginal = nullptr;
+
+void __attribute__((thiscall)) DeathThink(void* think, uint8_t* character, void* hit)
 {
-	int push = g_push % kPushValues;
-	if (!push) {
-		return;
+	if (!hit && character && character[0x1f] == 1) {
+		bool dx9 = g_staggerBuild == 1 || g_staggerBuild == 3;
+		uint8_t* credit = character + (dx9 ? 0x166c : 0x167c);
+		LastHit last{0, -1};
+		{
+			std::lock_guard<std::mutex> lock(g_lastHitMutex);
+			auto it = g_lastHit.find(character);
+			if (it != g_lastHit.end()) {
+				last = it->second;
+				g_lastHit.erase(it);
+			}
+		}
+		if (last.slot >= 0 && GetTickCount() - last.at < kFallCreditMs && !credit[1]) {
+			credit[0] = (uint8_t)last.slot;
+			credit[1] = 1;
+			XLS_LOG_INFO("mods: rules: a death with no hit (player %d), %u ms after player %d's hit: their kill.", RulesSlotOf(character), (unsigned)(GetTickCount() - last.at), last.slot);
+		}
 	}
+	g_deathThinkOriginal(think, character, hit);
+}
+
+// Knockdown Pull / Push: a soldier knocked down is thrown toward / away from the attacker along the ground (straight up
+// when there's none to go by) and up, by Knockdown Force.
+void KnockdownThrow(void* character, bool pull, const char* why)
+{
+	int force = g_push % kPushValues;
 	const float* pos = (const float*)((uint8_t*)character + 0x30);
 	uint8_t* attacker = t_attacker;
 	float dx = 0.0f, dz = 0.0f;
-	if ((uintptr_t)attacker >= 0x10000 && (uint8_t*)character != attacker) {
-		uint32_t state = *(uint32_t*)(attacker + 4) & 7;
-		if (state == 1 || state == 2) {
-			const float* from = (const float*)(attacker + 0x30);
-			dx = pos[0] - from[0];
-			dz = pos[2] - from[2];
-		}
+	if (attacker && (uint8_t*)character != attacker) {
+		const float* from = (const float*)(attacker + 0x30);
+		dx = pos[0] - from[0];
+		dz = pos[2] - from[2];
 	}
 	float len = sqrtf(dx * dx + dz * dz);
-	float v[3] = {len > 1.0f ? dx / len * kPushOut[push] : 0.0f, kPushUp[push], len > 1.0f ? dz / len * kPushOut[push] : 0.0f};
+	float out = (pull ? -1.0f : 1.0f) * kPushOut[force];
+	if (pull && len > 1.0f) {
+		// a pull lands short of the attacker rather than past them (flight time 2 up / g, g taken as 980 cm/s2)
+		out = -std::min(kPushOut[force], 0.8f * len * 980.0f / (2.0f * kPushUp[force]));
+	}
+	float v[3] = {len > 1.0f ? dx / len * out : 0.0f, kPushUp[force], len > 1.0f ? dz / len * out : 0.0f};
 	ForceThrow((unsigned char*)character, v);
 	static LONG logged = 0;
 	if (InterlockedIncrement(&logged) <= 50) {
-		XLS_LOG_INFO("mods: rules: knockdown push (%s, %s): %.0f %.0f %.0f cm/s%s.", kPushNames[push], why, v[0], v[1], v[2], len > 1.0f ? "" : ", no attacker to push from");
+		XLS_LOG_INFO("mods: rules: knockdown %s (%s, %s): %.0f %.0f %.0f cm/s, attacker %.0f cm away (type %d)%s.", pull ? "pull" : "push", kPushNames[force], why, v[0], v[1], v[2], len, attacker ? attacker[0x1f] : 0, len > 1.0f ? "" : ", none to go by");
 	}
 }
 
@@ -898,26 +975,24 @@ bool __attribute__((thiscall)) StaggerAdd(void* character, uint32_t delta, uint3
 			return true;
 		}
 		bool standing = g_staggerOriginal[1](character, (uint16_t)scaled, b);
-		if (!standing && massive != kMassiveDown) {
-			KnockdownPush(character, "massive shot");
+		if (!standing && (massive == kMassiveBackPull || massive == kMassiveBackPush)) {
+			KnockdownThrow(character, massive == kMassiveBackPull, "massive shot");
 		}
 		if (!standing) {
 			if (massive == kMassiveDown && g_staggerOriginal[2]) {
 				g_staggerOriginal[2](character, (uint16_t)(int16_t)-30000, b);
 			}
-			StaggerLog("mods: rules: hit stagger: a massive %s shot: %s.", kStaggerKindNames[kind], massive == kMassiveDown ? "stun" : "knockdown");
+			StaggerLog("mods: rules: hit stagger: a massive %s shot: %s.", kStaggerKindNames[kind], kMassiveNames[massive]);
 		}
 		return standing;
 	}
 	int setting = (kind == kStaggerExplosion ? g_staggerExplosion : kind == kStaggerAnchor ? g_staggerAnchor : kind == kStaggerMelee ? g_staggerMelee : g_stagger) % kStaggerValues;
 	t_hitAt = now;
 	t_hitQuiet = setting == kReactOff || (setting == kReactOccasional && now - StaggerSeenGet(character).reacted < kOccasionalMs);
+	t_noFlinch = t_noFlinch || t_hitQuiet;
 	switch (setting) {
 	case kReactDefault: {
 		bool standing = g_staggerOriginal[Pool](character, delta, b);
-		if (!standing && Pool == 1) {
-			KnockdownPush(character, kStaggerKindNames[kind]);
-		}
 		if (!standing) {
 			StaggerLog("mods: rules: hit stagger: a %s hit: the game's %s.", kStaggerKindNames[kind], kStaggerPools[Pool]);
 		}
@@ -930,9 +1005,6 @@ bool __attribute__((thiscall)) StaggerAdd(void* character, uint32_t delta, uint3
 			return true;
 		}
 		bool standing = g_staggerOriginal[Pool](character, delta, b);
-		if (!standing && Pool == 1) {
-			KnockdownPush(character, kStaggerKindNames[kind]);
-		}
 		if (!standing) {
 			StaggerSeenSet(character, true, false, now);
 			StaggerLog("mods: rules: hit stagger: a %s hit: occasional %s.", kStaggerKindNames[kind], kStaggerPools[Pool]);
@@ -942,7 +1014,7 @@ bool __attribute__((thiscall)) StaggerAdd(void* character, uint32_t delta, uint3
 	default: {
 		// one reaction per hit, whatever its points: the target pool emptied (and the knockdown call, which only the hit
 		// handler makes), and the answers say "out" up to the target so the handler's level matches
-		int target = setting == kReactFlinch ? 0 : setting == kReactBack ? 1 : 2;
+		int target = setting == kReactFlinch ? 0 : setting == kReactDown ? 2 : 1;
 		if (!g_staggerOriginal[target] || (target == 2 && !g_knockdown)) {
 			return g_staggerOriginal[Pool](character, delta, b);
 		}
@@ -953,8 +1025,8 @@ bool __attribute__((thiscall)) StaggerAdd(void* character, uint32_t delta, uint3
 			if (target == 2 && Pool != 2) {
 				g_knockdown(character);
 			}
-			if (target == 1) {
-				KnockdownPush(character, kStaggerKindNames[kind]);
+			if (setting == kReactBackPull || setting == kReactBackPush) {
+				KnockdownThrow(character, setting == kReactBackPull, kStaggerKindNames[kind]);
 			}
 			StaggerLog("mods: rules: hit stagger: a %s hit: %s.", kStaggerKindNames[kind], kStaggerNames[setting]);
 			return Pool > target;
@@ -973,9 +1045,14 @@ void StaggerInstall(uint8_t* base, int build)
 		const uint8_t shake[] = {0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf0}; // push ebp; mov ebp,esp; and esp,-16
 		g_hitHandlerOriginal = (HitHandlerFn)Detour(base + (kHitHandler[build] - 0x400000), shake, sizeof(shake), (void*)&HitHandler);
 		if (!g_hitHandlerOriginal) {
-			XLS_LOG_WARN("mods: rules: hit handler not hooked, the knockdown push goes straight up.");
+			XLS_LOG_WARN("mods: rules: hit handler not hooked: knockdown throws go straight up, no fall kill credit.");
 		}
 		g_hitShakeOriginal = (HitShakeFn)Detour(base + (kHitShake[build] - 0x400000), shake, sizeof(shake), (void*)&HitShake);
+		const uint8_t death[] = {0x83, 0xec, 0x14, 0x55, 0x8b, 0x6c, 0x24, 0x1c}; // sub esp,0x14; push ebp; mov ebp,[esp+0x1c]
+		g_deathThinkOriginal = (DeathThinkFn)Detour(base + (kDeathThink[build] - 0x400000), death, sizeof(death), (void*)&DeathThink);
+		if (!g_deathThinkOriginal) {
+			XLS_LOG_WARN("mods: rules: death think not hooked, falls after a hit stay suicides.");
+		}
 		if (!g_knockdown || !g_hitShakeOriginal) {
 			XLS_LOG_WARN("mods: rules: stagger knockdown %s, hit shake %s.", g_knockdown ? "found" : "not found", g_hitShakeOriginal ? "hooked" : "not hooked");
 		}
@@ -3592,7 +3669,7 @@ void SetupBuild(const uint8_t* rules)
 		navRow(kKindOwn, kActNone, 19, "Melee Stagger", kStaggerNames[x["meleeStagger"] % kStaggerValues]);
 		navRow(kKindOwn, kActNone, 20, "Massive Shot", kMassiveNames[x["massiveShot"] % kMassiveValues]);
 		navRow(kKindOwn, kActNone, 21, "Massive Shot Threshold", kThresholdNames[x["massiveThreshold"] % kThresholdValues]);
-		navRow(kKindOwn, kActNone, 22, "Knockdown Push", kPushNames[x["knockdownPush"] % kPushValues]);
+		navRow(kKindOwn, kActNone, 22, "Knockdown Force", kPushNames[x["knockdownPush"] % kPushValues]);
 		navRow(kKindOwn, kActNone, 10, "Fall Stagger Threshold", kThresholdNames[x["fallStagger"] % kThresholdValues]);
 		break;
 	}
@@ -4271,7 +4348,7 @@ const LobbyRow kLobbyOwnRows[] = {
 	{"Stagger", "Melee Stagger", kLobbyOwn, 19},
 	{"Stagger", "Massive Shot", kLobbyOwn, 20},
 	{"Stagger", "Massive Shot Threshold", kLobbyOwn, 21},
-	{"Stagger", "Knockdown Push", kLobbyOwn, 22},
+	{"Stagger", "Knockdown Force", kLobbyOwn, 22},
 	{"Stagger", "Fall Stagger Threshold", kLobbyOwn, 10},
 	{"Weapons", "Infinite Ammo", kLobbyMenu, kRowInfinite},
 	{"Weapons", "Ammo Supply", kLobbyMenu, kRowSupply},

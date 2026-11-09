@@ -68,7 +68,7 @@ bool ReadText(const std::wstring& path, std::string* out)
 	return true;
 }
 
-const RuleName kExtraRules[] = {{"bots", 0, 1}, {"botDifficulty", 1, 3}, {"botBrain", 1, 1}, {"botPersona", 0, 5}, {"botTaunts", 2, 3}, {"radar", 1, 2}, {"radarPlayers", 0, 3}, {"radarVs", 0, 3}, {"anchorRange", 3, 12}, {"anchorSpeed", 2, 11}, {"fallStagger", 0, 7}, {"grenadeCount", 0, 11}, {"grenadePickup", 0, 10}, {"quickResupply", 0, 1}, {"rounds", 0, 13}, {"switchSides", 1, 10}, {"radarTeam", 1, 1}, {"explosionStagger", 0, 5}, {"anchorStagger", 0, 5}, {"meleeStagger", 0, 5}, {"massiveShot", 0, 3}, {"massiveThreshold", 0, 7}, {"knockdownPush", 0, 4}};
+const RuleName kExtraRules[] = {{"bots", 0, 1}, {"botDifficulty", 1, 3}, {"botBrain", 1, 1}, {"botPersona", 0, 5}, {"botTaunts", 2, 3}, {"radar", 1, 2}, {"radarPlayers", 0, 3}, {"radarVs", 0, 3}, {"anchorRange", 3, 12}, {"anchorSpeed", 2, 11}, {"fallStagger", 0, 7}, {"grenadeCount", 0, 11}, {"grenadePickup", 0, 10}, {"quickResupply", 0, 1}, {"rounds", 0, 13}, {"switchSides", 1, 10}, {"radarTeam", 1, 1}, {"explosionStagger", 0, 7}, {"anchorStagger", 0, 7}, {"meleeStagger", 0, 7}, {"massiveShot", 0, 5}, {"massiveThreshold", 0, 7}, {"knockdownPush", 0, 3}};
 std::map<std::string, int> g_extras;
 
 void ExtrasDefault()
