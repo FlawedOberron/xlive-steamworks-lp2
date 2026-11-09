@@ -661,11 +661,37 @@ bool __attribute__((thiscall)) StaggerAdd(void* character, uint32_t delta, uint3
 		}
 	}
 	bool standing = g_staggerOriginal[Pool](character, delta, b);
-	if (!standing && points < 0) {
+	if (points < 0) {
+		// every hit (capped): the call chain tells the hit kinds apart (bullet / explosion / anchor / melee handlers),
+		// for the stagger split. Return addresses into the exe found on the stack above us, as RVAs + 0x400000.
 		static LONG logged = 0;
-		if (InterlockedIncrement(&logged) <= 60) {
-			XLS_LOG_INFO("mods: rules: hit stagger: %s points ran out on %p (kind %u, hit %d, scaled %d, scale %.2f).", kStaggerPools[Pool],
-			             character, (unsigned)((uint8_t*)character)[0x1f], before, points, scale);
+		if (InterlockedIncrement(&logged) <= 400) {
+			static uintptr_t lo = 0, hi = 0;
+			if (!lo) {
+				uint8_t* exe = (uint8_t*)GetModuleHandleW(nullptr);
+				IMAGE_NT_HEADERS* nt = (IMAGE_NT_HEADERS*)(exe + ((IMAGE_DOS_HEADER*)exe)->e_lfanew);
+				lo = (uintptr_t)exe + 0x1000;
+				hi = (uintptr_t)exe + nt->OptionalHeader.SizeOfImage;
+			}
+			uintptr_t chain[6] = {};
+			int n = 0;
+			uintptr_t* sp = (uintptr_t*)__builtin_frame_address(0);
+			for (int k = 0; k < 160 && n < 6; k++) {
+				uintptr_t v = 0;
+				if (!ReadGame(sp + k, &v)) {
+					break;
+				}
+				if (v >= lo && v < hi) {
+					uint8_t op[5] = {};
+					// a return address follows a call: e8 rel32 (5 bytes back) or ff /2 (2, 3 or 6 back)
+					if (ReadGame((uint8_t(*)[5])(v - 5), &op) && (op[0] == 0xe8 || op[3] == 0xff || op[2] == 0xff || (op[0] == 0xff))) {
+						chain[n++] = v - (uintptr_t)GetModuleHandleW(nullptr) + 0x400000;
+					}
+				}
+			}
+			XLS_LOG_INFO("mods: rules: hit stagger: %s %d (scaled %d, x%.2f) on kind %u%s; calls %x %x %x %x %x %x.", kStaggerPools[Pool], before,
+			             points, scale, (unsigned)((uint8_t*)character)[0x1f], standing ? "" : ", ran out: staggered", (unsigned)chain[0],
+			             (unsigned)chain[1], (unsigned)chain[2], (unsigned)chain[3], (unsigned)chain[4], (unsigned)chain[5]);
 		}
 	}
 	return standing;
