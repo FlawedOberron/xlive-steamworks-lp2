@@ -668,6 +668,8 @@ struct RoamGoal {
 	float linkA[3] = {0, 0, 0}, linkB[3] = {0, 0, 0};
 	DWORD linkSeen = 0;
 	DWORD jumpAt = 0, grappleAt = 0, aimFrom = 0, unstickAt = 0; // last presses; when it started aiming the anchor
+	DWORD traceAt = 0;      // the movement trace (Resolve): when it last logged, from where
+	float tracePos[3] = {0, 0, 0};
 	float grappleY = 0;     // height when it fired, to log whether it climbed
 	bool grappleCheck = false;
 };
@@ -723,6 +725,7 @@ struct Region {
 };
 std::vector<Region> g_regions;
 std::vector<int> g_zoneRegion; // per zone
+LONG g_traceLines = 0;          // movement trace lines this map (Resolve)
 const void* g_areaSet = nullptr;
 uint32_t g_areaCount = 0;
 
@@ -866,6 +869,7 @@ void RegionsBuild()
 		r.open = r.zones.size() <= 2 || biggest >= 0.5f * total;
 		open += r.open;
 	}
+	g_traceLines = 0;
 	XLS_LOG_INFO("mods: bots: %u zones in %u regions (%d open: one look sweeps them).", (unsigned)n, (unsigned)g_regions.size(), open);
 }
 
@@ -996,7 +1000,7 @@ int AreaAt(const float* p)
 // distance: it's quick, a grapple a lot: only where walking is much longer). Grapples beyond the match's anchor range
 // aren't links at all. The point to run to: across a walk link, the next zone; else the link's start, then its end once
 // there (a ledge to drop off, a launch volume to walk into: force.cpp throws the bot, a grapple's firing spot).
-const float kHopAt = 250.0f;
+const float kHopAt = 600.0f;
 
 const float* ZoneWaypoint(const float* from, const float* goal, int start, int end, int* hopFrom, int* hopTo, const Hop** link)
 {
@@ -1039,24 +1043,36 @@ const float* ZoneWaypoint(const float* from, const float* goal, int start, int e
 	if (prev[end] < 0) {
 		return goal;
 	}
-	int hop = end;
-	while (prev[hop] != start) {
-		hop = prev[hop];
+	// The game's move action stops a few metres short of the point it's given (bots stood 3 - 9 m from a hop for a
+	// minute): walk hops within kHopAt are skipped for the next one on the route, a link counts as reached there too.
+	std::vector<int> path;
+	for (int at = end; at != start; at = prev[at]) {
+		path.push_back(at);
 	}
-	*hopFrom = start;
-	*hopTo = hop;
-	const Hop* h = via[hop];
-	*link = h;
-	if (!h || h->kind == kNavWalk) {
-		return hop == end ? goal : g_areas[hop].pos;
+	std::reverse(path.begin(), path.end());
+	int before = start;
+	for (int hop : path) {
+		const Hop* h = via[hop];
+		*hopFrom = before;
+		*hopTo = hop;
+		*link = h;
+		if (!h || h->kind == kNavWalk) {
+			const float* point = hop == end ? goal : g_areas[hop].pos;
+			if (hop == end || Distance2(from, point) > kHopAt * kHopAt) {
+				return point;
+			}
+			before = hop;
+			continue;
+		}
+		static DWORD logged = 0;
+		if (GetTickCount() - logged > 3000) {
+			logged = GetTickCount();
+			static const char* const kKinds[] = {"walk", "jump", "drop", "grapple", "launch"};
+			XLS_LOG_INFO("mods: bots: route from zone %d to %d by %s (%.0f m to its start).", before, hop, kKinds[h->kind % 5], sqrtf(Distance2(from, h->a)) / 100.0f);
+		}
+		return Distance2(from, h->a) > kHopAt * kHopAt ? h->a : h->b;
 	}
-	static DWORD logged = 0;
-	if (GetTickCount() - logged > 3000) {
-		logged = GetTickCount();
-		static const char* const kKinds[] = {"walk", "jump", "drop", "grapple", "launch"};
-		XLS_LOG_INFO("mods: bots: route from zone %d to %d by %s (%.0f m to its start).", start, hop, kKinds[h->kind % 5], sqrtf(Distance2(from, h->a)) / 100.0f);
-	}
-	return Distance2(from, h->a) > kHopAt * kHopAt ? h->a : h->b;
+	return goal;
 }
 
 // Caller holds g_goalLock. Where to run now for a goal: in the goal's area, the goal; else the next area on the shortest route
@@ -1418,6 +1434,19 @@ char __attribute__((thiscall)) Resolve(void* self, uint8_t* unit, uint8_t* plan,
 			XLS_LOG_INFO("mods: bots: %p stuck going from area %d to %d (%.0f m left): link blocked for a while.", unit, hopFrom, hopTo, left / 100.0f);
 		}
 	}
+	if (now - g.traceAt >= 15000) { // how roaming goes: a line per bot every 15 s, the first 150 of a map
+		if (g.traceAt && g_traceLines < 150) {
+			g_traceLines++;
+			int z = AreaAt(here), gz = AreaAt(g.pos);
+			auto reg = [](int zone) { return zone >= 0 && zone < (int)g_zoneRegion.size() ? g_zoneRegion[zone] : -1; };
+			XLS_LOG_INFO("mods: bots: trace %p moved %.1f m in %.0f s; zone %d (region %d) -> goal zone %d (region %d) %.0f m away; "
+			             "hop %d -> %d kind %d, waypoint %.1f m away (%.0f %.0f %.0f).", unit, sqrtf(Distance2(here, g.tracePos)) / 100.0f,
+			             (now - g.traceAt) / 1000.0f, z, reg(z), gz, reg(gz), sqrtf(Distance2(here, g.pos)) / 100.0f, hopFrom, hopTo,
+			             g.linkKind, left / 100.0f, to[0], to[1], to[2]);
+		}
+		g.traceAt = now;
+		memcpy(g.tracePos, here, sizeof(g.tracePos));
+	}
 	out[0] = to[0];
 	out[1] = to[1];
 	out[2] = to[2];
@@ -1435,7 +1464,7 @@ char __attribute__((thiscall)) Resolve(void* self, uint8_t* unit, uint8_t* plan,
 // (think +0x1a8, cVirtualCursor mCursorPos +0x60 / mCursorTargetPos +0x70) is held on the link's end for a moment, then
 // the anchor fires. Launch links need nothing (walking into the volume throws it). Stalled on any link: one jump.
 const uint32_t kThinkCursor = 0x1a8, kCursorPos = 0x60, kCursorTarget = 0x70, kPadJump = 0x2, kPadAnchor = 0x4;
-const float kJumpAt = 130.0f, kGrappleAt = 300.0f;
+const float kJumpAt = 300.0f, kGrappleAt = 900.0f; // the game stops a few metres short of a point
 const DWORD kLinkFresh = 700, kJumpRest = 900, kGrappleRest = 4000, kAimFor = 350, kUnstickAfter = 1800, kUnstickRest = 2500;
 
 void Traverse(uint8_t* think, uint8_t* unit)
