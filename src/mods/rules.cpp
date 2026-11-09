@@ -695,11 +695,11 @@ template <int Pool>
 bool __attribute__((thiscall)) StaggerAdd(void* character, uint32_t delta, uint32_t b)
 {
 	int16_t points = (int16_t)delta, before = points;
-	int kind = kStaggerBullet;
+	int kind = kStaggerBullet, setting = 0;
 	float scale = 1.0f;
 	if (points < 0) {
 		kind = StaggerKindOf(Pool);
-		int setting = kind == kStaggerExplosion ? g_staggerExplosion : kind == kStaggerAnchor ? g_staggerAnchor : kind == kStaggerMelee ? g_staggerMelee : g_stagger;
+		setting = kind == kStaggerExplosion ? g_staggerExplosion : kind == kStaggerAnchor ? g_staggerAnchor : kind == kStaggerMelee ? g_staggerMelee : g_stagger;
 		scale = kStaggerScales[setting % kStaggerValues];
 	}
 	if (points < 0 && scale != 1.0f) {
@@ -710,6 +710,16 @@ bool __attribute__((thiscall)) StaggerAdd(void* character, uint32_t delta, uint3
 		}
 	}
 	bool standing = g_staggerOriginal[Pool](character, delta, b);
+	// stagger is all or nothing per pool, so the increases also escalate the reaction: High also takes the points from
+	// the knock-back (blown) pool, Extreme sets off the knockdown (third) pool. Soldiers only, from the flinch (shrink)
+	// call, so each hit escalates once.
+	if (Pool == 0 && points < 0 && ((uint8_t*)character)[0x1f] == 1 && setting >= 5 && g_staggerOriginal[1] && g_staggerOriginal[2]) {
+		bool up = setting == 6 ? g_staggerOriginal[2](character, (uint16_t)(int16_t)-1000, b) : g_staggerOriginal[1](character, delta, b);
+		if (!up) {
+			standing = false;
+			XLS_LOG_INFO("mods: rules: hit stagger: a %s hit escalated to %s.", kStaggerKindNames[kind], setting == 6 ? "a knockdown" : "a knock-back");
+		}
+	}
 	if (!standing && points < 0) {
 		static LONG logged = 0;
 		if (InterlockedIncrement(&logged) <= 100) {
@@ -3134,7 +3144,7 @@ struct Section {
 const std::vector<Section> kSections = {
 	{"General", {0x12, 0x15, 0x13, 0x2a, 0x20, 0x08, 0x0f, 0x02, 0x10, 0x11, 0x29}},
 	{"Rounds", {0x26}},
-	{"Player", {0x03, 0x2e, 0x04, 0x36, 0x34, 0x27, 0x28}},
+	{"Player", {0x03, 0x2e, 0x04, 0x34, 0x27, 0x28}}, // Bullet Stagger (0x36) is on the Stagger page
 	{"Weapons", {0x05, 0x06, 0x2f, 0x31}},
 	{"VS", {0x07}},
 };
@@ -3146,9 +3156,9 @@ std::string RoundsName(int index)
 } // these have a row of ours, so they're always there
 const uint8_t kScoreRows[] = {0x01, 0x0e, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x1e};
 
-enum SetupPage { kSetupTop, kSetupOptions, kSetupSection, kSetupTypes, kSetupEntries, kSetupName, kSetupBots, kSetupRadar, kSetupAnchor };
+enum SetupPage { kSetupTop, kSetupOptions, kSetupSection, kSetupTypes, kSetupEntries, kSetupName, kSetupBots, kSetupRadar, kSetupAnchor, kSetupStagger };
 enum SetupKind { kKindValue, kKindNav, kKindHeader, kKindOwn };
-enum SetupAction { kActNone, kActTypes, kActType, kActOptions, kActCreate, kActSection, kActDefault, kActProfile, kActBots, kActRadar, kActAnchor };
+enum SetupAction { kActNone, kActTypes, kActType, kActOptions, kActCreate, kActSection, kActDefault, kActProfile, kActBots, kActRadar, kActAnchor, kActStagger };
 const char* const kBotRuleKeys[] = {"bots", "botDifficulty", "botBrain", "botPersona", "botTaunts", "radar", "radarPlayers", "radarVs", "anchorRange", "anchorSpeed", "fallStagger", "grenadeCount", "grenadePickup", "quickResupply", "rounds", "switchSides", "radarTeam",
 	"explosionStagger", "anchorStagger", "meleeStagger"};
 const int kBotRuleCounts[] = {2, 4, 2, 6, 4, 3, 4, 4, 13, 12, 4, 12, 11, 2, 14, 11, 2, 7, 7, 7};
@@ -3255,10 +3265,6 @@ void SetupBuild(const uint8_t* rules)
 		navRow(kKindNav, kActBots, 0, "Bots", g_matchBots ? "On" : "Off");
 		navRow(kKindNav, kActRadar, 0, "Radar", kRadarNames[g_radarMode % 3]);
 		navRow(kKindNav, kActAnchor, 0, "Anchor", ">");
-		navRow(kKindOwn, kActNone, 10, "Fall Stagger", kStaggerNames[GameRulesExtras()["fallStagger"] & 3]);
-		navRow(kKindOwn, kActNone, 17, "Explosion Stagger", kStaggerNames[GameRulesExtras()["explosionStagger"] % kStaggerValues]);
-		navRow(kKindOwn, kActNone, 18, "Anchor Stagger", kStaggerNames[GameRulesExtras()["anchorStagger"] % kStaggerValues]);
-		navRow(kKindOwn, kActNone, 19, "Melee Stagger", kStaggerNames[GameRulesExtras()["meleeStagger"] % kStaggerValues]);
 		navRow(kKindNav, kActCreate, 0, "Begin Match", "");
 		break;
 	case kSetupSection:
@@ -3272,6 +3278,9 @@ void SetupBuild(const uint8_t* rules)
 			int rounds = GameRulesExtras()["rounds"], every = GameRulesExtras()["switchSides"];
 			navRow(kKindOwn, kActNone, 14, "Rounds", RoundsName(rounds));
 			navRow(kKindOwn, kActNone, 15, "Switch Side Every # Rounds", every ? std::to_string(every) : "Never");
+		}
+		if ((size_t)at.arg == kSectionPlayer) {
+			navRow(kKindNav, kActStagger, 0, "Stagger", ">");
 		}
 		if ((size_t)at.arg == kSectionPlayer && !(rules[0x2f] & kInfiniteGrenades)) {
 			int count = GameRulesExtras()["grenadeCount"];
@@ -3319,6 +3328,18 @@ void SetupBuild(const uint8_t* rules)
 		navRow(kKindOwn, kActNone, 6, "Players Show", kDetectNames[x["radarPlayers"] % 4]);
 		navRow(kKindOwn, kActNone, 7, "VS Show", kDetectNames[x["radarVs"] % 4]);
 		navRow(kKindOwn, kActNone, 16, "Team Colours", x["radarTeam"] ? "On" : "Off");
+		break;
+	}
+	case kSetupStagger: {
+		g_setupTitle = "Stagger";
+		std::map<std::string, int>& x = GameRulesExtras();
+		if (StockRow(c, 0x36)) {
+			valueRow(0x36); // Bullet Stagger (and any hit not told apart)
+		}
+		navRow(kKindOwn, kActNone, 17, "Explosion Stagger", kStaggerNames[x["explosionStagger"] % kStaggerValues]);
+		navRow(kKindOwn, kActNone, 18, "Anchor Stagger", kStaggerNames[x["anchorStagger"] % kStaggerValues]);
+		navRow(kKindOwn, kActNone, 19, "Melee Stagger", kStaggerNames[x["meleeStagger"] % kStaggerValues]);
+		navRow(kKindOwn, kActNone, 10, "Fall Stagger", kStaggerNames[x["fallStagger"] & 3]);
 		break;
 	}
 	case kSetupAnchor: {
@@ -3728,6 +3749,10 @@ void SetupConfirm(uint8_t* screen, uint8_t* rules)
 	case kActAnchor:
 		MenuSound(screen, kSoundConfirm);
 		SetupOpenPage(screen, rules, kSetupAnchor, 0, 0);
+		break;
+	case kActStagger:
+		MenuSound(screen, kSoundConfirm);
+		SetupOpenPage(screen, rules, kSetupStagger, 0, 0);
 		break;
 	case kActRadar:
 		MenuSound(screen, kSoundConfirm);

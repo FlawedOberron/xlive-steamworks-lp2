@@ -10,7 +10,8 @@
 //
 // uFighter::vf65 (DX11 0x9db4c0) runs for each unit near a fighter; for a weapon it sets up the pickup prompt, unless one of the
 // fighter's 8 slots holds the same id (top 3 bytes) and that gun can't take more (FUN_00c7acc0, which always says no for a handgun).
-//   Ammo: FUN_00c7cee0, what the game's own same-gun pickup calls, so pickups aren't scaled twice (rules.cpp, g_transfer).
+//   Ammo: FUN_00c7cee0, what the game's own same-gun pickup calls, so pickups aren't scaled twice (rules.cpp, g_transfer);
+//   the magazine is kept as it was (the game's add also refills it).
 //   Handgun: nothing to add, it just goes, so the floor isn't left with pistols nobody who has one can take.
 //   Gone: hidden, not destroyed. +0x2157 is the game's "not shown" for a weapon (set for one lost in a fall), +4 bit 0x800 draws it and
 //   equipping clears the mark. Other machines' messages can still name the object safely, and vf65 skips one we marked.
@@ -101,7 +102,14 @@ bool Touch(uint8_t* fighter, uint8_t* weapon)
 		}
 		uint8_t role = fighter[0xcd0 - g_shift];
 		if (!handgun && role != 2 && role != 3) {
+			// the game's ammo add (FUN_00c7aa20) also tops up the magazine (+0x20fc, the total +0x20fe includes it); a quick
+			// resupply only adds to the reserve, so the magazine stays as it was and the reload is still the player's
+			int16_t& mag = *(int16_t*)(mine + 0x20fc - g_shift);
+			int16_t before = mag;
 			g_transfer(mine, ammo, 0);
+			if (before >= 0 && mag > before) {
+				mag = before;
+			}
 		}
 		if (uint8_t* control = ViewerControl(fighter)) {
 			if (g_popupThis && *g_popupThis) {
