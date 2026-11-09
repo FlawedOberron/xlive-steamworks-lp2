@@ -737,8 +737,6 @@ DWORD WINAPI SyncThread(LPVOID)
 		if (Format(r) != published) {
 			published = Format(r);
 			MemberDataSet("rules", published);
-			Bytes save(published.begin(), published.end());
-			WriteWholeFile(Cfg().modCacheDir + L"rules.txt", save);
 		}
 		CSteamID lobby = SessionPresenceLobby();
 		g_offline = !lobby.IsValid();
@@ -4527,20 +4525,22 @@ void RulesInstall(unsigned char* base)
 		std::lock_guard<std::mutex> lock(g_mutex);
 		g_memberRules[steamId] = Parse(value);
 	});
-	Bytes saved;
-	if (ReadWholeFile(Cfg().modCacheDir + L"rules.txt", &saved)) {
-		Rules r = Parse(std::string(saved.begin(), saved.end()));
-		for (int i = 0; i < kSecondaryValues; i++) {
-			g_menu[kRowSecondary] = kSecondaryKinds[i] == r.secondary ? i : (int)g_menu[kRowSecondary];
+	// After a fresh start: the rules of the last match created (ModCache\gamerules\current.json, saved by Create match),
+	// so what we publish before the setup screen opens is that ruleset; edits left without creating a match don't count.
+	uint8_t saved[0x38] = {};
+	std::string savedProfile;
+	bool savedEdited = false;
+	if (GameRulesLoadCurrent(saved, &savedProfile, &savedEdited)) {
+		for (int i = 0; i < kRows; i++) {
+			uint8_t v = saved[kRowDefs[i].offset];
+			g_menu[i] = v < kRowDefs[i].values ? v : 0;
 		}
-		for (int i = 0; i < kSupplyValues; i++) {
-			g_menu[kRowSupply] = kSupplyMagazines[i] == r.supply ? i : (int)g_menu[kRowSupply];
-		}
-		g_menu[kRowInfinite] = (r.ammo ? kInfiniteAmmo : 0) | (r.grenades ? kInfiniteGrenades : 0);
-		g_menu[kRowHarmonizer] = r.harmonizer ? 1 : 0;
-		g_menu[kRowGrapple] = r.grapple;
-		g_menu[kRowStagger] = r.stagger;
+		g_menuSurvival = SurvivalOn(saved);
+		g_menuTeam = saved[kRuleMain] == 1;
+		g_menuLives = kLives[saved[kRuleLives] < kLivesValues ? saved[kRuleLives] : 0];
+		BotRulesSync();
 		g_menuSeen = true;
+		XLS_LOG_INFO("mods: rules: last match's rules loaded (current.json): %s.", Format(Own()).c_str());
 	}
 	MemberDataSet("rules", Format(Own()));
 	HANDLE t = CreateThread(nullptr, 0, SyncThread, nullptr, 0, nullptr);
