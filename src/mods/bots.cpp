@@ -707,6 +707,22 @@ std::unordered_map<int64_t, DWORD> g_blocked; // link from * 4096 + to -> when a
 NavZones g_nav;      // the map package's (under g_goalLock)
 int g_navVersion = 0, g_navBuilt = -1;
 std::unordered_map<int64_t, int> g_areaCells;
+
+// Regions: the zones grouped into a few places worth a look (a field, a building, the tunnels), what roaming bots choose
+// between; the zones stay for routing. Seeds spread over the zone graph about kRegionSpan apart along it (farthest first, at most
+// kRegionMax, then two rounds of re-centring), each zone joins the seed nearest along the graph, climbs counted triple,
+// so tunnels under a field stay their own. A region whose biggest zone is most of it is open: a look from inside sweeps
+// it. Others want a few of their zones visited (kRegionVisits) before the bot moves on.
+const float kRegionSpan = 8500.0f, kRegionClimb = 3.0f;
+const int kRegionMax = 10, kRegionVisits = 3;
+struct Region {
+	int center = 0; // its middle zone
+	std::vector<int> zones;
+	bool open = false;
+	DWORD swept[16] = {};
+};
+std::vector<Region> g_regions;
+std::vector<int> g_zoneRegion; // per zone
 const void* g_areaSet = nullptr;
 uint32_t g_areaCount = 0;
 
@@ -724,6 +740,135 @@ float LevelDistance2(const float* a, const float* b)
 }
 
 // Caller holds g_goalLock. Rebuilt when the start point set changes (a new map or round).
+float ZoneArea(int i)
+{
+	return std::max(g_nav.zones[i].size[0], 100.0f) * std::max(g_nav.zones[i].size[2], 100.0f);
+}
+
+// graph distance from the sources to every zone (links both ways: this is about what's near, not which way it goes)
+std::vector<float> RegionReach(const std::vector<std::vector<std::pair<int, float>>>& edges, const std::vector<int>& sources)
+{
+	size_t n = edges.size();
+	std::vector<float> d(n, 1e30f);
+	std::vector<bool> done(n, false);
+	for (int s : sources) {
+		d[s] = 0;
+	}
+	for (;;) {
+		int u = -1;
+		for (size_t i = 0; i < n; i++) {
+			if (!done[i] && d[i] < 1e29f && (u < 0 || d[i] < d[u])) {
+				u = (int)i;
+			}
+		}
+		if (u < 0) {
+			return d;
+		}
+		done[u] = true;
+		for (auto [v, w] : edges[u]) {
+			d[v] = std::min(d[v], d[u] + w);
+		}
+	}
+}
+
+void RegionsBuild()
+{
+	g_regions.clear();
+	g_zoneRegion.assign(g_areas.size(), -1);
+	size_t n = g_areas.size();
+	if (n == 0 || g_nav.zones.size() != n) {
+		return;
+	}
+	std::vector<std::vector<std::pair<int, float>>> edges(n);
+	for (const NavLink& l : g_nav.links) {
+		const float* a = g_areas[l.from].pos;
+		const float* b = g_areas[l.to].pos;
+		float dx = a[0] - b[0], dz = a[2] - b[2];
+		float w = sqrtf(dx * dx + dz * dz) + kRegionClimb * fabsf(a[1] - b[1]);
+		edges[l.from].push_back({l.to, w});
+		edges[l.to].push_back({l.from, w});
+	}
+	int first = 0; // the biggest zone
+	for (size_t i = 1; i < n; i++) {
+		first = ZoneArea((int)i) > ZoneArea(first) ? (int)i : first;
+	}
+	std::vector<int> seeds = {first};
+	for (;;) {
+		std::vector<float> d = RegionReach(edges, seeds);
+		int farthest = -1;
+		for (size_t i = 0; i < n; i++) {
+			if (d[i] < 1e29f && (farthest < 0 || d[i] > d[farthest])) {
+				farthest = (int)i;
+			}
+		}
+		if (farthest < 0 || d[farthest] < kRegionSpan || (int)seeds.size() >= kRegionMax) {
+			break;
+		}
+		seeds.push_back(farthest);
+	}
+	auto assign = [&]() {
+		std::vector<std::vector<float>> reach;
+		for (int s : seeds) {
+			reach.push_back(RegionReach(edges, {s}));
+		}
+		for (size_t i = 0; i < n; i++) {
+			int best = -1;
+			float bestD = 1e30f;
+			for (size_t k = 0; k < seeds.size(); k++) {
+				float d = reach[k][i] < 1e29f ? reach[k][i] : 1e20f + Distance2(g_areas[i].pos, g_areas[seeds[k]].pos); // off the graph: nearest
+				if (d < bestD) {
+					bestD = d;
+					best = (int)k;
+				}
+			}
+			g_zoneRegion[i] = best;
+		}
+	};
+	for (int round = 0; round < 3; round++) {
+		assign();
+		if (round == 2) {
+			break;
+		}
+		for (size_t k = 0; k < seeds.size(); k++) { // re-centre: the region's zone nearest its area-weighted middle
+			double x = 0, y = 0, z = 0, w = 0;
+			for (size_t i = 0; i < n; i++) {
+				if (g_zoneRegion[i] == (int)k) {
+					double a = ZoneArea((int)i);
+					x += a * g_areas[i].pos[0], y += a * g_areas[i].pos[1], z += a * g_areas[i].pos[2], w += a;
+				}
+			}
+			if (w <= 0) {
+				continue;
+			}
+			float mid[3] = {(float)(x / w), (float)(y / w), (float)(z / w)};
+			int best = seeds[k];
+			for (size_t i = 0; i < n; i++) {
+				if (g_zoneRegion[i] == (int)k && LevelDistance2(g_areas[i].pos, mid) < LevelDistance2(g_areas[best].pos, mid)) {
+					best = (int)i;
+				}
+			}
+			seeds[k] = best;
+		}
+	}
+	g_regions.resize(seeds.size());
+	int open = 0;
+	for (size_t k = 0; k < seeds.size(); k++) {
+		Region& r = g_regions[k];
+		r.center = seeds[k];
+		float total = 0, biggest = 0;
+		for (size_t i = 0; i < n; i++) {
+			if (g_zoneRegion[i] == (int)k) {
+				r.zones.push_back((int)i);
+				total += ZoneArea((int)i);
+				biggest = std::max(biggest, ZoneArea((int)i));
+			}
+		}
+		r.open = r.zones.size() <= 2 || biggest >= 0.5f * total;
+		open += r.open;
+	}
+	XLS_LOG_INFO("mods: bots: %u zones in %u regions (%d open: one look sweeps them).", (unsigned)n, (unsigned)g_regions.size(), open);
+}
+
 void AreasBuild()
 {
 	uint8_t* game = *(uint8_t**)At(g_vas->game);
@@ -763,8 +908,11 @@ void AreasBuild()
 		XLS_LOG_INFO("mods: bots: the map's %u zones, links: %d walk, %d jump, %d drop, %d grapple (%s), %d launch.", (unsigned)g_areas.size(),
 		             kinds[kNavWalk], kinds[kNavJump], kinds[kNavDrop], kinds[kNavGrapple], kBotsGrapple ? "used within the anchor range" : "not used yet",
 		             kinds[kNavLaunch]);
+		RegionsBuild();
 		return;
 	}
+	g_regions.clear();
+	g_zoneRegion.clear();
 	g_points.clear();
 	if (!records || !count || count > 256) {
 		return;
@@ -1010,6 +1158,48 @@ bool RoamPoint(uint8_t* unit, const float* from, RoamGoal& g)
 			fight = true;
 		}
 	}
+	int region = -1;
+	if (pick < 0 && !g_regions.empty()) {
+		auto swept = [&](const Region& r) { return r.swept[team] && now - r.swept[team] < kSweptFor; };
+		int hr = here >= 0 && here < (int)g_zoneRegion.size() ? g_zoneRegion[here] : -1;
+		if (hr >= 0 && !swept(g_regions[hr])) { // in a region not looked over yet: one of its zones it hasn't been in
+			for (int z : g_regions[hr].zones) {
+				const Area& a = g_areas[z];
+				if (z == here || (a.swept[team] && now - a.swept[team] < kSweptFor)) {
+					continue;
+				}
+				float score = (taken(a.pos) ? 100.0f : 0.0f) + Rand() % 50;
+				if (score < bestScore) {
+					bestScore = score;
+					pick = z;
+					region = hr;
+				}
+			}
+		}
+		for (int pass = 0; pass < 2 && pick < 0; pass++) { // the nearest region nobody looked over, nobody on the team headed for
+			for (size_t k = 0; k < g_regions.size(); k++) {
+				const Region& r = g_regions[k];
+				if ((int)k == hr || swept(r)) {
+					continue;
+				}
+				const float* c = g_areas[r.center].pos;
+				float score = sqrtf(Distance2(from, c)) / 100.0f + (taken(c) ? 100.0f : 0.0f) + Rand() % 20;
+				if (score < bestScore) {
+					bestScore = score;
+					pick = r.center;
+					region = (int)k;
+				}
+			}
+			if (pick < 0) {
+				for (Region& r : g_regions) {
+					r.swept[team] = 0;
+				}
+				if (BotLogOn()) {
+					XLS_LOG_INFO("mods: bots: team %d looked over every region, starting over.", team);
+				}
+			}
+		}
+	}
 	for (int pass = 0; pass < 2 && pick < 0; pass++) {
 		for (size_t i = 0; i < g_areas.size(); i++) { // the nearest unswept area nobody on the team is headed for
 			const Area& a = g_areas[i];
@@ -1042,6 +1232,9 @@ bool RoamPoint(uint8_t* unit, const float* from, RoamGoal& g)
 		if (fight) {
 			XLS_LOG_INFO("mods: bots: %p heads for fighting in area %d (%.0f s ago).", unit, pick, (now - a.fight[team]) / 1000.0f);
 		}
+		else if (region >= 0) {
+			XLS_LOG_INFO("mods: bots: %p heads for zone %d of region %d.", unit, pick, region);
+		}
 		else {
 			XLS_LOG_INFO("mods: bots: %p sweeps area %d.", unit, pick);
 		}
@@ -1056,6 +1249,19 @@ void AreasNote(uint8_t* unit, const float* here, const RadarShotInfo* shots, int
 	int team = unit[g_vas->team] & 15, at = AreaAt(here);
 	if (at >= 0) {
 		g_areas[at].swept[team] = now;
+		if (at < (int)g_zoneRegion.size() && g_zoneRegion[at] >= 0) {
+			Region& r = g_regions[g_zoneRegion[at]];
+			int seen = 0;
+			for (int z : r.zones) {
+				seen += g_areas[z].swept[team] && now - g_areas[z].swept[team] < kSweptFor;
+			}
+			if ((r.open || seen >= std::min<int>(kRegionVisits, (int)r.zones.size())) && !(r.swept[team] && now - r.swept[team] < kSweptFor)) {
+				r.swept[team] = now;
+				if (BotLogOn()) {
+					XLS_LOG_INFO("mods: bots: team %d swept region %d.", team, g_zoneRegion[at]);
+				}
+			}
+		}
 	}
 	for (int i = 0; i < n; i++) {
 		if (shots[i].who != unit && (everyone || shots[i].team != unit[g_vas->team]) && Distance2(here, shots[i].pos) < kHearing * kHearing) {
