@@ -8,6 +8,7 @@
 // A test: no seats, no model, no network sync (other players see the VS where their copy puts it).
 #include "mods/jeep/jeep.h"
 #include "mods/lp2.h"
+#include "mods/packages.h"
 
 #include "core/config.h"
 #include "core/log.h"
@@ -333,11 +334,20 @@ void JeepSetMap(int onlineMap)
 		g_haveGround = false;
 		return;
 	}
-	if (onlineMap != g_map) {
+	if (onlineMap != g_map || onlineMap == 13 || onlineMap == 14) {
 		g_map = onlineMap;
 		wchar_t name[64];
 		swprintf(name, 64, L"Mods\\jeep\\online%02d.col", onlineMap);
-		g_haveGround = Load(ExeDirectory() + L"\\" + name);
+		// a map package carries its own (nativePC\jeep\aArea_ONLINE_NN.col, renumbered to its slot like its other files)
+		wchar_t rel[64];
+		swprintf(rel, 64, L"nativepc\\jeep\\aarea_online_%02d.col", onlineMap);
+		std::wstring packaged;
+		if ((onlineMap == 13 || onlineMap == 14) && PackagesSlotBound(onlineMap) && PackagesMapFile(rel, &packaged)) {
+			g_haveGround = Load(packaged);
+		}
+		else {
+			g_haveGround = Load(ExeDirectory() + L"\\" + name);
+		}
 		if (!g_haveGround) {
 			XLS_LOG_INFO("mods: jeep: ModCache\\jeep.txt is on, but online map %d has no %ls: no jeep here.", onlineMap, name);
 		}
