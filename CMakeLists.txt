@@ -80,6 +80,12 @@ file(GLOB_RECURSE xls_headers CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src
 file(GLOB_RECURSE xls_sources CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/*.c")
 set(xls_def "${CMAKE_CURRENT_SOURCE_DIR}/src/xlive_exports.def")
 
+# the stock maps' bot navmesh, .incbin'd by src/mods/stockarea.cpp (lp2-tools/lp2stocknav.py --area)
+set(xls_stockarea "${CMAKE_CURRENT_SOURCE_DIR}/src/mods/stockarea.bin")
+set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/mods/stockarea.cpp" PROPERTIES
+    COMPILE_DEFINITIONS "XLS_STOCKAREA_BIN=\"${xls_stockarea}\""
+    OBJECT_DEPENDS "${xls_stockarea}")
+
 source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" FILES ${xls_headers} ${xls_sources} ${xls_def})
 
 if(XLS_BUILD_STATIC)

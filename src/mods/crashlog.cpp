@@ -5,6 +5,8 @@
 #include <windows.h>
 
 #include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 #include <exception>
 #include <typeinfo>
 
@@ -157,6 +159,9 @@ namespace {
 // moved by 64 MB or more, and at every game message box.
 struct Space {
 	uint64_t limitMb, freeMb, largestMb, reservedMb, committedMb;
+	uint64_t imageMb, mappedMb, privateMb, above2gMb; // committed by kind; everything in use above 0x80000000
+	uintptr_t bigBase[3];                              // the largest allocations (reserved + committed), biggest first
+	uint64_t bigMb[3];
 };
 
 Space MeasureSpace()
@@ -169,18 +174,45 @@ Space MeasureSpace()
 	SYSTEM_INFO si;
 	GetSystemInfo(&si);
 	uintptr_t at = (uintptr_t)si.lpMinimumApplicationAddress, end = (uintptr_t)si.lpMaximumApplicationAddress;
-	uint64_t free = 0, largest = 0, reserved = 0, committed = 0;
+	uint64_t free = 0, largest = 0, reserved = 0, committed = 0, image = 0, mapped = 0, priv = 0, above = 0;
+	uintptr_t allocBase = 0;
+	uint64_t allocSize = 0;
+	auto endAlloc = [&] {
+		for (int i = 0; i < 3; i++) {
+			if (allocSize > (s.bigMb[i] << 20)) {
+				for (int j = 2; j > i; j--) {
+					s.bigMb[j] = s.bigMb[j - 1];
+					s.bigBase[j] = s.bigBase[j - 1];
+				}
+				s.bigMb[i] = allocSize >> 20;
+				s.bigBase[i] = allocBase;
+				break;
+			}
+		}
+	};
 	MEMORY_BASIC_INFORMATION mbi;
 	while (at < end && VirtualQuery((void*)at, &mbi, sizeof mbi) == sizeof mbi) {
 		if (mbi.State == MEM_FREE) {
 			free += mbi.RegionSize;
 			largest = mbi.RegionSize > largest ? mbi.RegionSize : largest;
 		}
-		else if (mbi.State == MEM_RESERVE) {
-			reserved += mbi.RegionSize;
-		}
 		else {
-			committed += mbi.RegionSize;
+			if ((uintptr_t)mbi.AllocationBase != allocBase) {
+				endAlloc();
+				allocBase = (uintptr_t)mbi.AllocationBase;
+				allocSize = 0;
+			}
+			allocSize += mbi.RegionSize;
+			if ((uintptr_t)mbi.BaseAddress >= 0x80000000u) {
+				above += mbi.RegionSize;
+			}
+			if (mbi.State == MEM_RESERVE) {
+				reserved += mbi.RegionSize;
+			}
+			else {
+				committed += mbi.RegionSize;
+				(mbi.Type == MEM_IMAGE ? image : mbi.Type == MEM_MAPPED ? mapped : priv) += mbi.RegionSize;
+			}
 		}
 		uintptr_t next = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
 		if (next <= at) {
@@ -192,6 +224,11 @@ Space MeasureSpace()
 	s.largestMb = largest >> 20;
 	s.reservedMb = reserved >> 20;
 	s.committedMb = committed >> 20;
+	endAlloc();
+	s.imageMb = image >> 20;
+	s.mappedMb = mapped >> 20;
+	s.privateMb = priv >> 20;
+	s.above2gMb = above >> 20;
 	return s;
 }
 
@@ -200,6 +237,24 @@ void LogSpace(const char* why, const Space& s)
 	XLS_LOG_INFO("memory (%s): %llu MB free of %llu MB (largest free block %llu MB), %llu MB committed, %llu MB reserved.", why,
 	             (unsigned long long)s.freeMb, (unsigned long long)s.limitMb, (unsigned long long)s.largestMb,
 	             (unsigned long long)s.committedMb, (unsigned long long)s.reservedMb);
+	char big[160] = "";
+	for (int i = 0, n = 0; i < 3 && s.bigMb[i]; i++) {
+		HMODULE owner = nullptr;
+		char name[MAX_PATH] = "";
+		if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+		                       (LPCSTR)s.bigBase[i], &owner) && owner) {
+			GetModuleFileNameA(owner, name, sizeof name);
+		}
+		const char* base = strrchr(name, '\\') ? strrchr(name, '\\') + 1 : name;
+		n += snprintf(big + n, sizeof big - n, "%s%llu MB at %08x%s%s", i ? ", " : "", (unsigned long long)s.bigMb[i],
+		              (unsigned)s.bigBase[i], *base ? " " : "", base);
+		if (n >= (int)sizeof big) {
+			break;
+		}
+	}
+	XLS_LOG_INFO("memory (%s): committed: %llu MB heap, %llu MB code, %llu MB files; %llu MB in use above 2 GB (none of that "
+	             "fits without Large Address Aware); largest allocations: %s.", why, (unsigned long long)s.privateMb,
+	             (unsigned long long)s.imageMb, (unsigned long long)s.mappedMb, (unsigned long long)s.above2gMb, big);
 }
 
 DWORD WINAPI SpaceThread(LPVOID)

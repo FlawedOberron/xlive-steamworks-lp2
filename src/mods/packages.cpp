@@ -1529,7 +1529,17 @@ const std::wstring* PackagesGenerated(const std::wstring& rel, const std::wstrin
 	bool names = rel.compare(0, prefix.size(), prefix) == 0 && rel.size() >= 7 && rel.compare(rel.size() - 7, 7, L"_pc.arc") == 0;
 	bool brains = rel == L"nativepc\\arclp2xml\\autoarc\\uhm6d.arc" || rel == L"nativepc\\arclp2xml\\id_core_multi.arc" ||
 	              rel == L"nativepc\\arclp2xml\\id_core.arc"; // the bots' stock brain and their partner brain: ours go next to them
-	if (!names && !brains && std::find(std::begin(creates), std::end(creates), rel) == std::end(creates)) {
+	// a stock online area: its navmesh (stockarea.cpp)
+	static const std::wstring area = L"nativepc\\arcxmltmppc\\aarea_online_";
+	int areaMap = -1;
+	if (rel.size() == area.size() + 6 && rel.compare(0, area.size(), area) == 0 && rel.compare(area.size() + 2, 4, L".arc") == 0 &&
+	    iswdigit(rel[area.size()]) && iswdigit(rel[area.size() + 1])) {
+		areaMap = (rel[area.size()] - L'0') * 10 + (rel[area.size() + 1] - L'0');
+		if (!StockAreaHas(areaMap)) {
+			return nullptr;
+		}
+	}
+	if (!names && !brains && areaMap < 0 && std::find(std::begin(creates), std::end(creates), rel) == std::end(creates)) {
 		return nullptr;
 	}
 	int generation = g_generation;
@@ -1540,8 +1550,13 @@ const std::wstring* PackagesGenerated(const std::wstring& rel, const std::wstrin
 		return it->second.empty() ? nullptr : &it->second; // entries are never erased: pointers stay valid
 	}
 	std::wstring out = Cfg().modCacheDir + FormatW(L"generated\\g%d_", generation) + rel.substr(rel.find_last_of(L'\\') + 1);
-	if (names ? GenerateNames(source, out) : brains ? GenerateBrains(source, out) : GenerateMenus(source, out)) {
-		XLS_LOG_INFO("mods: maps: %s added to %ls.", names ? "names" : brains ? "bot brains" : "menu rows", rel.c_str());
+	bool made = areaMap >= 0 ? StockAreaGenerate(areaMap, source, out)
+	            : names     ? GenerateNames(source, out)
+	            : brains    ? GenerateBrains(source, out)
+	                        : GenerateMenus(source, out);
+	if (made) {
+		XLS_LOG_INFO("mods: maps: %s added to %ls.", areaMap >= 0 ? "bot navmesh" : names ? "names" : brains ? "bot brains" : "menu rows",
+		             rel.c_str());
 		return &(g_generated[key] = out);
 	}
 	g_generated[key] = L"";

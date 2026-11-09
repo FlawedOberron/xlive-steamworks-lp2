@@ -103,6 +103,7 @@ void __cdecl AreaFlags(const char* area)
 				(unsigned)stock.nav.links.size());
 		}
 	}
+	MemoryLogNow("at area load");
 	ScriptSetMap(g_active ? &g_physics : nullptr);
 	JeepSetMap(episode == 7 ? map : -1);
 	if (!g_active) {
