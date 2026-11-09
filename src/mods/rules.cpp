@@ -22,6 +22,7 @@
 #include <string.h>
 
 #include <atomic>
+#include <array>
 #include <functional>
 #include <cmath>
 #include <map>
@@ -664,8 +665,7 @@ bool __attribute__((thiscall)) StaggerAdd(void* character, uint32_t delta, uint3
 	if (points < 0) {
 		// every hit (capped): the call chain tells the hit kinds apart (bullet / explosion / anchor / melee handlers),
 		// for the stagger split. Return addresses into the exe found on the stack above us, as RVAs + 0x400000.
-		static LONG logged = 0;
-		if (InterlockedIncrement(&logged) <= 400) {
+		{
 			static uintptr_t lo = 0, hi = 0;
 			if (!lo) {
 				uint8_t* exe = (uint8_t*)GetModuleHandleW(nullptr);
@@ -689,9 +689,25 @@ bool __attribute__((thiscall)) StaggerAdd(void* character, uint32_t delta, uint3
 					}
 				}
 			}
-			XLS_LOG_INFO("mods: rules: hit stagger: %s %d (scaled %d, x%.2f) on kind %u%s; calls %x %x %x %x %x %x.", kStaggerPools[Pool], before,
-			             points, scale, (unsigned)((uint8_t*)character)[0x1f], standing ? "" : ", ran out: staggered", (unsigned)chain[0],
-			             (unsigned)chain[1], (unsigned)chain[2], (unsigned)chain[3], (unsigned)chain[4], (unsigned)chain[5]);
+			// each distinct path: its first 3 hits, then every 50th (bots' gunfire doesn't crowd out the rarer kinds)
+			static std::mutex lock;
+			static std::vector<std::pair<std::array<uintptr_t, 7>, int>> seen;
+			int count = 0;
+			{
+				std::lock_guard<std::mutex> g(lock);
+				std::array<uintptr_t, 7> key = {(uintptr_t)Pool, chain[0], chain[1], chain[2], chain[3], chain[4], chain[5]};
+				auto it = std::find_if(seen.begin(), seen.end(), [&](const auto& e) { return e.first == key; });
+				if (it == seen.end() && seen.size() < 200) {
+					seen.push_back({key, 0});
+					it = seen.end() - 1;
+				}
+				count = it != seen.end() ? ++it->second : 0;
+			}
+			if (count > 0 && (count <= 3 || count % 50 == 0)) {
+				XLS_LOG_INFO("mods: rules: hit stagger: %s %d (scaled %d, x%.2f) on kind %u%s; path seen %d times; calls %x %x %x %x %x %x.",
+				             kStaggerPools[Pool], before, points, scale, (unsigned)((uint8_t*)character)[0x1f], standing ? "" : ", ran out: staggered",
+				             count, (unsigned)chain[0], (unsigned)chain[1], (unsigned)chain[2], (unsigned)chain[3], (unsigned)chain[4], (unsigned)chain[5]);
+			}
 		}
 	}
 	return standing;
