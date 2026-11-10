@@ -814,12 +814,12 @@ uint8_t* AttackerBody(uint8_t* attacker)
 
 // Headshots (to split Bullet Stagger): the victim's hits this frame, uCharacterBase::vf22 (DX11 0x9c51e0): count
 // +0x19ec, up to 6 x u32 part byte (the collision hit's +7) at +0x19f0, flags (+4) at +0x1a08; DX9 the same 0x10 lower (0x19dc, checked)
-// Which part is the head isn't known yet: the first 60 hits by this PC's player log the list and the hit's
+// Which part is the head isn't known yet: the first 120 soldier hits log the list and the hit's
 // height above the victim's feet (hit info: arg 2 +0x180 -> +0x48).
 void HitPartProbe(uint8_t* character, uint8_t* body, uint32_t b)
 {
 	static LONG logged = 0;
-	if (!character || !body || character[0x1f] != 1 || RulesSlotOf(body) != RulesLocalSlot() || logged >= 60) {
+	if (!character || character[0x1f] != 1 || logged >= 120) {
 		return;
 	}
 	bool dx9 = g_staggerBuild == 1 || g_staggerBuild == 3;
@@ -834,7 +834,8 @@ void HitPartProbe(uint8_t* character, uint8_t* body, uint32_t b)
 		w += snprintf(list + w, sizeof list - w, "%s%u/%u", i ? " " : "", parts[i], flags[i]);
 	}
 	InterlockedIncrement(&logged);
-	XLS_LOG_INFO("mods: rules: hit part probe: %u hit(s) this frame [%s], hit %.0f cm above the feet.", n, list, height);
+	XLS_LOG_INFO("mods: rules: hit part probe: player %d hit by player %d (local %d): %u hit(s) this frame [%s], hit %.0f cm above the feet.",
+	             RulesSlotOf(character), body ? RulesSlotOf(body) : -1, RulesLocalSlot(), n, list, height);
 }
 
 float __attribute__((thiscall)) HitHandler(void* character, uint32_t a, uint32_t b, uint32_t attacker, uint32_t d)
