@@ -1736,6 +1736,172 @@ void Traverse(uint8_t* think, uint8_t* unit)
 	}
 }
 
+// Aim. The think's "aim at the target" command (cThink::vf31 0x6000000c -> DX11 FUN_00903f10, thiscall(think, unit,
+// lead), ret 8) writes the point the bot aims at to the unit (+0x1600 DX11, +0x15f0 DX9): its target's position, led,
+// plus a height by what the target is. The bot's view is then turned straight at it (cThinkPlayer::vf13 takes the pitch
+// from it with no turn rate), and the game's own per-difficulty aim offsets are all 0: bots snap on and never miss.
+// AI slots with the Improved brain aim at that point plus an error (per slot; a slot's think runs on one thread):
+//  - tracking: the aim follows the point as a spring (omega, damping: under 1 it swings past), and only follows a
+//    share of the target's movement at once (follow), so a moving target is trailed. A new target: the aim starts where
+//    it was and swings over. Starting to aim after a second without: off by up to `acquire` (radians of the range).
+//  - wander: a slow drift around the point, `wander` radians of the range, more while the target or the bot moves.
+// By the AI Enemy Battle difficulty. Applied right after the game sets the point, and each think frame after that
+// while nothing else has moved it (the game leaves it between commands).
+typedef void(__attribute__((thiscall)) * AimFn)(uint8_t*, uint8_t*, int);
+AimFn g_aimOriginal = nullptr;
+const uint32_t kAimFnVas[kBuildCount] = {0x903f10, 0x8f45a0, 0x9041e0, 0x8f4760};
+const uint8_t kAimPrologue[] = {0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf0, 0x81, 0xec, 0x98, 0x00, 0x00, 0x00};
+struct AimSkill {
+	float follow, omega, damping, wander, acquire;
+};
+const AimSkill kAimSkill[4] = { // easy, normal, hard, veteran
+	{0.50f, 5.0f, 0.45f, 0.035f, 0.25f},
+	{0.70f, 8.0f, 0.60f, 0.020f, 0.16f},
+	{0.85f, 12.0f, 0.80f, 0.011f, 0.09f},
+	{0.95f, 18.0f, 1.00f, 0.005f, 0.04f},
+};
+const float kAimTargetSpeed = 400.0f, kAimOwnSpeed = 800.0f, kAimMovingMost = 4.0f; // cm/s that double the wander; its cap
+struct AimState {
+	uint8_t* unit = nullptr;
+	uint8_t* target = nullptr;
+	bool has = false, inBody = false; // the state below is set; the game set the point during this think frame
+	double truthAt = 0, at = 0, wanderNext = 0;
+	float truth[3] = {}, lastTruth[3] = {}, wrote[3] = {}, targetPos[3] = {}, ownPos[3] = {};
+	float e[3] = {}, ev[3] = {};      // the tracking error and its speed
+	float n[3] = {}, nGoal[3] = {};   // the wander
+	float targetSpeed = 0, ownSpeed = 0;
+};
+AimState g_aim[16];
+
+double Seconds()
+{
+	static const double kPerTick = [] {
+		LARGE_INTEGER f;
+		QueryPerformanceFrequency(&f);
+		return 1.0 / (double)f.QuadPart;
+	}();
+	LARGE_INTEGER c;
+	QueryPerformanceCounter(&c);
+	return (double)c.QuadPart * kPerTick;
+}
+
+uint32_t AimOut()
+{
+	return g_vas->held == 0x1688 ? 0x1600 : 0x15f0;
+}
+
+void AimApply(AimState& s, uint8_t* unit, uint8_t slot, double now)
+{
+	const AimSkill& k = kAimSkill[BotMenuOptions().difficulty & 3];
+	float* aim = (float*)(unit + AimOut());
+	const float* own = (const float*)(unit + 0xd0);
+	uint8_t* target = *(uint8_t**)(unit + g_vas->target);
+	float dt = (float)(now - s.at);
+	float range = sqrtf(Distance2(s.truth, own));
+	auto rnd = [] { return (int)(Rand() % 2001) / 1000.0f - 1.0f; };
+	if (!s.has || dt > 1.0f || dt < 0.0f) { // starts aiming
+		float size = std::min(range * k.acquire, 400.0f);
+		s.e[0] = rnd() * size, s.e[1] = rnd() * size * 0.5f, s.e[2] = rnd() * size;
+		memset(s.ev, 0, sizeof(s.ev));
+		memset(s.n, 0, sizeof(s.n));
+		memset(s.nGoal, 0, sizeof(s.nGoal));
+		s.wanderNext = now;
+		s.targetSpeed = s.ownSpeed = 0;
+		dt = 0.0f;
+	}
+	else {
+		float keep = target != s.target ? 1.0f : 1.0f - k.follow; // how much of the point's move the aim doesn't make
+		for (int i = 0; i < 3; i++) {
+			s.e[i] -= keep * (s.truth[i] - s.lastTruth[i]);
+		}
+		if (dt > 0.001f) {
+			if (target && target == s.target) {
+				float v = std::min(2000.0f, sqrtf(Distance2((const float*)(target + 0xd0), s.targetPos)) / dt);
+				s.targetSpeed += (v - s.targetSpeed) * 0.25f;
+			}
+			float v = std::min(2000.0f, sqrtf(Distance2(own, s.ownPos)) / dt);
+			s.ownSpeed += (v - s.ownSpeed) * 0.25f;
+		}
+		for (float left = std::min(dt, 0.25f); left > 0.0f;) {
+			float h = std::min(left, 0.02f);
+			left -= h;
+			for (int i = 0; i < 3; i++) {
+				s.ev[i] += (-k.omega * k.omega * s.e[i] - 2.0f * k.damping * k.omega * s.ev[i]) * h;
+				s.e[i] += s.ev[i] * h;
+			}
+		}
+	}
+	float off = sqrtf(s.e[0] * s.e[0] + s.e[1] * s.e[1] + s.e[2] * s.e[2]);
+	if (off > 3000.0f) {
+		for (int i = 0; i < 3; i++) {
+			s.e[i] *= 3000.0f / off;
+		}
+	}
+	if (now >= s.wanderNext) {
+		float size = range * k.wander * std::min(kAimMovingMost, 1.0f + s.targetSpeed / kAimTargetSpeed + s.ownSpeed / kAimOwnSpeed);
+		s.nGoal[0] = rnd() * size, s.nGoal[1] = rnd() * size * 0.6f, s.nGoal[2] = rnd() * size;
+		s.wanderNext = now + 0.3 + (Rand() % 400) / 1000.0;
+	}
+	float blend = 1.0f - expf(-dt / 0.15f);
+	for (int i = 0; i < 3; i++) {
+		s.n[i] += (s.nGoal[i] - s.n[i]) * blend;
+		aim[i] = s.truth[i] + s.e[i] + s.n[i];
+	}
+	memcpy(s.wrote, aim, sizeof(s.wrote));
+	memcpy(s.lastTruth, s.truth, sizeof(s.lastTruth));
+	memcpy(s.ownPos, own, sizeof(s.ownPos));
+	if (target) {
+		memcpy(s.targetPos, target + 0xd0, sizeof(s.targetPos));
+	}
+	s.target = target;
+	s.unit = unit;
+	s.at = now;
+	s.has = true;
+	static DWORD logged = 0;
+	static LONG lines = 0;
+	if (GetTickCount() - logged > 2000 && lines < 40) { // a sample every 2 s, the first 40: enough to judge the numbers
+		logged = GetTickCount();
+		lines++;
+		XLS_LOG_INFO("mods: bots: aim: slot %u aims %.0f cm off at %.1f m (target moving %.1f m/s, itself %.1f m/s).", slot,
+		             sqrtf(Distance2(aim, s.truth)), range / 100.0f, s.targetSpeed / 100.0f, s.ownSpeed / 100.0f);
+	}
+}
+
+void __attribute__((thiscall)) Aim(uint8_t* think, uint8_t* unit, int lead)
+{
+	g_aimOriginal(think, unit, lead);
+	uint8_t slot = think ? think[kThinkSlot] : 16;
+	uint8_t* game = *(uint8_t**)At(g_vas->game);
+	uint8_t* slots = *(uint8_t**)At(g_vas->slots);
+	if (slot >= 16 || !unit || !slots || !BotWorld(game) || !slots[0x1b1 + slot * 0x7c] || !BotMenuOptions().improved) {
+		return;
+	}
+	AimState& s = g_aim[slot];
+	double now = Seconds();
+	memcpy(s.truth, unit + AimOut(), sizeof(s.truth));
+	s.truthAt = now;
+	s.inBody = true;
+	AimApply(s, unit, slot, now);
+}
+
+// After the think's body: a frame the game didn't set the point in, while it's still as we left it.
+void AimKeep(uint8_t* think, uint8_t* unit)
+{
+	uint8_t slot = think[kThinkSlot];
+	if (slot >= 16 || !unit || !g_aimOriginal) {
+		return;
+	}
+	AimState& s = g_aim[slot];
+	if (s.inBody) {
+		s.inBody = false;
+		return;
+	}
+	double now = Seconds();
+	if (s.has && s.unit == unit && now - s.truthAt < 1.0 && memcmp(unit + AimOut(), s.wrote, sizeof(s.wrote)) == 0) {
+		AimApply(s, unit, slot, now);
+	}
+}
+
 uint32_t __attribute__((thiscall)) ThinkBody(uint8_t* think, uint8_t* unit)
 {
 	if (think[kThinkSlot] < 16 && unit) {
@@ -1743,6 +1909,7 @@ uint32_t __attribute__((thiscall)) ThinkBody(uint8_t* think, uint8_t* unit)
 	}
 	ReactToHit(think, unit);
 	uint32_t r = g_thinkBodyOriginal(think, unit);
+	AimKeep(think, unit);
 	if (r) {
 		Traverse(think, unit);
 	}
@@ -2027,6 +2194,12 @@ void BotsInstall(unsigned char* base)
 	}
 	if (!g_pathStepOriginal) {
 		XLS_LOG_WARN("mods: bots: path step not recognised, the trace won't show it.");
+	}
+	if (GameBuild() >= 0) {
+		g_aimOriginal = (AimFn)Detour(At(kAimFnVas[GameBuild()]), kAimPrologue, sizeof(kAimPrologue), (void*)&Aim);
+	}
+	if (!g_aimOriginal) {
+		XLS_LOG_WARN("mods: bots: aim code not recognised, bots keep the game's perfect aim.");
 	}
 	if (GameBuild() >= 0) {
 		const WeaponVas& w = kWeaponVas[GameBuild()];
