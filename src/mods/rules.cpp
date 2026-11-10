@@ -788,7 +788,7 @@ thread_local uint8_t* t_attacker = nullptr;
 // No flinch for this hit (Bullet Off, or Occasional waiting): the handler sets "was hit" (+0xd7c bit 8, DX9 +0xd6c)
 // on every hit, and the player's think (cThinkPlVsCF::vf14) turns it into the flinch the next frame; cleared after.
 thread_local bool t_noFlinch = false;
-const DWORD kFallCreditMs = 5000;
+const DWORD kFallCreditMs = 10000; // a fall off the map plus the game's death delay ran 5.1 - 5.2 s
 struct LastHit {
 	DWORD at;
 	int slot;
@@ -812,6 +812,31 @@ uint8_t* AttackerBody(uint8_t* attacker)
 	return type >= 1 && type <= 3 && (state == 1 || state == 2) ? attacker : nullptr;
 }
 
+// Headshots (to split Bullet Stagger): the victim's hits this frame, uCharacterBase::vf22 (DX11 0x9c51e0): count
+// +0x19ec, up to 6 x u32 part byte (the collision hit's +7) at +0x19f0, flags (+4) at +0x1a08; DX9 the same 0x10 lower (0x19dc, checked)
+// Which part is the head isn't known yet: the first 60 hits by this PC's player log the list and the hit's
+// height above the victim's feet (hit info: arg 2 +0x180 -> +0x48).
+void HitPartProbe(uint8_t* character, uint8_t* body, uint32_t b)
+{
+	static LONG logged = 0;
+	if (!character || !body || character[0x1f] != 1 || RulesSlotOf(body) != RulesLocalSlot() || logged >= 60) {
+		return;
+	}
+	bool dx9 = g_staggerBuild == 1 || g_staggerBuild == 3;
+	uint32_t at = dx9 ? 0x19dc : 0x19ec;
+	uint32_t n = *(uint32_t*)(character + at);
+	const uint32_t* parts = (const uint32_t*)(character + at + 4);
+	const uint32_t* flags = (const uint32_t*)(character + at + 0x1c);
+	uint8_t* info = b ? *(uint8_t**)(uintptr_t)(b + 0x180) : nullptr;
+	float height = info ? *(float*)(info + 0x4c) - ((float*)(character + 0xd0))[1] : -1.0f;
+	char list[96] = "";
+	for (uint32_t i = 0, w = 0; i < n && i < 6; i++) {
+		w += snprintf(list + w, sizeof list - w, "%s%u/%u", i ? " " : "", parts[i], flags[i]);
+	}
+	InterlockedIncrement(&logged);
+	XLS_LOG_INFO("mods: rules: hit part probe: %u hit(s) this frame [%s], hit %.0f cm above the feet.", n, list, height);
+}
+
 float __attribute__((thiscall)) HitHandler(void* character, uint32_t a, uint32_t b, uint32_t attacker, uint32_t d)
 {
 	uint8_t* was = t_attacker;
@@ -819,6 +844,7 @@ float __attribute__((thiscall)) HitHandler(void* character, uint32_t a, uint32_t
 	t_attacker = body;
 	t_noFlinch = false;
 	float result = g_hitHandlerOriginal(character, a, b, attacker, d);
+	HitPartProbe((uint8_t*)character, body, b);
 	if (t_noFlinch) {
 		bool dx9 = g_staggerBuild == 1 || g_staggerBuild == 3;
 		*(uint32_t*)((uint8_t*)character + (dx9 ? 0xd6c : 0xd7c)) &= ~8u;
@@ -840,7 +866,7 @@ float __attribute__((thiscall)) HitHandler(void* character, uint32_t a, uint32_t
 
 // A death with no hit (a fall, a kill zone): the game's think (DX9 FUN_00902bc0, thiscall(think, character, hit), hit
 // null) takes the killer from the character's "burn attacker" slot (+0x166c DX9 / +0x167c DX11) when +1 is set, as a
-// burn death does. A soldier hit by another player in the last 5 s gets that player there first, so the fall counts as
+// burn death does. A soldier hit by another player in the last 10 s gets that player there first, so the fall counts as
 // their kill. Resets at the next spawn (the game's).
 using DeathThinkFn = void(__attribute__((thiscall)) *)(void*, uint8_t*, void*);
 const uint32_t kDeathThink[kBuildCount] = {0x912590, 0x902bc0, 0x912800, 0x902de0};
@@ -864,6 +890,10 @@ void __attribute__((thiscall)) DeathThink(void* think, uint8_t* character, void*
 			credit[0] = (uint8_t)last.slot;
 			credit[1] = 1;
 			XLS_LOG_INFO("mods: rules: a death with no hit (player %d), %u ms after player %d's hit: their kill.", RulesSlotOf(character), (unsigned)(GetTickCount() - last.at), last.slot);
+		}
+		else if (last.slot >= 0) {
+			XLS_LOG_INFO("mods: rules: a death with no hit (player %d), %u ms after player %d's hit: too long ago, the game's own.", RulesSlotOf(character),
+			             (unsigned)(GetTickCount() - last.at), last.slot);
 		}
 	}
 	g_deathThinkOriginal(think, character, hit);

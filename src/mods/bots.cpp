@@ -716,12 +716,12 @@ int g_navVersion = 0, g_navBuilt = -1;
 std::unordered_map<int64_t, int> g_areaCells;
 
 // Regions: the zones grouped into a few places worth a look (a field, a building, the tunnels), what roaming bots choose
-// between; the zones stay for routing. Seeds spread over the zone graph about kRegionSpan apart along it (farthest first, at most
+// between; the zones stay for routing. Seeds spread over the zone graph about (the map's farthest graph distance / kRegionSpanShare) apart along it (farthest first, at most
 // kRegionMax, then two rounds of re-centring), each zone joins the seed nearest along the graph, climbs counted triple,
 // so tunnels under a field stay their own. A region whose biggest zone is most of it is open: a look from inside sweeps
 // it. Others want a few of their zones visited (kRegionVisits) before the bot moves on.
-const float kRegionSpan = 8500.0f, kRegionClimb = 3.0f;
-const int kRegionMax = 10, kRegionVisits = 3;
+const float kRegionSpanShare = 2.5f, kRegionSpanLeast = 2000.0f, kRegionClimb = 3.0f;
+const int kRegionMax = 8, kRegionVisits = 3;
 struct Region {
 	int center = 0; // its middle zone
 	std::vector<int> zones;
@@ -801,6 +801,7 @@ void RegionsBuild()
 		first = ZoneArea((int)i) > ZoneArea(first) ? (int)i : first;
 	}
 	std::vector<int> seeds = {first};
+	float span = 0; // from the map's size: Pirate Fortress ~85 m, a medium package ~35 m
 	for (;;) {
 		std::vector<float> d = RegionReach(edges, seeds);
 		int farthest = -1;
@@ -809,7 +810,10 @@ void RegionsBuild()
 				farthest = (int)i;
 			}
 		}
-		if (farthest < 0 || d[farthest] < kRegionSpan || (int)seeds.size() >= kRegionMax) {
+		if (farthest >= 0 && span == 0) {
+			span = std::max(kRegionSpanLeast, d[farthest] / kRegionSpanShare);
+		}
+		if (farthest < 0 || d[farthest] < span || (int)seeds.size() >= kRegionMax) {
 			break;
 		}
 		seeds.push_back(farthest);
