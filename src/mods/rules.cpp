@@ -245,7 +245,7 @@ struct Row {
 const Row kRowDefs[] = {
 	{kPageSettings2, 0x2e, kSecondaryValues, 500, 75, kMsgSecondary, "Default Secondary"},
 	{kPageSettings2, 0x2f, kInfiniteValues, 501, 76, kMsgInfinite, "Infinite Ammo"},
-	{kPageSettings3, 0x31, kSupplyValues, 503, 78, kMsgSupply, "Ammo Supply"},
+	{kPageSettings3, 0x31, kSupplyValues, 503, 78, kMsgSupply, "Ammo Supply Weapons"},
 	{kPageSettings3, 0x34, 2, 504, 81, kMsgOffOn, "Harmonizer"},
 	{kPageSettings3, 0x35, 6, 505, 82, kMsgGrapple, "Grappling"},
 	{kPageSettings2, 0x36, kStaggerValues, 506, 83, kMsgStagger, "Bullet Stagger"},
@@ -259,7 +259,8 @@ struct Rules {
 	bool ammo = false;
 	bool grenades = false;
 	int secondary = 0; // weapon kind, 0 = none
-	int supply = 0;     // magazines to start with, 0 = the game's amounts (pickups scale with it)
+	int supply = 0;     // magazines to start with, 0 = the game's amounts (pickups scale with it): soldier weapons
+	int supplyVsWeapon = 0, supplyVs = 0; // the same for VS weapons carried (or lying about), and mounted on a VS
 	bool survival = false;
 	int lives = 0; // Survival lives per player (Elimination) or team (Team Elimination)
 	bool team = false;
@@ -286,7 +287,8 @@ std::map<uint64_t, Rules> g_memberRules;
 std::atomic<bool> g_ammo{false};
 std::atomic<bool> g_grenades{false};
 std::atomic<int> g_secondary{0};
-std::atomic<int> g_supply{0};
+std::atomic<int> g_supply{0}, g_supplyVsWeapon{0}, g_supplyVs{0};
+std::atomic<int> g_vsWeaponSupplyRule{0}, g_vsSupplyRule{0}; // the setup rows (extras): kSupplyMagazines indexes
 std::atomic<bool> g_harmonizer{false};
 uint8_t** g_game = nullptr;
 std::atomic<int> g_grapple{kGrappleDefault};
@@ -342,7 +344,7 @@ const uint8_t* WeaponEntry(const uint8_t* weapon)
 
 std::string Format(const Rules& r)
 {
-	return FormatA("ammo=%d;grenades=%d;secondary=%d;magazines=%d;survival=%d;lives=%d;team=%d;harmonizer=%d;grapple=%d;stagger=%d;radar=%d;detectp=%d;detectv=%d;anchor=%d;fall=%d;gcount=%d;gpick=%d;qres=%d;rnd=%d;sw=%d;rteam=%d;sexp=%d;sanc=%d;smel=%d;mshot=%d;mthr=%d;kpush=%d", r.ammo, r.grenades, r.secondary, r.supply, r.survival, r.lives, r.team, r.harmonizer, r.grapple, r.stagger, r.radar, r.detectPlayers, r.detectVs, r.anchorSpeed, r.fall, r.grenadeCount, r.grenadePickup, r.quickResupply, r.rounds, r.switchEvery, r.radarTeam, r.staggerExplosion, r.staggerAnchor, r.staggerMelee, r.massive, r.massiveThreshold, r.push);
+	return FormatA("ammo=%d;grenades=%d;secondary=%d;magazines=%d;survival=%d;lives=%d;team=%d;harmonizer=%d;grapple=%d;stagger=%d;radar=%d;detectp=%d;detectv=%d;anchor=%d;fall=%d;gcount=%d;gpick=%d;qres=%d;rnd=%d;sw=%d;rteam=%d;sexp=%d;sanc=%d;smel=%d;mshot=%d;mthr=%d;kpush=%d;vswmag=%d;vsmag=%d", r.ammo, r.grenades, r.secondary, r.supply, r.supplyVsWeapon, r.supplyVs, r.survival, r.lives, r.team, r.harmonizer, r.grapple, r.stagger, r.radar, r.detectPlayers, r.detectVs, r.anchorSpeed, r.fall, r.grenadeCount, r.grenadePickup, r.quickResupply, r.rounds, r.switchEvery, r.radarTeam, r.staggerExplosion, r.staggerAnchor, r.staggerMelee, r.massive, r.massiveThreshold, r.push, r.supplyVsWeapon, r.supplyVs);
 }
 
 Rules Parse(const std::string& s)
@@ -389,6 +391,8 @@ Rules Parse(const std::string& s)
 	if (r.supply < 0 || r.supply > 100) {
 		r.supply = 0;
 	}
+	r.supplyVsWeapon = small("vswmag=", 101, 0);
+	r.supplyVs = small("vsmag=", 101, 0);
 	return r;
 }
 
@@ -416,6 +420,8 @@ Rules Own()
 	r.massive = g_massiveRule;
 	r.massiveThreshold = g_massiveThresholdRule;
 	r.push = g_pushRule;
+	r.supplyVsWeapon = kSupplyMagazines[g_vsWeaponSupplyRule % kSupplyValues];
+	r.supplyVs = kSupplyMagazines[g_vsSupplyRule % kSupplyValues];
 	if (g_menuSeen) {
 		r.ammo = (g_menu[kRowInfinite] & kInfiniteAmmo) != 0;
 		r.grenades = (g_menu[kRowInfinite] & kInfiniteGrenades) != 0;
@@ -1148,6 +1154,8 @@ DWORD WINAPI SyncThread(LPVOID)
 		g_grenades = r.grenades;
 		g_secondary = r.secondary;
 		g_supply = r.supply;
+		g_supplyVsWeapon = r.supplyVsWeapon;
+		g_supplyVs = r.supplyVs;
 		if (r.survival && !g_survival.load() && !g_survivalDropped.exchange(true)) {
 			XLS_LOG_INFO("mods: rules: the Survival row is ignored now: Survival is a game mode (Modes\\Survival.lp2mode via mode.txt).");
 		}
@@ -1176,7 +1184,7 @@ DWORD WINAPI SyncThread(LPVOID)
 		std::string now = Format(r);
 		if (now != logged) {
 			logged = now;
-			XLS_LOG_INFO("mods: rules: unlimited ammo %s, unlimited grenades %s, secondary kind 0x%02x, ammo supply %d magazines (0 = default), survival %s (%d lives), harmonizer %s, grappling %s, stagger bullet %s / explosion %s / anchor %s / melee %s, massive shot %s at %s.", r.ammo ? "on" : "off", r.grenades ? "on" : "off", r.secondary, r.supply, r.survival ? "on" : "off", r.lives, r.harmonizer ? "on" : "off", kGrappleNames[r.grapple % kGrappleValues], kStaggerNames[r.stagger % kStaggerValues], kStaggerNames[r.staggerExplosion % kStaggerValues], kStaggerNames[r.staggerAnchor % kStaggerValues], kStaggerNames[r.staggerMelee % kStaggerValues], kMassiveNames[r.massive % kMassiveValues], kThresholdNames[r.massiveThreshold % kThresholdValues]);
+			XLS_LOG_INFO("mods: rules: unlimited ammo %s, unlimited grenades %s, secondary kind 0x%02x, ammo supply %d / VS weapons %d / VS %d magazines (0 = default), survival %s (%d lives), harmonizer %s, grappling %s, stagger bullet %s / explosion %s / anchor %s / melee %s, massive shot %s at %s.", r.ammo ? "on" : "off", r.grenades ? "on" : "off", r.secondary, r.supply, r.survival ? "on" : "off", r.lives, r.harmonizer ? "on" : "off", kGrappleNames[r.grapple % kGrappleValues], kStaggerNames[r.stagger % kStaggerValues], kStaggerNames[r.staggerExplosion % kStaggerValues], kStaggerNames[r.staggerAnchor % kStaggerValues], kStaggerNames[r.staggerMelee % kStaggerValues], kMassiveNames[r.massive % kMassiveValues], kThresholdNames[r.massiveThreshold % kThresholdValues]);
 		}
 	}
 }
@@ -3489,8 +3497,8 @@ enum SetupKind { kKindValue, kKindNav, kKindHeader, kKindOwn };
 const int kOwnBulletStagger = 100; // a kKindOwn row's arg for the rules byte 0x36 (not an extras key)
 enum SetupAction { kActNone, kActTypes, kActType, kActOptions, kActCreate, kActSection, kActDefault, kActProfile, kActBots, kActRadar, kActAnchor, kActStagger };
 const char* const kBotRuleKeys[] = {"bots", "botDifficulty", "botBrain", "botPersona", "botTaunts", "radar", "radarPlayers", "radarVs", "anchorRange", "anchorSpeed", "fallStagger", "grenadeCount", "grenadePickup", "quickResupply", "rounds", "switchSides", "radarTeam",
-	"explosionStagger", "anchorStagger", "meleeStagger", "massiveShot", "massiveThreshold", "knockdownPush"};
-const int kBotRuleCounts[] = {2, 4, 2, 6, 4, 3, 4, 4, 13, 12, kThresholdValues, 12, 11, 2, 14, 11, 2, kStaggerValues, kStaggerValues, kStaggerValues, kMassiveValues, kThresholdValues, kPushValues};
+	"explosionStagger", "anchorStagger", "meleeStagger", "massiveShot", "massiveThreshold", "knockdownPush", "vsWeaponSupply", "vsSupply"};
+const int kBotRuleCounts[] = {2, 4, 2, 6, 4, 3, 4, 4, 13, 12, kThresholdValues, 12, 11, 2, 14, 11, 2, kStaggerValues, kStaggerValues, kStaggerValues, kMassiveValues, kThresholdValues, kPushValues, kSupplyValues, kSupplyValues};
 const char* const kRadarNames[] = {"Always On", "Near Data Post", "Hidden"};
 const char* const kDetectNames[] = {"Always Show", "Moving & Shooting", "Running & Shooting", "Shooting"};
 struct SetupRow {
@@ -3620,6 +3628,8 @@ void SetupBuild(const uint8_t* rules)
 			navRow(kKindOwn, kActNone, 12, "Grenade Pickups", pickup ? std::to_string(pickup) : "Default");
 		}
 		if ((size_t)at.arg == kSectionWeapons) {
+			navRow(kKindOwn, kActNone, 23, "Ammo Supply VS Weapons", kSupplyNames[GameRulesExtras()["vsWeaponSupply"] % kSupplyValues]);
+			navRow(kKindOwn, kActNone, 24, "Ammo Supply VS", kSupplyNames[GameRulesExtras()["vsSupply"] % kSupplyValues]);
 			navRow(kKindOwn, kActNone, 13, "Quick Resupply", GameRulesExtras()["quickResupply"] ? "On" : "Off");
 		}
 		break;
@@ -4030,6 +4040,8 @@ void BotRulesSync()
 	g_staggerExplosionRule = x["explosionStagger"];
 	g_staggerAnchorRule = x["anchorStagger"];
 	g_staggerMeleeRule = x["meleeStagger"];
+	g_vsWeaponSupplyRule = x["vsWeaponSupply"];
+	g_vsSupplyRule = x["vsSupply"];
 }
 
 // Keep what carries between types, take the entry's rules, tell the game.
@@ -4371,7 +4383,9 @@ const LobbyRow kLobbyOwnRows[] = {
 	{"Stagger", "Knockdown Force", kLobbyOwn, 22},
 	{"Stagger", "Fall Stagger Threshold", kLobbyOwn, 10},
 	{"Weapons", "Infinite Ammo", kLobbyMenu, kRowInfinite},
-	{"Weapons", "Ammo Supply", kLobbyMenu, kRowSupply},
+	{"Weapons", "Ammo Supply Weapons", kLobbyMenu, kRowSupply},
+	{"Weapons", "Ammo Supply VS Weapons", kLobbyOwn, 23},
+	{"Weapons", "Ammo Supply VS", kLobbyOwn, 24},
 	{"Weapons", "Grenade Pickups", kLobbyOwn, 12},
 	{"Weapons", "Quick Resupply", kLobbyOwn, 13},
 	{"Anchor", "Range", kLobbyOwn, 8},
@@ -4497,6 +4511,7 @@ std::string OwnValueName(int own, int v)
 	case 10: case 21: return kThresholdNames[v % kThresholdValues];
 	case 20: return kMassiveNames[v % kMassiveValues];
 	case 22: return kPushNames[v % kPushValues];
+	case 23: case 24: return kSupplyNames[v % kSupplyValues];
 	case 11: return v ? std::to_string(v - 1) : "Default";
 	case 12: return v ? std::to_string(v) : "Default";
 	case 13: case 16: return v ? "On" : "Off";
@@ -5243,6 +5258,30 @@ void GrenadeSetup(uint8_t* weapon, uint32_t arg)
 	}
 }
 
+// Ammo supply per class: VS weapons (kinds 0x41-0x47, 0x60-0x6e) mounted on a VS (the weapon's owner, data + 0x14 -
+// DX11 +0x2194, DX9 +0x2184, whose +0xcd0 controller byte it copies - is a VS, type 2), other VS weapons (carried by a
+// soldier, or lying about), and the rest. The data entries are per weapon kind, so each setup sets the start it wants.
+bool VsWeaponKind(uint8_t kind)
+{
+	return (kind >= 0x41 && kind <= 0x47) || (kind >= 0x60 && kind <= 0x6e);
+}
+
+int SupplyFor(uint8_t* weapon)
+{
+	if (!VsWeaponKind(weapon[0x1e])) {
+		return g_supply;
+	}
+	uint8_t* owner = *(uint8_t**)(weapon + g_dataAt + 0x14);
+	bool mounted = owner && owner[0x1f] == 2;
+	int magazines = mounted ? g_supplyVs : g_supplyVsWeapon;
+	static LONG logged = 0;
+	if (InterlockedIncrement(&logged) <= 12) {
+		XLS_LOG_INFO("mods: rules: ammo supply: VS weapon kind 0x%02x, owner type %d -> %s, %d magazines (0 = the game's).", weapon[0x1e],
+		             owner ? owner[0x1f] : -1, mounted ? "mounted on a VS" : "carried", magazines);
+	}
+	return magazines;
+}
+
 void __attribute__((thiscall)) Setup(uint8_t* weapon, uint32_t arg)
 {
 	if (!weapon) {
@@ -5253,7 +5292,7 @@ void __attribute__((thiscall)) Setup(uint8_t* weapon, uint32_t arg)
 		GrenadeSetup(weapon, arg);
 		return;
 	}
-	int magazines = g_supply;
+	int magazines = SupplyFor(weapon);
 	uint8_t* data = *(uint8_t**)(weapon + g_dataAt);
 	std::lock_guard<std::mutex> lock(g_supplyMutex);
 	for (int k = 0; data && k < kDataEntries; k++) {
@@ -5293,7 +5332,8 @@ uint32_t __attribute__((thiscall)) AddAmmo(uint8_t* weapon, int16_t delta)
 		delta = (int16_t)(g_grenadePickup * GrenadeCost(WeaponEntry(weapon)));
 	}
 	// not ammo moved over from a picked-up weapon: that was given (and scaled) already
-	if (delta > 0 && weapon && g_supply != 0 && !Grenade(weapon) && (uintptr_t)__builtin_return_address(0) != g_transfer) {
+	if (delta > 0 && weapon && (g_supply != 0 || g_supplyVsWeapon != 0 || g_supplyVs != 0) && !Grenade(weapon) &&
+	    (uintptr_t)__builtin_return_address(0) != g_transfer) {
 		std::lock_guard<std::mutex> lock(g_supplyMutex);
 		auto it = g_pickupScale.find(weapon);
 		if (it != g_pickupScale.end()) {
