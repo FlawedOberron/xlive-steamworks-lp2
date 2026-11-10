@@ -113,10 +113,19 @@ uint8_t* g_base = nullptr;
 ThinkSetFn g_thinkOriginal = nullptr;
 FilterFn g_filterOriginal = nullptr;
 EvalFn g_evalOriginal = nullptr;
-std::unordered_map<uint8_t*, int> g_personality; // unit -> archetype
-std::mutex g_personalityLock; // also covers Rand's seed
+// A bot's archetype belongs to its slot (the think's, +0x84), so it keeps it over respawns: every life is a new unit with
+// stock traits. Per unit: the traits before and after scaling, so a new unit built at an old one's address (stock traits
+// again) is scaled again, and one already scaled never twice.
+struct Persona {
+	int archetype = 0;
+	uint8_t before[7] = {}, after[7] = {};
+};
+std::unordered_map<uint8_t*, Persona> g_personality; // unit -> what it was given
+int g_slotArchetype[16] = {};           // archetype + 1 (0: none yet), reset at each area load
+std::atomic<uint8_t*> g_slotUnit[16];   // the unit each slot's think last ran (ThinkBody)
+std::mutex g_personalityLock;
 const size_t kFilterCharacterSize = 0x16b0; // past the other weapon slot on every build
-uint32_t g_seed = 0;
+std::atomic<uint32_t> g_seed{0}; // AI runs on worker threads
 bool g_brains = false; // uHm6d.arc is overlaid (our brains are in it)
 int g_lastKind = -1;
 
@@ -252,8 +261,9 @@ uint32_t __attribute__((thiscall)) FilterWeapon(uint8_t* filter, uint8_t* charac
 
 uint32_t Rand()
 {
-	g_seed = g_seed * 1103515245u + 12345u;
-	return g_seed >> 8;
+	uint32_t seed = g_seed.load(std::memory_order_relaxed) * 1103515245u + 12345u;
+	g_seed.store(seed, std::memory_order_relaxed);
+	return seed >> 8;
 }
 
 uint32_t Mix(uint32_t x)
@@ -275,23 +285,56 @@ void Scale(uint8_t* p, uint32_t at, float m)
 
 int Personality(uint8_t* unit)
 {
+	static const uint32_t kTraits[7] = {kAttacker, kCalm, kQuickness, kHold, kImpatient, kGrenade, kAppeal};
 	std::lock_guard<std::mutex> lock(g_personalityLock); // bots first evaluate on several worker threads at once
+	uint8_t* p = unit + g_vas->param;
+	uint8_t now[7];
+	for (int i = 0; i < 7; i++) {
+		now[i] = p[kTraits[i]];
+	}
 	auto it = g_personality.find(unit);
 	if (it != g_personality.end()) {
-		return it->second;
+		const Persona& q = it->second;
+		if (memcmp(now, q.before, 7) != 0 || memcmp(q.before, q.after, 7) == 0) {
+			return q.archetype;
+		}
+		g_personality.erase(it); // stock traits again: another bot built where that one was
 	}
 	if (g_personality.size() > 256) {
-		g_personality.clear(); // stale units from earlier matches
+		g_personality.clear(); // stale units
+	}
+	int slot = -1;
+	for (int i = 0; i < 16; i++) {
+		slot = g_slotUnit[i].load(std::memory_order_relaxed) == unit ? i : slot;
 	}
 	BotOptions o = BotMenuOptions();
-	int a = o.personality > 0 ? (o.personality - 1) % kArchetypeCount : (int)(Rand() % kArchetypeCount);
-	g_personality[unit] = a;
-	uint8_t* p = unit + g_vas->param;
+	int a;
+	if (o.personality > 0) {
+		a = (o.personality - 1) % kArchetypeCount;
+	}
+	else if (slot >= 0 && g_slotArchetype[slot] > 0) {
+		a = g_slotArchetype[slot] - 1;
+	}
+	else {
+		a = (int)(Rand() % kArchetypeCount);
+	}
+	if (slot >= 0) {
+		g_slotArchetype[slot] = a + 1;
+	}
+	Persona q;
+	q.archetype = a;
+	memcpy(q.before, now, 7);
 	const Archetype& k = kArchetypes[a];
+	// A player match's bots are built as campaign partners, and some come with a partner's attacker trait (10, the
+	// battle bots' is 100): they'd hardly shoot. In a player match those start from the battle bots' value.
+	const uint8_t* game = *(uint8_t**)At(g_vas->game);
+	bool raised = game && game[0x256] && BotsInPlayerMatch() && p[kAttacker] < 50;
+	if (raised) {
+		p[kAttacker] = 100;
+	}
 	// difficulty on top of the archetype: fight, dodge, grenades and urgency up, waiting down (and the reverse)
 	const float kDifficulty[] = {0.6f, 1.0f, 1.3f, 2.0f};
 	float d = kDifficulty[o.difficulty & 3];
-	uint8_t before[3] = {p[kAttacker], p[kQuickness], p[kAppeal]};
 	Scale(p, kAttacker, k.attacker * d);
 	Scale(p, kCalm, k.calm / d);
 	Scale(p, kQuickness, k.quickness * d);
@@ -299,8 +342,12 @@ int Personality(uint8_t* unit)
 	Scale(p, kImpatient, k.impatient * d);
 	Scale(p, kGrenade, k.grenade * d);
 	Scale(p, kAppeal, k.appeal);
-	XLS_LOG_INFO("mods: bots: %p is a %s, difficulty x%.1f (attacker %u -> %u, quickness %u -> %u, appeal %u -> %u).", unit,
-	             k.name, d, before[0], p[kAttacker], before[1], p[kQuickness], before[2], p[kAppeal]);
+	for (int i = 0; i < 7; i++) {
+		q.after[i] = p[kTraits[i]];
+	}
+	g_personality[unit] = q;
+	XLS_LOG_INFO("mods: bots: %p (slot %d) is a %s, difficulty x%.1f (attacker %u -> %u%s, quickness %u -> %u, appeal %u -> %u).", unit, slot,
+	             k.name, d, q.before[0], q.after[0], raised ? ", raised from a partner's" : "", q.before[2], q.after[2], q.before[6], q.after[6]);
 	return a;
 }
 
@@ -693,7 +740,7 @@ float Distance2(const float* a, const float* b)
 // the team hasn't swept lately that no teammate is already headed for; all swept, the team starts over.
 const float kAreaCell = 2500.0f, kAreaLevel = 500.0f, kStep = 4500.0f, kStepUp = 600.0f, kLevelWeight = 4.0f;
 const DWORD kHopStuck = 5000, kBlockedFor = 120000;
-const DWORD kSweptFor = 120000, kFightFor = 30000;
+const DWORD kSweptFor = 120000, kFightFor = 30000, kAvoidFor = 60000;
 // A map package's zones (lp2navmap) replace the start point areas: links then have a kind and where they start and end.
 struct Hop {
 	int to;
@@ -707,6 +754,8 @@ struct Area {
 	std::vector<int> links; // areas a bot can run to in one go (the game's path gives up on long runs)
 	std::vector<Hop> hops;  // zones: the links with how they're crossed
 	DWORD swept[16] = {}, fight[16] = {};
+	DWORD avoid[16] = {};   // per team: when one of its bots last gave up on a goal here (RoamPoint leaves it a while)
+	float box[4] = {0, 0, 0, 0}; // zones: the outline's bounds, min x / z, max x / z
 };
 std::vector<Area> g_areas;
 std::vector<const float*> g_points; // the start points (not base markers)
@@ -906,6 +955,14 @@ void AreasBuild()
 		for (const NavZone& z : g_nav.zones) {
 			Area a;
 			memcpy(a.pos, z.pos, sizeof(a.pos));
+			a.box[0] = a.box[1] = 1e30f;
+			a.box[2] = a.box[3] = -1e30f;
+			for (const auto& loop : z.outline) {
+				for (const auto& q : loop) {
+					a.box[0] = std::min(a.box[0], q[0]), a.box[1] = std::min(a.box[1], q[2]);
+					a.box[2] = std::max(a.box[2], q[0]), a.box[3] = std::max(a.box[3], q[2]);
+				}
+			}
 			g_areas.push_back(a);
 		}
 		int kinds[5] = {};
@@ -987,11 +1044,50 @@ void AreasBuild()
 	XLS_LOG_INFO("mods: bots: map split into %u areas, %d links (%u start points).", (unsigned)g_areas.size(), links, count);
 }
 
+// Zones: the zone whose outline (loops on the floor, even-odd) the point is in; on stacked floors the nearest in height.
+int ZoneAt(const float* p)
+{
+	int best = -1;
+	float bestUp = 1e30f;
+	for (size_t i = 0; i < g_areas.size() && i < g_nav.zones.size(); i++) {
+		const Area& a = g_areas[i];
+		if (p[0] < a.box[0] || p[2] < a.box[1] || p[0] > a.box[2] || p[2] > a.box[3]) {
+			continue;
+		}
+		const NavZone& z = g_nav.zones[i];
+		float up = fabsf(p[1] - z.pos[1]);
+		if (up > z.size[1] + 300.0f || up >= bestUp) {
+			continue;
+		}
+		bool in = false;
+		for (const auto& loop : z.outline) {
+			for (size_t k = 0, j = loop.size() - 1; k < loop.size(); j = k++) {
+				const auto& u = loop[k];
+				const auto& v = loop[j];
+				if ((u[2] > p[2]) != (v[2] > p[2]) && p[0] < (v[0] - u[0]) * (p[2] - u[2]) / (v[2] - u[2]) + u[0]) {
+					in = !in;
+				}
+			}
+		}
+		if (in) {
+			best = (int)i;
+			bestUp = up;
+		}
+	}
+	return best;
+}
+
 int AreaAt(const float* p)
 {
 	auto it = g_areaCells.find(AreaCell(p));
 	if (it != g_areaCells.end()) {
 		return it->second;
+	}
+	if (!g_nav.zones.empty()) {
+		int zone = ZoneAt(p);
+		if (zone >= 0) {
+			return zone;
+		}
 	}
 	int best = -1; // between areas: the nearest one, by level first
 	float bestD = 1e30f;
@@ -1164,7 +1260,8 @@ bool RoamPoint(uint8_t* unit, const float* from, RoamGoal& g)
 	const float* mates[16];
 	int nMates = 0;
 	for (auto& [other, og] : g_goals) {
-		if (other != unit && og.has && !og.noise && nMates < 16 && other[g_vas->team] == unit[g_vas->team]) {
+		// one that hasn't asked lately is fighting, dead or gone (its unit may be freed: not read)
+		if (other != unit && og.has && !og.noise && nMates < 16 && now - og.used < 5000 && other[g_vas->team] == unit[g_vas->team]) {
 			mates[nMates++] = og.pos;
 		}
 	}
@@ -1176,12 +1273,13 @@ bool RoamPoint(uint8_t* unit, const float* from, RoamGoal& g)
 		}
 		return false;
 	};
+	auto avoided = [&](const Area& a) { return a.avoid[team] && now - a.avoid[team] < kAvoidFor; }; // a bot gave up on a goal there
 	int pick = -1;
 	float bestScore = 1e30f;
 	bool fight = false;
 	for (size_t i = 0; i < g_areas.size(); i++) { // fresh fighting: metres away plus 2 per second old, a little chance
 		const Area& a = g_areas[i];
-		if ((int)i == here || !a.fight[team] || now - a.fight[team] > kFightFor || Checked(a, team, a.fight[team])) {
+		if ((int)i == here || !a.fight[team] || now - a.fight[team] > kFightFor || Checked(a, team, a.fight[team]) || avoided(a)) {
 			continue;
 		}
 		float score = sqrtf(Distance2(from, a.pos)) / 100.0f + (now - a.fight[team]) / 500.0f + Rand() % 15;
@@ -1198,7 +1296,7 @@ bool RoamPoint(uint8_t* unit, const float* from, RoamGoal& g)
 		if (hr >= 0 && !swept(g_regions[hr])) { // in a region not looked over yet: one of its zones it hasn't been in
 			for (int z : g_regions[hr].zones) {
 				const Area& a = g_areas[z];
-				if (z == here || (a.swept[team] && now - a.swept[team] < kSweptFor)) {
+				if (z == here || (a.swept[team] && now - a.swept[team] < kSweptFor) || avoided(a)) {
 					continue;
 				}
 				float score = (taken(a.pos) ? 100.0f : 0.0f) + Rand() % 50;
@@ -1212,7 +1310,7 @@ bool RoamPoint(uint8_t* unit, const float* from, RoamGoal& g)
 		for (int pass = 0; pass < 2 && pick < 0; pass++) { // the nearest region nobody looked over, nobody on the team headed for
 			for (size_t k = 0; k < g_regions.size(); k++) {
 				const Region& r = g_regions[k];
-				if ((int)k == hr || swept(r)) {
+				if ((int)k == hr || swept(r) || avoided(g_areas[r.center])) {
 					continue;
 				}
 				const float* c = g_areas[r.center].pos;
@@ -1236,7 +1334,7 @@ bool RoamPoint(uint8_t* unit, const float* from, RoamGoal& g)
 	for (int pass = 0; pass < 2 && pick < 0; pass++) {
 		for (size_t i = 0; i < g_areas.size(); i++) { // the nearest unswept area nobody on the team is headed for
 			const Area& a = g_areas[i];
-			if ((int)i == here || (a.swept[team] && now - a.swept[team] < kSweptFor)) {
+			if ((int)i == here || (a.swept[team] && now - a.swept[team] < kSweptFor) || avoided(a)) {
 				continue;
 			}
 			float score = sqrtf(Distance2(from, a.pos)) / 100.0f + (taken(a.pos) ? 100.0f : 0.0f) + Rand() % 20;
@@ -1255,6 +1353,9 @@ bool RoamPoint(uint8_t* unit, const float* from, RoamGoal& g)
 		}
 	}
 	if (pick < 0) {
+		for (Area& a : g_areas) { // nowhere left but places given up on: they count again
+			a.avoid[team] = 0;
+		}
 		return false;
 	}
 	memcpy(g.pos, g_areas[pick].pos, sizeof(g.pos));
@@ -1368,6 +1469,10 @@ void GoalUpdate(uint8_t* unit, RoamGoal& g, DWORD now)
 		}
 		else if (now - g.progress > kStuckCheck) {
 			renew = true;
+			int ga = AreaAt(g.pos); // not picked again for a while, by it or its team
+			if (ga >= 0) {
+				g_areas[ga].avoid[unit[g_vas->team] & 15] = now;
+			}
 			if (BotLogOn()) {
 				XLS_LOG_INFO("mods: bots: %p gave up on a goal %.0f m away.", unit, d / 100.0f);
 			}
@@ -1397,7 +1502,7 @@ const uint8_t kPathStepPrologue[] = {0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf0, 0x83, 0
 uint32_t __attribute__((thiscall)) PathStep(void* self, uint8_t* unit, float* from, float* to, uint32_t a5, float radius, float* out, int a8)
 {
 	uint32_t r = g_pathStepOriginal(self, unit, from, to, a5, radius, out, a8);
-	if (unit && from && to && unit[0x1f] == 1) {
+	if (unit && from && to && unit[0x1f] == 1 && g_traceLines < 150) { // only while the trace still logs
 		std::lock_guard<std::mutex> lock(g_goalLock);
 		auto it = g_goals.find(unit);
 		if (it != g_goals.end()) {
@@ -1633,6 +1738,9 @@ void Traverse(uint8_t* think, uint8_t* unit)
 
 uint32_t __attribute__((thiscall)) ThinkBody(uint8_t* think, uint8_t* unit)
 {
+	if (think[kThinkSlot] < 16 && unit) {
+		g_slotUnit[think[kThinkSlot]].store(unit, std::memory_order_relaxed); // whose bot it is (Personality)
+	}
 	ReactToHit(think, unit);
 	uint32_t r = g_thinkBodyOriginal(think, unit);
 	if (r) {
@@ -1939,7 +2047,13 @@ void BotsInstall(unsigned char* base)
 
 void BotsSetMap(const MapPhysics* physics)
 {
+	{
+		std::lock_guard<std::mutex> lock(g_personalityLock); // a new match: its units and slots are new
+		g_personality.clear();
+		memset(g_slotArchetype, 0, sizeof(g_slotArchetype));
+	}
 	std::lock_guard<std::mutex> lock(g_goalLock);
+	g_goals.clear();
 	g_nav = physics ? physics->nav : NavZones();
 	g_navVersion++;
 	if (!g_nav.zones.empty()) {
