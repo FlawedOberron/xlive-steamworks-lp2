@@ -1474,6 +1474,7 @@ const float kJumpAt = 150.0f, kGrappleAt = 900.0f;
 // a grapple only to its firing spot.
 const uint32_t kThinkMoveDir = 0x1e0;
 const float kSteerFrom = 700.0f, kSteerEdge = 120.0f;
+const float kJumpUp = 50.0f, kJumpGap = 150.0f;
 const DWORD kLinkFresh = 700, kJumpRest = 900, kGrappleRest = 4000, kAimFor = 350, kUnstickAfter = 1800, kUnstickRest = 2500;
 
 void Traverse(uint8_t* think, uint8_t* unit)
@@ -1528,8 +1529,9 @@ void Traverse(uint8_t* think, uint8_t* unit)
 				}
 			}
 		}
-		// a seam (pieces touching, a small step) is walked: no jump
-		bool seam = flat(g.linkA, g.linkB) < 60.0f && fabsf(g.linkB[1] - g.linkA[1]) < 45.0f;
+		// a jump only where it's needed: the far side more than a step up or a real gap across; anything else (a seam, a
+		// short hop down) is run across, as a drop is
+		bool seam = g.linkB[1] - g.linkA[1] < kJumpUp && flat(g.linkA, g.linkB) < kJumpGap;
 		if (g.linkKind == kNavJump && !seam && flat(here, g.linkA) < kJumpAt && flat(here, g.linkB) > 60.0f && now - g.jumpAt > kJumpRest) {
 			press = kPadJump;
 			g.jumpAt = now;
