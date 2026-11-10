@@ -182,17 +182,29 @@ bool Detected(int rule, const Seen& s, DWORD now)
 	}
 }
 
-// Own team or enemy, seen from the viewer; free-for-all rules (setup +0x28 1-3) make everyone else an enemy.
+// Own team or enemy, seen from the viewer; in a game type without teams everyone else is an enemy. Whether it's a team
+// type comes from the rules code (RulesTeams: the lobby's rule, or the bot match screen's; the match setup's rule number
+// is 1 for every bot match, team or not, which drew every blip as an enemy there). Teams by match slot where both
+// have one, else the units' team bytes (a VS).
 int Side(uint8_t* unit)
 {
 	uint8_t* viewer = g_team && Versus() ? Viewer() : nullptr;
 	if (!viewer || !unit || unit == viewer) {
 		return kSideNone;
 	}
-	uint8_t* setup = g_setup ? *g_setup : nullptr;
-	int32_t rule = setup ? *(int32_t*)(setup + 0x28) : 0;
-	bool ffa = rule >= 1 && rule <= 3;
-	return !ffa && unit[g_vas->team] == viewer[g_vas->team] ? kSideOwn : kSideEnemy;
+	bool teams = RulesTeams();
+	int side = kSideEnemy, mine = RulesSlotOf(viewer), theirs = RulesSlotOf(unit);
+	int myTeam = mine >= 0 ? RulesTeamOf(mine) : -1, theirTeam = theirs >= 0 ? RulesTeamOf(theirs) : -1;
+	if (teams) {
+		bool same = myTeam >= 0 && theirTeam >= 0 ? myTeam == theirTeam : unit[g_vas->team] == viewer[g_vas->team];
+		side = same ? kSideOwn : kSideEnemy;
+	}
+	static LONG logged = 0;
+	if (logged < 12 && InterlockedIncrement(&logged) <= 12) {
+		XLS_LOG_INFO("mods: radar: team colours: team game %d; viewer slot %d team %d (byte %u), blip slot %d team %d (byte %u): %s.", (int)teams, mine,
+		             myTeam, viewer[g_vas->team], theirs, theirTeam, unit[g_vas->team], side == kSideOwn ? "own team, blue" : "enemy, red");
+	}
+	return side;
 }
 
 void BlipAdd(uint8_t* unit)

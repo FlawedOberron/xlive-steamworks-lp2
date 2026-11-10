@@ -176,13 +176,16 @@ const int kGrappleValues = (int)(sizeof(kGrappleScales) / sizeof(kGrappleScales[
 // StaggerAdd). The points only decide when, and one hit is enough for most, so the rows pick the reaction instead.
 // the pools: shrink = flinch, blown = knockdown, third = the electric stun (FUN_009b8bb0; user test 2026-11-09)
 // Knockdown Pull / Push: the knockdown plus a throw toward / away from the attacker (Knockdown Force), see KnockdownThrow
-const char* const kStaggerNames[] = {"Default", "Off", "Occasional", "Flinch", "Knockdown", "Knockdown Pull", "Knockdown Push", "Stun"};
+const char* const kStaggerNames[] = {"Default", "Off", "Occasional", "Flinch", "Knockdown", "Knockdown Pull", "Knockdown Push", "Stun", "Knock", "Occasional Knock"};
 const int kStaggerValues = (int)(sizeof(kStaggerNames) / sizeof(kStaggerNames[0]));
 // Headshot Stagger: the same reactions, but the first value follows the Bullet Stagger row
-const char* const kHeadStaggerNames[] = {"As Bullet Stagger", "Off", "Occasional", "Flinch", "Knockdown", "Knockdown Pull", "Knockdown Push", "Stun"};
+const char* const kHeadStaggerNames[] = {"As Bullet Stagger", "Off", "Occasional", "Flinch", "Knockdown", "Knockdown Pull", "Knockdown Push", "Stun", "Knock", "Occasional Knock"};
 // Airborne Headshot Stagger: its first value follows Airborne Bullet Stagger when that's set, else Headshot Stagger, else Bullet Stagger
-const char* const kAirHeadStaggerNames[] = {"As Rows Above", "Off", "Occasional", "Flinch", "Knockdown", "Knockdown Pull", "Knockdown Push", "Stun"};
-enum { kReactDefault, kReactOff, kReactOccasional, kReactFlinch, kReactBack, kReactBackPull, kReactBackPush, kReactDown };
+const char* const kAirHeadStaggerNames[] = {"As Rows Above", "Off", "Occasional", "Flinch", "Knockdown", "Knockdown Pull", "Knockdown Push", "Stun", "Knock", "Occasional Knock"};
+// Knock, Occasional Knock (last, so saved settings keep their meaning): no stagger, but the hit still shows on the body
+// and the camera (the character's "hit this frame" flag and the shake stay, which Off takes away too); occasional: at most
+// one such hit every kOccasionalMs, the rest as Off
+enum { kReactDefault, kReactOff, kReactOccasional, kReactFlinch, kReactBack, kReactBackPull, kReactBackPush, kReactDown, kReactKnock, kReactKnockOccasional };
 const DWORD kOccasionalMs = 1500; // Occasional: at most one reaction this often
 // Thresholds (Fall Stagger, Massive Shot Threshold): the game's limit times the scale, higher is harder to reach.
 const char* const kThresholdNames[] = {"Default", "0.5x", "0.75x", "1.25x", "1.5x", "2x", "3x", "Never"};
@@ -1079,7 +1082,10 @@ bool __attribute__((thiscall)) StaggerAdd(void* character, uint32_t delta, uint3
 		}
 	}
 	t_hitAt = now;
-	t_hitQuiet = setting == kReactOff || (setting == kReactOccasional && now - StaggerSeenGet(character).reacted < kOccasionalMs);
+	DWORD sinceReaction = now - StaggerSeenGet(character).reacted;
+	// (a hit asks each pool in turn: for Occasional Knock the same hit's later calls, within 50 ms, aren't "another hit")
+	t_hitQuiet = setting == kReactOff || (setting == kReactOccasional && sinceReaction < kOccasionalMs) ||
+	             (setting == kReactKnockOccasional && sinceReaction >= 50 && sinceReaction < kOccasionalMs);
 	t_noFlinch = t_noFlinch || t_hitQuiet;
 	switch (setting) {
 	case kReactDefault: {
@@ -1090,6 +1096,12 @@ bool __attribute__((thiscall)) StaggerAdd(void* character, uint32_t delta, uint3
 		return standing;
 	}
 	case kReactOff:
+	case kReactKnock:
+		return true;
+	case kReactKnockOccasional:
+		if (sinceReaction >= kOccasionalMs) {
+			StaggerSeenSet(character, true, false, now);
+		}
 		return true;
 	case kReactOccasional: {
 		if (now - StaggerSeenGet(character).reacted < kOccasionalMs) {
@@ -1272,7 +1284,7 @@ DWORD WINAPI SyncThread(LPVOID)
 		std::string now = Format(r);
 		if (now != logged) {
 			logged = now;
-			XLS_LOG_INFO("mods: rules: unlimited ammo %s, unlimited grenades %s, secondary kind 0x%02x, ammo supply %d / VS weapons %d / VS %d magazines (0 = default), survival %s (%d lives), harmonizer %s, grappling %s, stagger bullet %s / explosion %s / anchor %s / melee %s, massive shot %s at %s.", r.ammo ? "on" : "off", r.grenades ? "on" : "off", r.secondary, r.supply, r.survival ? "on" : "off", r.lives, r.harmonizer ? "on" : "off", kGrappleNames[r.grapple % kGrappleValues], kStaggerNames[r.stagger % kStaggerValues], kStaggerNames[r.staggerExplosion % kStaggerValues], kStaggerNames[r.staggerAnchor % kStaggerValues], kStaggerNames[r.staggerMelee % kStaggerValues], kMassiveNames[r.massive % kMassiveValues], kThresholdNames[r.massiveThreshold % kThresholdValues]);
+			XLS_LOG_INFO("mods: rules: unlimited ammo %s, unlimited grenades %s, secondary kind 0x%02x, ammo supply %d / VS weapons %d / VS %d magazines (0 = default), survival %s (%d lives), harmonizer %s, grappling %s, stagger bullet %s / explosion %s / anchor %s / melee %s, massive shot %s at %s.", r.ammo ? "on" : "off", r.grenades ? "on" : "off", r.secondary, r.supply, r.supplyVsWeapon, r.supplyVs, r.survival ? "on" : "off", r.lives, r.harmonizer ? "on" : "off", kGrappleNames[r.grapple % kGrappleValues], kStaggerNames[r.stagger % kStaggerValues], kStaggerNames[r.staggerExplosion % kStaggerValues], kStaggerNames[r.staggerAnchor % kStaggerValues], kStaggerNames[r.staggerMelee % kStaggerValues], kMassiveNames[r.massive % kMassiveValues], kThresholdNames[r.massiveThreshold % kThresholdValues]);
 		}
 	}
 }

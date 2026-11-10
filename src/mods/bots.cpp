@@ -346,8 +346,8 @@ int Personality(uint8_t* unit)
 		q.after[i] = p[kTraits[i]];
 	}
 	g_personality[unit] = q;
-	XLS_LOG_INFO("mods: bots: %p (slot %d) is a %s, difficulty x%.1f (attacker %u -> %u%s, quickness %u -> %u, appeal %u -> %u).", unit, slot,
-	             k.name, d, q.before[0], q.after[0], raised ? ", raised from a partner's" : "", q.before[2], q.after[2], q.before[6], q.after[6]);
+	XLS_LOG_INFO("mods: bots: %p (slot %d) is a %s, difficulty x%.1f (attacker %u -> %u%s, quickness %u -> %u, appeal %u -> %u; cursor speed trait %u).", unit, slot,
+	             k.name, d, q.before[0], q.after[0], raised ? ", raised from a partner's" : "", q.before[2], q.after[2], q.before[6], q.after[6], p[4]);
 	return a;
 }
 
@@ -1591,9 +1591,9 @@ char __attribute__((thiscall)) Resolve(void* self, uint8_t* unit, uint8_t* plan,
 			             "hop %d -> %d kind %d, waypoint %.1f m away (%.0f %.0f %.0f)%s.", unit, sqrtf(Distance2(here, g.tracePos)) / 100.0f,
 			             (now - g.traceAt) / 1000.0f, z, reg(z), gz, reg(gz), sqrtf(Distance2(here, g.pos)) / 100.0f, hopFrom, hopTo,
 			             g.linkKind, left / 100.0f, to[0], to[1], to[2], now - g.steerAt < 15000 ? ", steered across a link" : "");
-			XLS_LOG_INFO("mods: bots: trace %p path step: %u calls, %u went, %u arrived (radius %.1f m), last to (%.0f %.0f %.0f) %.1f m away.",
-			             unit, g.pathCalls, g.pathOk, g.pathArrived, g.pathRadius / 100.0f, g.pathTo[0], g.pathTo[1], g.pathTo[2],
-			             sqrtf(Distance2(here, g.pathTo)) / 100.0f);
+			XLS_LOG_INFO("mods: bots: trace %p path step: %u calls, %u went, %u arrived (radius %.1f m), last to (%.0f %.0f %.0f) %.1f m away; "
+			             "plan item %s, %s.", unit, g.pathCalls, g.pathOk, g.pathArrived, g.pathRadius / 100.0f, g.pathTo[0], g.pathTo[1], g.pathTo[2],
+			             sqrtf(Distance2(here, g.pathTo)) / 100.0f, PlanItemName(plan), *(uint8_t**)(unit + g_vas->target) ? "has a target" : "no target");
 		}
 		g.traceAt = now;
 		memcpy(g.tracePos, here, sizeof(g.tracePos));
@@ -1736,21 +1736,22 @@ void Traverse(uint8_t* think, uint8_t* unit)
 	}
 }
 
-// Aim. The think's "aim at the target" command (cThink::vf31 0x6000000c -> DX11 FUN_00903f10, thiscall(think, unit,
-// lead), ret 8) writes the point the bot aims at to the unit (+0x1600 DX11, +0x15f0 DX9): its target's position, led,
-// plus a height by what the target is. The bot's view is then turned straight at it (cThinkPlayer::vf13 takes the pitch
-// from it with no turn rate), and the game's own per-difficulty aim offsets are all 0: bots snap on and never miss.
-// AI slots with the Improved brain aim at that point plus an error (per slot; a slot's think runs on one thread):
+// Aim. A bot aims with its think's cVirtualCursor (think +0x1a8): each frame the cursor's mode sets mCursorTargetPos
+// (+0x70, the target's aim point), then DX11 FUN_00fbf460 (thiscall(cursor, unit, pad), ret 8) moves mCursorPos (+0x60)
+// most of the way there (mSpdRate 0.5 a frame x the unit's cAIParam byte 4) and the think copies the result to the
+// unit's aim point: it snaps on within a few frames and stays on. (The think command FUN_00903f10 with the per-difficulty
+// lead and offset tables isn't what battle bots aim by: hooked first, never called for them.)
+// AI slots with the Improved brain and a target get an error on the cursor's target point before the game follows it
+// (per slot, found by unit: ThinkBody's g_slotUnit):
 //  - tracking: the aim follows the point as a spring (omega, damping: under 1 it swings past), and only follows a
 //    share of the target's movement at once (follow), so a moving target is trailed. A new target: the aim starts where
 //    it was and swings over. Starting to aim after a second without: off by up to `acquire` (radians of the range).
 //  - wander: a slow drift around the point, `wander` radians of the range, more while the target or the bot moves.
-// By the AI Enemy Battle difficulty. Applied right after the game sets the point, and each think frame after that
-// while nothing else has moved it (the game leaves it between commands).
-typedef void(__attribute__((thiscall)) * AimFn)(uint8_t*, uint8_t*, int);
-AimFn g_aimOriginal = nullptr;
-const uint32_t kAimFnVas[kBuildCount] = {0x903f10, 0x8f45a0, 0x9041e0, 0x8f4760};
-const uint8_t kAimPrologue[] = {0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf0, 0x81, 0xec, 0x98, 0x00, 0x00, 0x00};
+// By the AI Enemy Battle difficulty.
+typedef void(__attribute__((thiscall)) * CursorFn)(uint8_t*, uint8_t*, uint8_t*);
+CursorFn g_cursorOriginal = nullptr;
+const uint32_t kCursorFnVas[kBuildCount] = {0xfbf460, 0xfaf3a0, 0xfbf820, 0xfaf650};
+const uint8_t kCursorPrologue[] = {0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf0, 0x81, 0xec, 0x84, 0x00, 0x00, 0x00};
 struct AimSkill {
 	float follow, omega, damping, wander, acquire;
 };
@@ -1764,8 +1765,8 @@ const float kAimTargetSpeed = 400.0f, kAimOwnSpeed = 800.0f, kAimMovingMost = 4.
 struct AimState {
 	uint8_t* unit = nullptr;
 	uint8_t* target = nullptr;
-	bool has = false, inBody = false; // the state below is set; the game set the point during this think frame
-	double truthAt = 0, at = 0, wanderNext = 0;
+	bool has = false; // the state below is set
+	double at = 0, wanderNext = 0;
 	float truth[3] = {}, lastTruth[3] = {}, wrote[3] = {}, targetPos[3] = {}, ownPos[3] = {};
 	float e[3] = {}, ev[3] = {};      // the tracking error and its speed
 	float n[3] = {}, nGoal[3] = {};   // the wander
@@ -1785,15 +1786,10 @@ double Seconds()
 	return (double)c.QuadPart * kPerTick;
 }
 
-uint32_t AimOut()
-{
-	return g_vas->held == 0x1688 ? 0x1600 : 0x15f0;
-}
-
-void AimApply(AimState& s, uint8_t* unit, uint8_t slot, double now)
+// aim: the point the game is about to follow, s.truth: where it really wanted it
+void AimApply(AimState& s, uint8_t* unit, float* aim, uint8_t slot, double now)
 {
 	const AimSkill& k = kAimSkill[BotMenuOptions().difficulty & 3];
-	float* aim = (float*)(unit + AimOut());
 	const float* own = (const float*)(unit + 0xd0);
 	uint8_t* target = *(uint8_t**)(unit + g_vas->target);
 	float dt = (float)(now - s.at);
@@ -1867,39 +1863,29 @@ void AimApply(AimState& s, uint8_t* unit, uint8_t slot, double now)
 	}
 }
 
-void __attribute__((thiscall)) Aim(uint8_t* think, uint8_t* unit, int lead)
+void __attribute__((thiscall)) CursorFollow(uint8_t* cursor, uint8_t* unit, uint8_t* pad)
 {
-	g_aimOriginal(think, unit, lead);
-	uint8_t slot = think ? think[kThinkSlot] : 16;
+	int slot = -1;
+	for (int i = 0; unit && i < 16; i++) {
+		slot = g_slotUnit[i].load(std::memory_order_relaxed) == unit ? i : slot;
+	}
 	uint8_t* game = *(uint8_t**)At(g_vas->game);
 	uint8_t* slots = *(uint8_t**)At(g_vas->slots);
-	if (slot >= 16 || !unit || !slots || !BotWorld(game) || !slots[0x1b1 + slot * 0x7c] || !BotMenuOptions().improved) {
-		return;
+	if (slot >= 0 && cursor && slots && slots[0x1b1 + slot * 0x7c] && BotWorld(game) && BotMenuOptions().improved) {
+		AimState& s = g_aim[slot];
+		float* point = (float*)(cursor + kCursorTarget);
+		if (!*(uint8_t**)(unit + g_vas->target)) {
+			s.has = false; // nobody to aim at: the next target is acquired afresh
+		}
+		else {
+			// a frame the game left the point alone still has our error in it: its own point is the last one then
+			if (!s.has || s.unit != unit || memcmp(point, s.wrote, sizeof(s.wrote)) != 0) {
+				memcpy(s.truth, point, sizeof(s.truth));
+			}
+			AimApply(s, unit, point, (uint8_t)slot, Seconds());
+		}
 	}
-	AimState& s = g_aim[slot];
-	double now = Seconds();
-	memcpy(s.truth, unit + AimOut(), sizeof(s.truth));
-	s.truthAt = now;
-	s.inBody = true;
-	AimApply(s, unit, slot, now);
-}
-
-// After the think's body: a frame the game didn't set the point in, while it's still as we left it.
-void AimKeep(uint8_t* think, uint8_t* unit)
-{
-	uint8_t slot = think[kThinkSlot];
-	if (slot >= 16 || !unit || !g_aimOriginal) {
-		return;
-	}
-	AimState& s = g_aim[slot];
-	if (s.inBody) {
-		s.inBody = false;
-		return;
-	}
-	double now = Seconds();
-	if (s.has && s.unit == unit && now - s.truthAt < 1.0 && memcmp(unit + AimOut(), s.wrote, sizeof(s.wrote)) == 0) {
-		AimApply(s, unit, slot, now);
-	}
+	g_cursorOriginal(cursor, unit, pad);
 }
 
 uint32_t __attribute__((thiscall)) ThinkBody(uint8_t* think, uint8_t* unit)
@@ -1909,7 +1895,6 @@ uint32_t __attribute__((thiscall)) ThinkBody(uint8_t* think, uint8_t* unit)
 	}
 	ReactToHit(think, unit);
 	uint32_t r = g_thinkBodyOriginal(think, unit);
-	AimKeep(think, unit);
 	if (r) {
 		Traverse(think, unit);
 	}
@@ -2196,9 +2181,9 @@ void BotsInstall(unsigned char* base)
 		XLS_LOG_WARN("mods: bots: path step not recognised, the trace won't show it.");
 	}
 	if (GameBuild() >= 0) {
-		g_aimOriginal = (AimFn)Detour(At(kAimFnVas[GameBuild()]), kAimPrologue, sizeof(kAimPrologue), (void*)&Aim);
+		g_cursorOriginal = (CursorFn)Detour(At(kCursorFnVas[GameBuild()]), kCursorPrologue, sizeof(kCursorPrologue), (void*)&CursorFollow);
 	}
-	if (!g_aimOriginal) {
+	if (!g_cursorOriginal) {
 		XLS_LOG_WARN("mods: bots: aim code not recognised, bots keep the game's perfect aim.");
 	}
 	if (GameBuild() >= 0) {
