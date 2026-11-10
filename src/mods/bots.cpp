@@ -714,6 +714,9 @@ struct RoamGoal {
 	int linkKind = -1;
 	float linkA[3] = {0, 0, 0}, linkB[3] = {0, 0, 0};
 	DWORD linkSeen = 0;
+	float way[3] = {0, 0, 0};   // the waypoint last given to the game (Resolve)
+	float markPos[3] = {0, 0, 0}; // where it last made kStallStep of progress, when: standing since then (Traverse)
+	DWORD markAt = 0, stallLogged = 0;
 	DWORD jumpAt = 0, grappleAt = 0, aimFrom = 0, unstickAt = 0; // last presses; when it started aiming the anchor
 	DWORD steerAt = 0;      // Traverse steering it across a link: last frame it did, and whether it's past the start
 	bool steerPast = false;
@@ -780,6 +783,7 @@ struct Region {
 std::vector<Region> g_regions;
 std::vector<int> g_zoneRegion; // per zone
 LONG g_traceLines = 0;          // movement trace lines this map (Resolve)
+LONG g_stallLines = 0;          // stall steering lines this map (Traverse)
 const void* g_areaSet = nullptr;
 uint32_t g_areaCount = 0;
 
@@ -928,6 +932,7 @@ void RegionsBuild()
 		open += r.open;
 	}
 	g_traceLines = 0;
+	g_stallLines = 0;
 	XLS_LOG_INFO("mods: bots: %u zones in %u regions (%d open: one look sweeps them).", (unsigned)n, (unsigned)g_regions.size(), open);
 }
 
@@ -1511,7 +1516,7 @@ uint32_t __attribute__((thiscall)) PathStep(void* self, uint8_t* unit, float* fr
 			g.pathOk += r != 0;
 			g.pathArrived += r == 0 && Distance2(from, to) <= radius * radius;
 			g.pathRadius = radius;
-			memcpy(g.pathTo, to, sizeof(g.pathTo));
+			memcpy(g.pathTo, from, sizeof(g.pathTo)); // the 3rd argument is the path's end, the 4th the bot's place
 			if (out) {
 				memcpy(g.pathDir, out, sizeof(g.pathDir));
 			}
@@ -1567,6 +1572,7 @@ char __attribute__((thiscall)) Resolve(void* self, uint8_t* unit, uint8_t* plan,
 		memcpy(g.linkB, link->b, sizeof(g.linkB));
 	}
 	g.linkSeen = now;
+	memcpy(g.way, to, sizeof(g.way));
 	float left = sqrtf(Distance2(here, to));
 	if (hopFrom != g.hopFrom || hopTo != g.hopTo || now - g.hopProgress > 2 * kHopStuck) { // a new hop (or a stale one)
 		g.hopFrom = hopFrom;
@@ -1626,6 +1632,13 @@ const float kJumpAt = 150.0f, kGrappleAt = 900.0f;
 // a grapple only to its firing spot.
 const uint32_t kThinkMoveDir = 0x1e0;
 const float kSteerFrom = 700.0f, kSteerEdge = 120.0f;
+// Stalls. The game's move plan only moves the bot along a path it has: while a path search is pending (every new
+// waypoint, and every re-path) it runs straight at the old path's end, which is where the bot stands, and with no path
+// (the waypoint is across a seam of the navmesh) it doesn't move at all. So a bot whose move plan runs (the waypoint is
+// fresh) but that has made no kStallStep of progress for kStallAfter is steered straight at the waypoint; still nowhere
+// after kSidestepAfter, it's steered to one side and the other of that line in turns (around a corner or a rock).
+const float kStallStep = 60.0f, kWayHere = 150.0f;
+const DWORD kStallAfter = 300, kSidestepAfter = 2500, kSidestepTurn = 900;
 const DWORD kLinkFresh = 700, kJumpRest = 900, kGrappleRest = 4000, kAimFor = 350, kUnstickAfter = 1800, kUnstickRest = 2500;
 
 void Traverse(uint8_t* think, uint8_t* unit)
@@ -1657,6 +1670,7 @@ void Traverse(uint8_t* think, uint8_t* unit)
 		}
 		if (now - g.linkSeen > kLinkFresh) {
 			g.aimFrom = 0;
+			g.markAt = 0; // no move plan: standing isn't a stall
 			return;
 		}
 		auto flat = [](const float* a, const float* b) {
@@ -1678,6 +1692,29 @@ void Traverse(uint8_t* think, uint8_t* unit)
 					steerDir[2] = t[2] - here[2];
 					g.steerAt = now;
 				}
+			}
+		}
+		if (!g.markAt || Distance2(here, g.markPos) > kStallStep * kStallStep) {
+			memcpy(g.markPos, here, sizeof(g.markPos));
+			g.markAt = now;
+		}
+		DWORD stalled = now - g.markAt;
+		if (!steer && stalled > kStallAfter && !g.aimFrom && flat(here, g.way) > kWayHere) {
+			float dx = g.way[0] - here[0], dz = g.way[2] - here[2];
+			if (stalled > kSidestepAfter) { // 60 degrees off the line, left then right
+				float side = ((stalled - kSidestepAfter) / kSidestepTurn) % 2 ? -0.866f : 0.866f;
+				float rx = dx * 0.5f - dz * side, rz = dz * 0.5f + dx * side;
+				dx = rx;
+				dz = rz;
+			}
+			steer = true;
+			steerDir[0] = dx;
+			steerDir[2] = dz;
+			if (g_stallLines < 80 && now - g.stallLogged > 5000) { // the first 80 of a map
+				g_stallLines++;
+				g.stallLogged = now;
+				XLS_LOG_INFO("mods: bots: %p stood %.1f s with a waypoint %.1f m away (%.1f m up): steered %s.", unit, stalled / 1000.0f,
+				             flat(here, g.way) / 100.0f, (g.way[1] - here[1]) / 100.0f, stalled > kSidestepAfter ? "around" : "straight at it");
 			}
 		}
 		// a jump only where it's needed: the far side more than a step up or a real gap across; anything else (a seam, a

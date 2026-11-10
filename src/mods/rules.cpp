@@ -176,19 +176,19 @@ const int kGrappleValues = (int)(sizeof(kGrappleScales) / sizeof(kGrappleScales[
 // StaggerAdd). The points only decide when, and one hit is enough for most, so the rows pick the reaction instead.
 // the pools: shrink = flinch, blown = knockdown, third = the electric stun (FUN_009b8bb0; user test 2026-11-09)
 // Knockdown Pull / Push: the knockdown plus a throw toward / away from the attacker (Knockdown Force), see KnockdownThrow
-const char* const kStaggerNames[] = {"Default", "Off", "Occasional", "Flinch", "Knockdown", "Knockdown Pull", "Knockdown Push", "Stun", "Knock", "Occasional Knock"};
+const char* const kStaggerNames[] = {"Default", "Off", "Knock Occasional", "Knock", "Flinch Occasional", "Flinch", "Knockdown", "Knockdown Pull", "Knockdown Push", "Stun"};
 const int kStaggerValues = (int)(sizeof(kStaggerNames) / sizeof(kStaggerNames[0]));
 // Voice chat (voice.cpp): who is heard in a match. Living: the living hear only the living. Nearby: only close by.
 const char* const kVoiceNames[] = {"Always", "Living", "Nearby", "None"};
 const int kVoiceValues = 4;
 // Headshot Stagger: the same reactions, but the first value follows the Bullet Stagger row
-const char* const kHeadStaggerNames[] = {"As Bullet Stagger", "Off", "Occasional", "Flinch", "Knockdown", "Knockdown Pull", "Knockdown Push", "Stun", "Knock", "Occasional Knock"};
+const char* const kHeadStaggerNames[] = {"As Bullet Stagger", "Off", "Knock Occasional", "Knock", "Flinch Occasional", "Flinch", "Knockdown", "Knockdown Pull", "Knockdown Push", "Stun"};
 // Airborne Headshot Stagger: its first value follows Airborne Bullet Stagger when that's set, else Headshot Stagger, else Bullet Stagger
-const char* const kAirHeadStaggerNames[] = {"As Rows Above", "Off", "Occasional", "Flinch", "Knockdown", "Knockdown Pull", "Knockdown Push", "Stun", "Knock", "Occasional Knock"};
-// Knock, Occasional Knock (last, so saved settings keep their meaning): no stagger, but the hit still shows on the body
+const char* const kAirHeadStaggerNames[] = {"As Rows Above", "Off", "Knock Occasional", "Knock", "Flinch Occasional", "Flinch", "Knockdown", "Knockdown Pull", "Knockdown Push", "Stun"};
+// Values run from mildest to hardest. Knock, Knock Occasional: no stagger, but the hit still shows on the body
 // and the camera (the character's "hit this frame" flag and the shake stay, which Off takes away too); occasional: at most
 // one such hit every kOccasionalMs, the rest as Off
-enum { kReactDefault, kReactOff, kReactOccasional, kReactFlinch, kReactBack, kReactBackPull, kReactBackPush, kReactDown, kReactKnock, kReactKnockOccasional };
+enum { kReactDefault, kReactOff, kReactKnockOccasional, kReactKnock, kReactOccasional, kReactFlinch, kReactBack, kReactBackPull, kReactBackPush, kReactDown };
 const DWORD kOccasionalMs = 1500; // Occasional: at most one reaction this often
 // Thresholds (Fall Stagger, Massive Shot Threshold): the game's limit times the scale, higher is harder to reach.
 const char* const kThresholdNames[] = {"Default", "0.5x", "0.75x", "1.25x", "1.5x", "2x", "3x", "Never"};
@@ -1092,7 +1092,7 @@ bool __attribute__((thiscall)) StaggerAdd(void* character, uint32_t delta, uint3
 	}
 	t_hitAt = now;
 	DWORD sinceReaction = now - StaggerSeenGet(character).reacted;
-	// (a hit asks each pool in turn: for Occasional Knock the same hit's later calls, within 50 ms, aren't "another hit")
+	// (a hit asks each pool in turn: for Knock Occasional the same hit's later calls, within 50 ms, aren't "another hit")
 	t_hitQuiet = setting == kReactOff || (setting == kReactOccasional && sinceReaction < kOccasionalMs) ||
 	             (setting == kReactKnockOccasional && sinceReaction >= 50 && sinceReaction < kOccasionalMs);
 	t_noFlinch = t_noFlinch || t_hitQuiet;
