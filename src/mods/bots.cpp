@@ -668,6 +668,9 @@ struct RoamGoal {
 	float linkA[3] = {0, 0, 0}, linkB[3] = {0, 0, 0};
 	DWORD linkSeen = 0;
 	DWORD jumpAt = 0, grappleAt = 0, aimFrom = 0, unstickAt = 0; // last presses; when it started aiming the anchor
+	DWORD steerAt = 0;      // Traverse steering it across a link: last frame it did, and whether it's past the start
+	bool steerPast = false;
+	float steerLink[3] = {0, 0, 0};
 	DWORD traceAt = 0;      // the movement trace (Resolve): when it last logged, from where
 	float tracePos[3] = {0, 0, 0};
 	float grappleY = 0;     // height when it fired, to log whether it climbed
@@ -1440,9 +1443,9 @@ char __attribute__((thiscall)) Resolve(void* self, uint8_t* unit, uint8_t* plan,
 			int z = AreaAt(here), gz = AreaAt(g.pos);
 			auto reg = [](int zone) { return zone >= 0 && zone < (int)g_zoneRegion.size() ? g_zoneRegion[zone] : -1; };
 			XLS_LOG_INFO("mods: bots: trace %p moved %.1f m in %.0f s; zone %d (region %d) -> goal zone %d (region %d) %.0f m away; "
-			             "hop %d -> %d kind %d, waypoint %.1f m away (%.0f %.0f %.0f).", unit, sqrtf(Distance2(here, g.tracePos)) / 100.0f,
+			             "hop %d -> %d kind %d, waypoint %.1f m away (%.0f %.0f %.0f)%s.", unit, sqrtf(Distance2(here, g.tracePos)) / 100.0f,
 			             (now - g.traceAt) / 1000.0f, z, reg(z), gz, reg(gz), sqrtf(Distance2(here, g.pos)) / 100.0f, hopFrom, hopTo,
-			             g.linkKind, left / 100.0f, to[0], to[1], to[2]);
+			             g.linkKind, left / 100.0f, to[0], to[1], to[2], now - g.steerAt < 15000 ? ", steered across a link" : "");
 		}
 		g.traceAt = now;
 		memcpy(g.tracePos, here, sizeof(g.tracePos));
@@ -1464,7 +1467,13 @@ char __attribute__((thiscall)) Resolve(void* self, uint8_t* unit, uint8_t* plan,
 // (think +0x1a8, cVirtualCursor mCursorPos +0x60 / mCursorTargetPos +0x70) is held on the link's end for a moment, then
 // the anchor fires. Launch links need nothing (walking into the volume throws it). Stalled on any link: one jump.
 const uint32_t kThinkCursor = 0x1a8, kCursorPos = 0x60, kCursorTarget = 0x70, kPadJump = 0x2, kPadAnchor = 0x4;
-const float kJumpAt = 300.0f, kGrappleAt = 900.0f; // the game stops a few metres short of a point
+const float kJumpAt = 150.0f, kGrappleAt = 900.0f;
+// Steering: the game's path ends where its navmesh does (a ledge, a gap), a few metres short, so within kSteerFrom of a
+// link's start the bot's move direction (think +0x1e0, cThink::vf83: what cAIPlanMoveTrace sets each frame, a flat
+// world offset) is pointed at the start, then from kSteerEdge on at the far end, across the edge (jump, drop, launch);
+// a grapple only to its firing spot.
+const uint32_t kThinkMoveDir = 0x1e0;
+const float kSteerFrom = 700.0f, kSteerEdge = 120.0f;
 const DWORD kLinkFresh = 700, kJumpRest = 900, kGrappleRest = 4000, kAimFor = 350, kUnstickAfter = 1800, kUnstickRest = 2500;
 
 void Traverse(uint8_t* think, uint8_t* unit)
@@ -1478,6 +1487,8 @@ void Traverse(uint8_t* think, uint8_t* unit)
 	uint32_t press = 0;
 	const char* what = nullptr;
 	float logA = 0, logB = 0;
+	bool steer = false;
+	float steerDir[4] = {0, 0, 0, 0};
 	{
 		std::lock_guard<std::mutex> lock(g_goalLock);
 		auto it = g_goals.find(unit);
@@ -1500,6 +1511,23 @@ void Traverse(uint8_t* think, uint8_t* unit)
 			float dx = a[0] - b[0], dz = a[2] - b[2];
 			return sqrtf(dx * dx + dz * dz);
 		};
+		if (g.linkKind >= kNavJump && g.linkKind <= kNavLaunch) {
+			if (memcmp(g.steerLink, g.linkA, sizeof(g.steerLink)) != 0) {
+				memcpy(g.steerLink, g.linkA, sizeof(g.steerLink));
+				g.steerPast = false;
+			}
+			float da = flat(here, g.linkA);
+			if (da < kSteerFrom) {
+				g.steerPast = g.steerPast || (da < kSteerEdge && g.linkKind != kNavGrapple);
+				const float* t = g.steerPast ? g.linkB : g.linkA;
+				if (g.linkKind != kNavGrapple || da > kSteerEdge) {
+					steer = true;
+					steerDir[0] = t[0] - here[0];
+					steerDir[2] = t[2] - here[2];
+					g.steerAt = now;
+				}
+			}
+		}
 		// a seam (pieces touching, a small step) is walked: no jump
 		bool seam = flat(g.linkA, g.linkB) < 60.0f && fabsf(g.linkB[1] - g.linkA[1]) < 45.0f;
 		if (g.linkKind == kNavJump && !seam && flat(here, g.linkA) < kJumpAt && flat(here, g.linkB) > 60.0f && now - g.jumpAt > kJumpRest) {
@@ -1543,6 +1571,9 @@ void Traverse(uint8_t* think, uint8_t* unit)
 				logB = 0;
 			}
 		}
+	}
+	if (steer) {
+		memcpy(think + kThinkMoveDir, steerDir, sizeof(steerDir));
 	}
 	if (!press) {
 		return;
