@@ -180,6 +180,8 @@ const char* const kStaggerNames[] = {"Default", "Off", "Occasional", "Flinch", "
 const int kStaggerValues = (int)(sizeof(kStaggerNames) / sizeof(kStaggerNames[0]));
 // Headshot Stagger: the same reactions, but the first value follows the Bullet Stagger row
 const char* const kHeadStaggerNames[] = {"As Bullet Stagger", "Off", "Occasional", "Flinch", "Knockdown", "Knockdown Pull", "Knockdown Push", "Stun"};
+// Airborne Headshot Stagger: its first value follows Airborne Bullet Stagger when that's set, else Headshot Stagger, else Bullet Stagger
+const char* const kAirHeadStaggerNames[] = {"As Rows Above", "Off", "Occasional", "Flinch", "Knockdown", "Knockdown Pull", "Knockdown Push", "Stun"};
 enum { kReactDefault, kReactOff, kReactOccasional, kReactFlinch, kReactBack, kReactBackPull, kReactBackPush, kReactDown };
 const DWORD kOccasionalMs = 1500; // Occasional: at most one reaction this often
 // Thresholds (Fall Stagger, Massive Shot Threshold): the game's limit times the scale, higher is harder to reach.
@@ -273,6 +275,7 @@ struct Rules {
 	int stagger = 0; // kStaggerNames index: bullets (and any hit not told apart)
 	int staggerExplosion = 0, staggerAnchor = 0, staggerMelee = 0; // kStaggerNames indexes per hit kind
 	int staggerHead = 0; // bullets to the head: 0 = as the Bullet Stagger row, else a kStaggerNames index
+	int staggerAir = 0, staggerAirHead = 0; // bullets on a soldier in the air (body / head): 0 = as the rows before
 	int massive = 0, massiveThreshold = 0; // kMassiveNames, kThresholdScales indexes
 	int push = 0; // kPushNames index
 	int radar = 1, detectPlayers = 0, detectVs = 0, radarTeam = 1; // radar.cpp
@@ -295,8 +298,8 @@ std::atomic<int> g_vsWeaponSupplyRule{0}, g_vsSupplyRule{0}; // the setup rows (
 std::atomic<bool> g_harmonizer{false};
 uint8_t** g_game = nullptr;
 std::atomic<int> g_grapple{kGrappleDefault};
-std::atomic<int> g_stagger{0}, g_staggerExplosion{0}, g_staggerAnchor{0}, g_staggerMelee{0}, g_staggerHead{0};
-std::atomic<int> g_staggerExplosionRule{0}, g_staggerAnchorRule{0}, g_staggerMeleeRule{0}, g_staggerHeadRule{0}; // the setup rows (extras)
+std::atomic<int> g_stagger{0}, g_staggerExplosion{0}, g_staggerAnchor{0}, g_staggerMelee{0}, g_staggerHead{0}, g_staggerAir{0}, g_staggerAirHead{0};
+std::atomic<int> g_staggerExplosionRule{0}, g_staggerAnchorRule{0}, g_staggerMeleeRule{0}, g_staggerHeadRule{0}, g_staggerAirRule{0}, g_staggerAirHeadRule{0}; // the setup rows (extras)
 std::atomic<int> g_massive{0}, g_massiveThreshold{0}, g_massiveRule{0}, g_massiveThresholdRule{0};
 std::atomic<int> g_push{0}, g_pushRule{0};
 std::atomic<bool> g_survival{false};
@@ -347,7 +350,7 @@ const uint8_t* WeaponEntry(const uint8_t* weapon)
 
 std::string Format(const Rules& r)
 {
-	return FormatA("ammo=%d;grenades=%d;secondary=%d;magazines=%d;survival=%d;lives=%d;team=%d;harmonizer=%d;grapple=%d;stagger=%d;radar=%d;detectp=%d;detectv=%d;anchor=%d;fall=%d;gcount=%d;gpick=%d;qres=%d;rnd=%d;sw=%d;rteam=%d;sexp=%d;sanc=%d;smel=%d;mshot=%d;mthr=%d;kpush=%d;vswmag=%d;vsmag=%d;shead=%d", r.ammo, r.grenades, r.secondary, r.supply, r.survival, r.lives, r.team, r.harmonizer, r.grapple, r.stagger, r.radar, r.detectPlayers, r.detectVs, r.anchorSpeed, r.fall, r.grenadeCount, r.grenadePickup, r.quickResupply, r.rounds, r.switchEvery, r.radarTeam, r.staggerExplosion, r.staggerAnchor, r.staggerMelee, r.massive, r.massiveThreshold, r.push, r.supplyVsWeapon, r.supplyVs, r.staggerHead);
+	return FormatA("ammo=%d;grenades=%d;secondary=%d;magazines=%d;survival=%d;lives=%d;team=%d;harmonizer=%d;grapple=%d;stagger=%d;radar=%d;detectp=%d;detectv=%d;anchor=%d;fall=%d;gcount=%d;gpick=%d;qres=%d;rnd=%d;sw=%d;rteam=%d;sexp=%d;sanc=%d;smel=%d;mshot=%d;mthr=%d;kpush=%d;vswmag=%d;vsmag=%d;shead=%d;sair=%d;sairh=%d", r.ammo, r.grenades, r.secondary, r.supply, r.survival, r.lives, r.team, r.harmonizer, r.grapple, r.stagger, r.radar, r.detectPlayers, r.detectVs, r.anchorSpeed, r.fall, r.grenadeCount, r.grenadePickup, r.quickResupply, r.rounds, r.switchEvery, r.radarTeam, r.staggerExplosion, r.staggerAnchor, r.staggerMelee, r.massive, r.massiveThreshold, r.push, r.supplyVsWeapon, r.supplyVs, r.staggerHead, r.staggerAir, r.staggerAirHead);
 }
 
 Rules Parse(const std::string& s)
@@ -385,6 +388,8 @@ Rules Parse(const std::string& s)
 	r.staggerAnchor = small("sanc=", kStaggerValues, 0);
 	r.staggerMelee = small("smel=", kStaggerValues, 0);
 	r.staggerHead = small("shead=", kStaggerValues, 0);
+	r.staggerAir = small("sair=", kStaggerValues, 0);
+	r.staggerAirHead = small("sairh=", kStaggerValues, 0);
 	r.massive = small("mshot=", kMassiveValues, 0);
 	r.massiveThreshold = small("mthr=", kThresholdValues, 0);
 	r.push = small("kpush=", kPushValues, 0);
@@ -422,6 +427,8 @@ Rules Own()
 	r.staggerAnchor = g_staggerAnchorRule;
 	r.staggerMelee = g_staggerMeleeRule;
 	r.staggerHead = g_staggerHeadRule;
+	r.staggerAir = g_staggerAirRule;
+	r.staggerAirHead = g_staggerAirHeadRule;
 	r.massive = g_massiveRule;
 	r.massiveThreshold = g_massiveThresholdRule;
 	r.push = g_pushRule;
@@ -844,6 +851,29 @@ bool HitIsHead(const uint8_t* character, uint32_t a)
 	return shapes && head < count && shapes[head] == a;
 }
 
+// In the air (the Airborne Stagger rows). cJump (in the character, mGravity at +0x10 of it) keeps a state, Rno (+4:
+// DX11 +0x17c0, DX9 +0x17b0): 0 / 1 on the ground, 2 a jump going up, 3 falling, 4 off (the motion moves the
+// character: thrown, an anchor pull, but also some moves on the ground). The character's move (vf49, DX11 0x9d3970)
+// clears flag 0x400000 (+0xd7c DX11, +0xd6c DX9) and sets it again when the floor is under it. So: no floor this frame,
+// and jumping or falling, or (cJump off) moving up or down since the last frame (position +0x34, the last +0xc24 DX11,
+// +0xc14 DX9).
+bool CharacterAirborne(const uint8_t* character)
+{
+	if (g_staggerBuild < 0) {
+		return false;
+	}
+	bool dx9 = g_staggerBuild == 1 || g_staggerBuild == 3;
+	if (*(const uint32_t*)(character + (dx9 ? 0xd6c : 0xd7c)) & 0x400000) {
+		return false;
+	}
+	int rno = *(const int*)(character + (dx9 ? 0x17b0 : 0x17c0));
+	if (rno == 2 || rno == 3) {
+		return true;
+	}
+	float moved = *(const float*)(character + 0x34) - *(const float*)(character + (dx9 ? 0xc14 : 0xc24));
+	return rno == 4 && fabsf(moved) > 1.0f;
+}
+
 float __attribute__((thiscall)) HitHandler(void* character, uint32_t a, uint32_t b, uint32_t attacker, uint32_t d)
 {
 	uint8_t* was = t_attacker;
@@ -1033,10 +1063,20 @@ bool __attribute__((thiscall)) StaggerAdd(void* character, uint32_t delta, uint3
 	}
 	int setting = (kind == kStaggerExplosion ? g_staggerExplosion : kind == kStaggerAnchor ? g_staggerAnchor : kind == kStaggerMelee ? g_staggerMelee : g_stagger) % kStaggerValues;
 	const char* kindName = kStaggerKindNames[kind];
-	if (kind == kStaggerBullet && t_headHit) {
-		kindName = "headshot";
-		int head = g_staggerHead % kStaggerValues;
-		setting = head ? head : setting;   // 0: as the Bullet Stagger row
+	if (kind == kStaggerBullet) {
+		// the more specific row wins; a row left on its first value follows the rows before it
+		bool air = CharacterAirborne((const uint8_t*)character);
+		int head = g_staggerHead % kStaggerValues, inAir = g_staggerAir % kStaggerValues, airHead = g_staggerAirHead % kStaggerValues;
+		kindName = air ? (t_headHit ? "airborne headshot" : "airborne bullet") : t_headHit ? "headshot" : kindName;
+		if (air && t_headHit && airHead) {
+			setting = airHead;
+		}
+		else if (air && inAir) {
+			setting = inAir;
+		}
+		else if (t_headHit && head) {
+			setting = head;
+		}
 	}
 	t_hitAt = now;
 	t_hitQuiet = setting == kReactOff || (setting == kReactOccasional && now - StaggerSeenGet(character).reacted < kOccasionalMs);
@@ -1217,6 +1257,8 @@ DWORD WINAPI SyncThread(LPVOID)
 		g_staggerAnchor = r.staggerAnchor;
 		g_staggerMelee = r.staggerMelee;
 		g_staggerHead = r.staggerHead;
+		g_staggerAir = r.staggerAir;
+		g_staggerAirHead = r.staggerAirHead;
 		g_massive = r.massive;
 		g_massiveThreshold = r.massiveThreshold;
 		g_push = r.push;
@@ -3543,8 +3585,8 @@ enum SetupKind { kKindValue, kKindNav, kKindHeader, kKindOwn };
 const int kOwnBulletStagger = 100; // a kKindOwn row's arg for the rules byte 0x36 (not an extras key)
 enum SetupAction { kActNone, kActTypes, kActType, kActOptions, kActCreate, kActSection, kActDefault, kActProfile, kActBots, kActRadar, kActAnchor, kActStagger, kActBack };
 const char* const kBotRuleKeys[] = {"bots", "botDifficulty", "botBrain", "botPersona", "botTaunts", "radar", "radarPlayers", "radarVs", "anchorRange", "anchorSpeed", "fallStagger", "grenadeCount", "grenadePickup", "quickResupply", "rounds", "switchSides", "radarTeam",
-	"explosionStagger", "anchorStagger", "meleeStagger", "massiveShot", "massiveThreshold", "knockdownPush", "vsWeaponSupply", "vsSupply", "headStagger"};
-const int kBotRuleCounts[] = {2, 4, 2, 6, 4, 3, 4, 4, 13, 12, kThresholdValues, 12, 11, 2, 14, 11, 2, kStaggerValues, kStaggerValues, kStaggerValues, kMassiveValues, kThresholdValues, kPushValues, kSupplyValues, kSupplyValues, kStaggerValues};
+	"explosionStagger", "anchorStagger", "meleeStagger", "massiveShot", "massiveThreshold", "knockdownPush", "vsWeaponSupply", "vsSupply", "headStagger", "airStagger", "airHeadStagger"};
+const int kBotRuleCounts[] = {2, 4, 2, 6, 4, 3, 4, 4, 13, 12, kThresholdValues, 12, 11, 2, 14, 11, 2, kStaggerValues, kStaggerValues, kStaggerValues, kMassiveValues, kThresholdValues, kPushValues, kSupplyValues, kSupplyValues, kStaggerValues, kStaggerValues, kStaggerValues};
 const char* const kRadarNames[] = {"Always On", "Near Data Post", "Hidden"};
 const char* const kDetectNames[] = {"Always Show", "Moving & Shooting", "Running & Shooting", "Shooting"};
 struct SetupRow {
@@ -3719,6 +3761,8 @@ void SetupBuild(const uint8_t* rules)
 		// Bullet Stagger (rules byte 0x36, any hit not told apart): our own row, the game's stepper only knows its own pages
 		navRow(kKindOwn, kActNone, kOwnBulletStagger, "Bullet Stagger", kStaggerNames[rules[0x36] % kStaggerValues]);
 		navRow(kKindOwn, kActNone, 25, "Headshot Stagger", kHeadStaggerNames[x["headStagger"] % kStaggerValues]);
+		navRow(kKindOwn, kActNone, 26, "Airborne Bullet Stagger", kHeadStaggerNames[x["airStagger"] % kStaggerValues]);
+		navRow(kKindOwn, kActNone, 27, "Airborne Headshot Stagger", kAirHeadStaggerNames[x["airHeadStagger"] % kStaggerValues]);
 		navRow(kKindOwn, kActNone, 17, "Explosion Stagger", kStaggerNames[x["explosionStagger"] % kStaggerValues]);
 		navRow(kKindOwn, kActNone, 18, "Anchor Stagger", kStaggerNames[x["anchorStagger"] % kStaggerValues]);
 		navRow(kKindOwn, kActNone, 19, "Melee Stagger", kStaggerNames[x["meleeStagger"] % kStaggerValues]);
@@ -4154,6 +4198,8 @@ void BotRulesSync()
 	g_staggerAnchorRule = x["anchorStagger"];
 	g_staggerMeleeRule = x["meleeStagger"];
 	g_staggerHeadRule = x["headStagger"];
+	g_staggerAirRule = x["airStagger"];
+	g_staggerAirHeadRule = x["airHeadStagger"];
 	g_vsWeaponSupplyRule = x["vsWeaponSupply"];
 	g_vsSupplyRule = x["vsSupply"];
 }
@@ -4498,6 +4544,8 @@ const LobbyRow kLobbyOwnRows[] = {
 	{"Player", "Grenades at Spawn", kLobbyOwn, 11},
 	{"Stagger", "Bullet Stagger", kLobbyMenu, kRowStagger},
 	{"Stagger", "Headshot Stagger", kLobbyOwn, 25},
+	{"Stagger", "Airborne Bullet Stagger", kLobbyOwn, 26},
+	{"Stagger", "Airborne Headshot Stagger", kLobbyOwn, 27},
 	{"Stagger", "Explosion Stagger", kLobbyOwn, 17},
 	{"Stagger", "Anchor Stagger", kLobbyOwn, 18},
 	{"Stagger", "Melee Stagger", kLobbyOwn, 19},
@@ -4635,7 +4683,8 @@ std::string OwnValueName(int own, int v)
 	case 20: return kMassiveNames[v % kMassiveValues];
 	case 22: return kPushNames[v % kPushValues];
 	case 23: case 24: return kSupplyNames[v % kSupplyValues];
-	case 25: return kHeadStaggerNames[v % kStaggerValues];
+	case 25: case 26: return kHeadStaggerNames[v % kStaggerValues];
+	case 27: return kAirHeadStaggerNames[v % kStaggerValues];
 	case 11: return v ? std::to_string(v - 1) : "Default";
 	case 12: return v ? std::to_string(v) : "Default";
 	case 13: case 16: return v ? "On" : "Off";
