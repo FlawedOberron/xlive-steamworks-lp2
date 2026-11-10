@@ -719,7 +719,7 @@ struct RoamGoal {
 	bool steerPast = false;
 	float steerLink[3] = {0, 0, 0};
 	uint32_t pathCalls = 0, pathOk = 0, pathArrived = 0; // the game's path step for it since the last trace line (PathStep)
-	float pathRadius = 0, pathTo[3] = {0, 0, 0};
+	float pathRadius = 0, pathTo[3] = {0, 0, 0}, pathDir[3] = {0, 0, 0}; // pathDir: the direction the last step gave
 	DWORD traceAt = 0;      // the movement trace (Resolve): when it last logged, from where
 	float tracePos[3] = {0, 0, 0};
 	float grappleY = 0;     // height when it fired, to log whether it climbed
@@ -1512,6 +1512,9 @@ uint32_t __attribute__((thiscall)) PathStep(void* self, uint8_t* unit, float* fr
 			g.pathArrived += r == 0 && Distance2(from, to) <= radius * radius;
 			g.pathRadius = radius;
 			memcpy(g.pathTo, to, sizeof(g.pathTo));
+			if (out) {
+				memcpy(g.pathDir, out, sizeof(g.pathDir));
+			}
 		}
 	}
 	return r;
@@ -1591,9 +1594,9 @@ char __attribute__((thiscall)) Resolve(void* self, uint8_t* unit, uint8_t* plan,
 			             "hop %d -> %d kind %d, waypoint %.1f m away (%.0f %.0f %.0f)%s.", unit, sqrtf(Distance2(here, g.tracePos)) / 100.0f,
 			             (now - g.traceAt) / 1000.0f, z, reg(z), gz, reg(gz), sqrtf(Distance2(here, g.pos)) / 100.0f, hopFrom, hopTo,
 			             g.linkKind, left / 100.0f, to[0], to[1], to[2], now - g.steerAt < 15000 ? ", steered across a link" : "");
-			XLS_LOG_INFO("mods: bots: trace %p path step: %u calls, %u went, %u arrived (radius %.1f m), last to (%.0f %.0f %.0f) %.1f m away; "
-			             "plan item %s, %s.", unit, g.pathCalls, g.pathOk, g.pathArrived, g.pathRadius / 100.0f, g.pathTo[0], g.pathTo[1], g.pathTo[2],
-			             sqrtf(Distance2(here, g.pathTo)) / 100.0f, PlanItemName(plan), *(uint8_t**)(unit + g_vas->target) ? "has a target" : "no target");
+			XLS_LOG_INFO("mods: bots: trace %p path step: %u calls, %u went, %u arrived (radius %.1f m), last to (%.0f %.0f %.0f) %.1f m away (%.1f m of it height), "
+			             "step direction (%.2f %.2f %.2f); plan item %s, %s.", unit, g.pathCalls, g.pathOk, g.pathArrived, g.pathRadius / 100.0f, g.pathTo[0], g.pathTo[1], g.pathTo[2],
+			             sqrtf(Distance2(here, g.pathTo)) / 100.0f, (g.pathTo[1] - here[1]) / 100.0f, g.pathDir[0], g.pathDir[1], g.pathDir[2], PlanItemName(plan), *(uint8_t**)(unit + g_vas->target) ? "has a target" : "no target");
 		}
 		g.traceAt = now;
 		memcpy(g.tracePos, here, sizeof(g.tracePos));
