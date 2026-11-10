@@ -3525,7 +3525,7 @@ const uint8_t kScoreRows[] = {0x01, 0x0e, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x1e};
 enum SetupPage { kSetupTop, kSetupOptions, kSetupSection, kSetupTypes, kSetupEntries, kSetupName, kSetupBots, kSetupRadar, kSetupAnchor, kSetupStagger };
 enum SetupKind { kKindValue, kKindNav, kKindHeader, kKindOwn };
 const int kOwnBulletStagger = 100; // a kKindOwn row's arg for the rules byte 0x36 (not an extras key)
-enum SetupAction { kActNone, kActTypes, kActType, kActOptions, kActCreate, kActSection, kActDefault, kActProfile, kActBots, kActRadar, kActAnchor, kActStagger };
+enum SetupAction { kActNone, kActTypes, kActType, kActOptions, kActCreate, kActSection, kActDefault, kActProfile, kActBots, kActRadar, kActAnchor, kActStagger, kActBack };
 const char* const kBotRuleKeys[] = {"bots", "botDifficulty", "botBrain", "botPersona", "botTaunts", "radar", "radarPlayers", "radarVs", "anchorRange", "anchorSpeed", "fallStagger", "grenadeCount", "grenadePickup", "quickResupply", "rounds", "switchSides", "radarTeam",
 	"explosionStagger", "anchorStagger", "meleeStagger", "massiveShot", "massiveThreshold", "knockdownPush", "vsWeaponSupply", "vsSupply"};
 const int kBotRuleCounts[] = {2, 4, 2, 6, 4, 3, 4, 4, 13, 12, kThresholdValues, 12, 11, 2, 14, 11, 2, kStaggerValues, kStaggerValues, kStaggerValues, kMassiveValues, kThresholdValues, kPushValues, kSupplyValues, kSupplyValues};
@@ -3607,7 +3607,6 @@ void SetupBuild(const uint8_t* rules)
 		navRow(kKindNav, kActType, GameTypeOf(rules), "Rules", (g_setupProfile.empty() ? "Default" : g_setupProfile) + (g_setupEdited ? " *" : ""));
 		valueRow(0x1b);
 		navRow(kKindNav, kActOptions, 0, "Game Options", ">");
-		navRow(kKindNav, kActCreate, 0, "Begin Match", "");
 		break;
 	}
 	case kSetupOptions:
@@ -3632,7 +3631,6 @@ void SetupBuild(const uint8_t* rules)
 		navRow(kKindNav, kActBots, 0, "Bots", g_matchBots ? "On" : "Off");
 		navRow(kKindNav, kActRadar, 0, "Radar", kRadarNames[g_radarMode % 3]);
 		navRow(kKindNav, kActAnchor, 0, "Anchor", ">");
-		navRow(kKindNav, kActCreate, 0, "Begin Match", "");
 		break;
 	case kSetupSection:
 		g_setupTitle = kSections[at.arg].name;
@@ -3725,6 +3723,84 @@ void SetupBuild(const uint8_t* rules)
 		navRow(kKindNav, kActNone, 0, "Profile Name", WideToUtf8(g_setupName.c_str()) + "_");
 		break;
 	}
+	// pinned: a submenu's Back first, Begin Match last on every page (SetupRowAt keeps them on screen)
+	if (at.page != kSetupName) {
+		if (g_setupStack.size() > 1) {
+			g_setupRows.insert(g_setupRows.begin(), SetupRow{kKindNav, kNavOffset, kActBack, 0, "Back", ""});
+		}
+		navRow(kKindNav, kActCreate, 0, "Begin Match", "");
+	}
+}
+
+// The window on the rows: kSetupRows slots; with more rows than that, the pinned rows (a submenu's Back on top, Begin
+// Match at the bottom) keep their slots and at.top (the first middle row shown) scrolls the ones between.
+struct SetupWindow {
+	int total, pinTop, pinBottom, slots, mid;
+	bool scrolls;
+};
+SetupWindow SetupWin()
+{
+	const SetupAt& at = g_setupStack.back();
+	SetupWindow w;
+	w.total = (int)g_setupRows.size();
+	bool pinned = at.page != kSetupName;
+	w.pinTop = pinned && g_setupStack.size() > 1 ? 1 : 0;
+	w.pinBottom = pinned ? 1 : 0;
+	w.slots = std::min(w.total, kSetupRows);
+	w.mid = w.slots - w.pinTop - w.pinBottom;
+	w.scrolls = w.total > kSetupRows;
+	return w;
+}
+
+int SetupRowAt(int slot)
+{
+	SetupWindow w = SetupWin();
+	if (!w.scrolls) {
+		return slot;
+	}
+	if (slot < w.pinTop) {
+		return 0;
+	}
+	if (slot >= w.slots - w.pinBottom) {
+		return w.total - 1;
+	}
+	return g_setupStack.back().top + slot - w.pinTop;
+}
+
+int SetupSlotOf(int row)
+{
+	SetupWindow w = SetupWin();
+	if (!w.scrolls) {
+		return row;
+	}
+	if (row < w.pinTop) {
+		return 0;
+	}
+	if (row >= w.total - w.pinBottom) {
+		return w.slots - 1;
+	}
+	return row - g_setupStack.back().top + w.pinTop;
+}
+
+// the middle window follows the cursor, showing a header above its first row
+void SetupFollow(int cursor)
+{
+	SetupAt& at = g_setupStack.back();
+	SetupWindow w = SetupWin();
+	if (!w.scrolls) {
+		at.top = 0;
+		return;
+	}
+	if (cursor >= w.pinTop && cursor < w.total - w.pinBottom) {
+		if (cursor - 1 >= w.pinTop && g_setupRows[cursor - 1].kind == kKindHeader && cursor - 1 < at.top) {
+			at.top = cursor - 1;
+		}
+		at.top = std::min(at.top, cursor);
+		if (cursor >= at.top + w.mid) {
+			at.top = cursor - w.mid + 1;
+		}
+	}
+	at.top = std::max(w.pinTop, std::min(at.top, w.total - w.pinBottom - w.mid));
 }
 
 // The row table: every category the same, as the rows are already filtered for the current one.
@@ -3738,13 +3814,13 @@ void SetupWriteTable()
 	if (!VirtualProtect(g_rowTable, sizeof(g_stockRows), PAGE_READWRITE, &old)) {
 		return;
 	}
-	int count = std::min((int)g_setupRows.size() - at.top, kSetupRows);
+	int count = SetupWin().slots;
 	for (int c = 0; c < kCategories; c++) {
 		uint8_t* page = g_rowTable + c * 0x23 + 2;
 		memset(page, 0, 0xb);
 		page[0] = (uint8_t)std::max(count, 0);
 		for (int r = 0; r < count; r++) {
-			page[1 + r] = g_setupRows[at.top + r].offset;
+			page[1 + r] = g_setupRows[SetupRowAt(r)].offset;
 		}
 	}
 	VirtualProtect(g_rowTable, sizeof(g_stockRows), old, &old);
@@ -3773,8 +3849,8 @@ void __attribute__((thiscall)) CreateHelp(uint8_t* screen)
 void SetupSelect(uint8_t* screen)
 {
 	SetupAt& at = g_setupStack.back();
-	*(int32_t*)(screen + kCreateCursor) = at.cursor - at.top;
-	float row = (float)(at.cursor - at.top);
+	*(int32_t*)(screen + kCreateCursor) = SetupSlotOf(at.cursor);
+	float row = (float)SetupSlotOf(at.cursor);
 	FlashArg arg = {0, 3, nullptr};
 	memcpy(&arg.text, &row, sizeof(row));
 	g_flashCall(screen, 0, "_root.selectItem", &arg, 1);
@@ -3797,15 +3873,12 @@ void SetupShow(uint8_t* screen, const uint8_t* rules)
 	while (at.cursor < (int)g_setupRows.size() - 1 && g_setupRows[at.cursor].kind == kKindHeader) {
 		at.cursor++;
 	}
-	at.top = std::max(0, std::min(at.top, at.cursor));
-	if (at.cursor >= at.top + kSetupRows) {
-		at.top = at.cursor - kSetupRows + 1;
-	}
+	SetupFollow(at.cursor);
 	SetupWriteTable();
 	std::string items, labels, values, kinds;
-	int count = std::min((int)g_setupRows.size() - at.top, kSetupRows);
+	int count = SetupWin().slots;
 	for (int r = 0; r < count; r++) {
-		const SetupRow& row = g_setupRows[at.top + r];
+		const SetupRow& row = g_setupRows[SetupRowAt(r)];
 		items += (r ? "|" : "") + std::to_string(row.kind == kKindValue ? RuleItem(row.offset, rules) : kNavItem + r);
 		labels += (r ? "|" : "") + row.label;
 		values += (r ? "|" : "") + row.value;
@@ -3833,7 +3906,7 @@ void SetupShow(uint8_t* screen, const uint8_t* rules)
 
 void SetupOpenPage(uint8_t* screen, const uint8_t* rules, int page, int arg, int cursor)
 {
-	g_setupStack.push_back({page, arg, cursor, 0});
+	g_setupStack.push_back({page, arg, page == kSetupName ? cursor : cursor + 1, 0}); // + the pinned Back row
 	SetupShow(screen, rules);
 }
 
@@ -3850,16 +3923,9 @@ void SetupMove(uint8_t* screen, const uint8_t* rules, int step)
 	}
 	at.cursor = next;
 	int top = at.top;
-	if (next - 1 >= 0 && g_setupRows[next - 1].kind == kKindHeader && next - 1 < top) {
-		top = next - 1;
-	}
-	top = std::min(top, next);
-	if (next >= top + kSetupRows) {
-		top = next - kSetupRows + 1;
-	}
+	SetupFollow(next);
 	MenuSound(screen, kSoundMove);
 	if (top != at.top) {
-		at.top = top;
 		SetupShow(screen, rules);
 	}
 	else {
@@ -4115,6 +4181,13 @@ void SetupConfirm(uint8_t* screen, uint8_t* rules)
 {
 	const SetupRow row = g_setupRows[g_setupStack.back().cursor];
 	switch (row.action) {
+	case kActBack:
+		if (g_setupStack.size() > 1) {
+			MenuSound(screen, kSoundBack);
+			g_setupStack.pop_back();
+			SetupShow(screen, rules);
+		}
+		break;
 	case kActTypes:
 		MenuSound(screen, kSoundConfirm);
 		SetupOpenPage(screen, rules, kSetupTypes, 0, GameTypeOf(rules)); // starts on what's in use
@@ -4298,8 +4371,9 @@ void __attribute__((thiscall)) CreateTick(uint8_t* screen)
 		return;
 	}
 	// A row under the mouse takes the cursor when the mouse moves to it, not when a scroll moves the rows under it.
-	if (mouseRow >= 0 && mouse != g_setupMouse && at.top + mouseRow < (int)g_setupRows.size() && g_setupRows[at.top + mouseRow].kind != kKindHeader && at.top + mouseRow != at.cursor) {
-		at.cursor = at.top + mouseRow;
+	int mouseAt = mouseRow >= 0 && mouseRow < SetupWin().slots ? SetupRowAt(mouseRow) : -1;
+	if (mouseAt >= 0 && mouse != g_setupMouse && g_setupRows[mouseAt].kind != kKindHeader && mouseAt != at.cursor) {
+		at.cursor = mouseAt;
 		MenuSound(screen, kSoundMove);
 		SetupSelect(screen);
 	}
