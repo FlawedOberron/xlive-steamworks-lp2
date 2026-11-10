@@ -178,6 +178,9 @@ const int kGrappleValues = (int)(sizeof(kGrappleScales) / sizeof(kGrappleScales[
 // Knockdown Pull / Push: the knockdown plus a throw toward / away from the attacker (Knockdown Force), see KnockdownThrow
 const char* const kStaggerNames[] = {"Default", "Off", "Occasional", "Flinch", "Knockdown", "Knockdown Pull", "Knockdown Push", "Stun", "Knock", "Occasional Knock"};
 const int kStaggerValues = (int)(sizeof(kStaggerNames) / sizeof(kStaggerNames[0]));
+// Voice chat (voice.cpp): who is heard in a match. Living: the living hear only the living. Nearby: only close by.
+const char* const kVoiceNames[] = {"Always", "Living", "Nearby", "None"};
+const int kVoiceValues = 4;
 // Headshot Stagger: the same reactions, but the first value follows the Bullet Stagger row
 const char* const kHeadStaggerNames[] = {"As Bullet Stagger", "Off", "Occasional", "Flinch", "Knockdown", "Knockdown Pull", "Knockdown Push", "Stun", "Knock", "Occasional Knock"};
 // Airborne Headshot Stagger: its first value follows Airborne Bullet Stagger when that's set, else Headshot Stagger, else Bullet Stagger
@@ -279,6 +282,7 @@ struct Rules {
 	int staggerExplosion = 0, staggerAnchor = 0, staggerMelee = 0; // kStaggerNames indexes per hit kind
 	int staggerHead = 0; // bullets to the head: 0 = as the Bullet Stagger row, else a kStaggerNames index
 	int staggerAir = 0, staggerAirHead = 0; // bullets on a soldier in the air (body / head): 0 = as the rows before
+	int voiceTeam = 0, voiceEnemy = 0; // voice.cpp: kVoiceNames indexes (enemy: everyone, outside team games)
 	int massive = 0, massiveThreshold = 0; // kMassiveNames, kThresholdScales indexes
 	int push = 0; // kPushNames index
 	int radar = 1, detectPlayers = 0, detectVs = 0, radarTeam = 1; // radar.cpp
@@ -317,6 +321,7 @@ std::atomic<int> g_roundsRule{0}, g_switchRule{1}, g_rounds{0}, g_switchEvery{1}
 std::atomic<int> g_quickResupplyRule{0}, g_grenadeCountRule{0}, g_grenadePickupRule{0}, g_grenadeCount{0}, g_grenadePickup{0};
 thread_local int g_inSpawn = 0; // weapons set up during a spawn are the player's own, any other is a pickup
 std::atomic<int> g_radarTeamRule{1};
+std::atomic<int> g_voiceTeamRule{0}, g_voiceEnemyRule{0};
 std::atomic<int> g_radarMode{1}, g_radarPlayers{0}, g_radarVs{0}, g_anchorRangeRule{kGrappleDefault}, g_anchorSpeedRule{kAnchorSpeedDefault}, g_fallRule{0};
 const char* const kDifficultyNames[] = {"Easy", "Normal", "Hard", "Veteran"};
 const char* const kBrainNames[] = {"Stock", "Improved"};
@@ -353,7 +358,7 @@ const uint8_t* WeaponEntry(const uint8_t* weapon)
 
 std::string Format(const Rules& r)
 {
-	return FormatA("ammo=%d;grenades=%d;secondary=%d;magazines=%d;survival=%d;lives=%d;team=%d;harmonizer=%d;grapple=%d;stagger=%d;radar=%d;detectp=%d;detectv=%d;anchor=%d;fall=%d;gcount=%d;gpick=%d;qres=%d;rnd=%d;sw=%d;rteam=%d;sexp=%d;sanc=%d;smel=%d;mshot=%d;mthr=%d;kpush=%d;vswmag=%d;vsmag=%d;shead=%d;sair=%d;sairh=%d", r.ammo, r.grenades, r.secondary, r.supply, r.survival, r.lives, r.team, r.harmonizer, r.grapple, r.stagger, r.radar, r.detectPlayers, r.detectVs, r.anchorSpeed, r.fall, r.grenadeCount, r.grenadePickup, r.quickResupply, r.rounds, r.switchEvery, r.radarTeam, r.staggerExplosion, r.staggerAnchor, r.staggerMelee, r.massive, r.massiveThreshold, r.push, r.supplyVsWeapon, r.supplyVs, r.staggerHead, r.staggerAir, r.staggerAirHead);
+	return FormatA("ammo=%d;grenades=%d;secondary=%d;magazines=%d;survival=%d;lives=%d;team=%d;harmonizer=%d;grapple=%d;stagger=%d;radar=%d;detectp=%d;detectv=%d;anchor=%d;fall=%d;gcount=%d;gpick=%d;qres=%d;rnd=%d;sw=%d;rteam=%d;sexp=%d;sanc=%d;smel=%d;mshot=%d;mthr=%d;kpush=%d;vswmag=%d;vsmag=%d;shead=%d;sair=%d;sairh=%d;vteam=%d;venemy=%d", r.ammo, r.grenades, r.secondary, r.supply, r.survival, r.lives, r.team, r.harmonizer, r.grapple, r.stagger, r.radar, r.detectPlayers, r.detectVs, r.anchorSpeed, r.fall, r.grenadeCount, r.grenadePickup, r.quickResupply, r.rounds, r.switchEvery, r.radarTeam, r.staggerExplosion, r.staggerAnchor, r.staggerMelee, r.massive, r.massiveThreshold, r.push, r.supplyVsWeapon, r.supplyVs, r.staggerHead, r.staggerAir, r.staggerAirHead, r.voiceTeam, r.voiceEnemy);
 }
 
 Rules Parse(const std::string& s)
@@ -393,6 +398,8 @@ Rules Parse(const std::string& s)
 	r.staggerHead = small("shead=", kStaggerValues, 0);
 	r.staggerAir = small("sair=", kStaggerValues, 0);
 	r.staggerAirHead = small("sairh=", kStaggerValues, 0);
+	r.voiceTeam = small("vteam=", kVoiceValues, 0);
+	r.voiceEnemy = small("venemy=", kVoiceValues, 0);
 	r.massive = small("mshot=", kMassiveValues, 0);
 	r.massiveThreshold = small("mthr=", kThresholdValues, 0);
 	r.push = small("kpush=", kPushValues, 0);
@@ -432,6 +439,8 @@ Rules Own()
 	r.staggerHead = g_staggerHeadRule;
 	r.staggerAir = g_staggerAirRule;
 	r.staggerAirHead = g_staggerAirHeadRule;
+	r.voiceTeam = g_voiceTeamRule;
+	r.voiceEnemy = g_voiceEnemyRule;
 	r.massive = g_massiveRule;
 	r.massiveThreshold = g_massiveThresholdRule;
 	r.push = g_pushRule;
@@ -1277,6 +1286,7 @@ DWORD WINAPI SyncThread(LPVOID)
 		g_grenadeCount = r.grenades ? 0 : r.grenadeCount; // infinite grenades: the counts are hidden and mean nothing
 		g_grenadePickup = r.grenades ? 0 : r.grenadePickup;
 		RadarRulesSet(r.radar, r.detectPlayers, r.detectVs, r.radarTeam);
+		VoiceRulesSet(r.voiceTeam, r.voiceEnemy);
 		ResupplySet(r.quickResupply != 0);
 		g_rounds = r.rounds;
 		g_switchEvery = r.switchEvery;
@@ -2064,6 +2074,7 @@ void __attribute__((thiscall)) HudUpdate(uint8_t* hud)
 	LivesTick();
 	ModeFrame();
 	JeepFrame();
+	VoiceFrame();
 	uint8_t** entry = (uint8_t**)(hud + kHudEntry);
 	uint8_t* own = *entry;
 	bool out = self >= 0 && self < 16 && own && own == g_controllers[self] && ((g_survival && SlotOut(self)) || RulesHeld(self));
@@ -3597,9 +3608,10 @@ enum SetupKind { kKindValue, kKindNav, kKindHeader, kKindOwn };
 const int kOwnBulletStagger = 100; // a kKindOwn row's arg for the rules byte 0x36 (not an extras key)
 enum SetupAction { kActNone, kActTypes, kActType, kActOptions, kActCreate, kActSection, kActDefault, kActProfile, kActBots, kActRadar, kActAnchor, kActStagger, kActBack };
 const char* const kBotRuleKeys[] = {"bots", "botDifficulty", "botBrain", "botPersona", "botTaunts", "radar", "radarPlayers", "radarVs", "anchorRange", "anchorSpeed", "fallStagger", "grenadeCount", "grenadePickup", "quickResupply", "rounds", "switchSides", "radarTeam",
-	"explosionStagger", "anchorStagger", "meleeStagger", "massiveShot", "massiveThreshold", "knockdownPush", "vsWeaponSupply", "vsSupply", "headStagger", "airStagger", "airHeadStagger"};
-const int kBotRuleCounts[] = {2, 4, 2, 6, 4, 3, 4, 4, 13, 12, kThresholdValues, 12, 11, 2, 14, 11, 2, kStaggerValues, kStaggerValues, kStaggerValues, kMassiveValues, kThresholdValues, kPushValues, kSupplyValues, kSupplyValues, kStaggerValues, kStaggerValues, kStaggerValues};
+	"explosionStagger", "anchorStagger", "meleeStagger", "massiveShot", "massiveThreshold", "knockdownPush", "vsWeaponSupply", "vsSupply", "headStagger", "airStagger", "airHeadStagger", "voiceTeam", "voiceEnemy"};
+const int kBotRuleCounts[] = {2, 4, 2, 6, 4, 3, 4, 4, 13, 12, kThresholdValues, 12, 11, 2, 14, 11, 2, kStaggerValues, kStaggerValues, kStaggerValues, kMassiveValues, kThresholdValues, kPushValues, kSupplyValues, kSupplyValues, kStaggerValues, kStaggerValues, kStaggerValues, kVoiceValues, kVoiceValues};
 const char* const kRadarNames[] = {"Always On", "Near Data Post", "Hidden"};
+const int kOwnVoiceTeam = 28, kOwnVoiceEnemy = 29; // extras indexes (kBotRuleKeys)
 const char* const kDetectNames[] = {"Always Show", "Moving & Shooting", "Running & Shooting", "Shooting"};
 struct SetupRow {
 	SetupKind kind;
@@ -3701,6 +3713,14 @@ void SetupBuild(const uint8_t* rules)
 		navRow(kKindNav, kActBots, 0, "Bots", g_matchBots ? "On" : "Off");
 		navRow(kKindNav, kActRadar, 0, "Radar", kRadarNames[g_radarMode % 3]);
 		navRow(kKindNav, kActAnchor, 0, "Anchor", ">");
+		{
+			// voice chat (voice.cpp): team games get a row for each side, the others one row (everyone is an enemy)
+			std::map<std::string, int>& x = GameRulesExtras();
+			if (rules[kRuleMain] != 0) {
+				navRow(kKindOwn, kActNone, kOwnVoiceTeam, "Team Voice", kVoiceNames[x["voiceTeam"] % kVoiceValues]);
+			}
+			navRow(kKindOwn, kActNone, kOwnVoiceEnemy, rules[kRuleMain] != 0 ? "Enemy Voice" : "Voice Chat", kVoiceNames[x["voiceEnemy"] % kVoiceValues]);
+		}
 		break;
 	case kSetupSection:
 		g_setupTitle = kSections[at.arg].name;
@@ -4212,6 +4232,8 @@ void BotRulesSync()
 	g_staggerHeadRule = x["headStagger"];
 	g_staggerAirRule = x["airStagger"];
 	g_staggerAirHeadRule = x["airHeadStagger"];
+	g_voiceTeamRule = x["voiceTeam"];
+	g_voiceEnemyRule = x["voiceEnemy"];
 	g_vsWeaponSupplyRule = x["vsWeaponSupply"];
 	g_vsSupplyRule = x["vsSupply"];
 }
@@ -4577,6 +4599,8 @@ const LobbyRow kLobbyOwnRows[] = {
 	{"Radar", "Players Show", kLobbyOwn, 6},
 	{"Radar", "VS Show", kLobbyOwn, 7},
 	{"Radar", "Team Colours", kLobbyOwn, 16},
+	{"Voice", "Team Voice", kLobbyOwn, kOwnVoiceTeam},
+	{"Voice", "Enemy Voice", kLobbyOwn, kOwnVoiceEnemy},
 	{"Bots", "Bots", kLobbyOwn, 0},
 	{"Bots", "Difficulty", kLobbyOwn, 1},
 	{"Bots", "Brain", kLobbyOwn, 2},
@@ -4697,6 +4721,7 @@ std::string OwnValueName(int own, int v)
 	case 23: case 24: return kSupplyNames[v % kSupplyValues];
 	case 25: case 26: return kHeadStaggerNames[v % kStaggerValues];
 	case 27: return kAirHeadStaggerNames[v % kStaggerValues];
+	case kOwnVoiceTeam: case kOwnVoiceEnemy: return kVoiceNames[v % kVoiceValues];
 	case 11: return v ? std::to_string(v - 1) : "Default";
 	case 12: return v ? std::to_string(v) : "Default";
 	case 13: case 16: return v ? "On" : "Off";
@@ -4768,9 +4793,10 @@ std::vector<LobbyLine> LobbyBuild()
 		for (const Section& sec : kSections) {
 			known |= strcmp(r.section, sec.name) == 0;
 		}
-		if (!known) {
+		bool voice = r.kind == kLobbyOwn && (r.arg == kOwnVoiceTeam || r.arg == kOwnVoiceEnemy), teams = b[kRuleMain] != 0;
+		if (!known && !(voice && !teams && r.arg == kOwnVoiceTeam)) { // one voice row outside team games
 			int v = r.kind == kLobbyOwn ? x[kBotRuleKeys[r.arg]] : (int)g_menu[r.arg];
-			lines.push_back({r.section, r.label, r.kind == kLobbyOwn ? OwnValueName(r.arg, v) : MenuValueName(r.arg, v), r.kind, r.arg});
+			lines.push_back({r.section, voice && !teams ? "Voice Chat" : r.label, r.kind == kLobbyOwn ? OwnValueName(r.arg, v) : MenuValueName(r.arg, v), r.kind, r.arg});
 		}
 	}
 	return lines;
@@ -5624,6 +5650,7 @@ DWORD WINAPI ScoreThread(LPVOID)
 void RulesInstall(unsigned char* base)
 {
 	LivesInstall();
+	VoiceInstall();
 	int build = -1;
 	for (int b = 0; b < kBuildCount && build < 0; b++) {
 		if (GameBuild() >= 0 && b != GameBuild()) {

@@ -5,6 +5,7 @@
 #include "core/log.h"
 #include "core/steam.h"
 #include "core/users.h"
+#include "mods/lp2.h"
 
 #include <mmsystem.h>
 #include <deque>
@@ -320,10 +321,14 @@ public:
 			if (consumed + sizeof(header) + header.size > *size) {
 				break;
 			}
-			it->second.lastDataTick = GetTickCount();
+			// the match's voice chat rules (mods/voice.cpp): a talker not heard here doesn't show as talking either
+			float gain = xls::mods::VoiceGain(xuid);
 			bool muted = it->second.priority[0] == XHV_PLAYBACK_PRIORITY_NEVER;
-			if (it->second.processing && !muted) {
-				Play(xuid, data + consumed + sizeof(header), header.size);
+			if (gain > 0.0f) {
+				it->second.lastDataTick = GetTickCount();
+			}
+			if (it->second.processing && !muted && gain > 0.0f) {
+				Play(xuid, data + consumed + sizeof(header), header.size, gain);
 			}
 			consumed += (DWORD)(sizeof(header) + header.size);
 		}
@@ -383,7 +388,7 @@ private:
 		}
 	}
 
-	void Play(XUID xuid, const uint8_t* compressed, uint32_t size)
+	void Play(XUID xuid, const uint8_t* compressed, uint32_t size, float gain = 1.0f)
 	{
 		if (!xls::SteamReady()) {
 			return;
@@ -393,6 +398,11 @@ private:
 		EVoiceResult result = xls::SteamUser()->DecompressVoice(compressed, size, pcm.data(), (uint32)(pcm.size() * sizeof(int16_t)), &written, m_sampleRate);
 		if (result != k_EVoiceResultOK || !written) {
 			return;
+		}
+		if (gain < 1.0f) {
+			for (uint32 i = 0; i < written / sizeof(int16_t); i++) {
+				pcm[i] = (int16_t)(pcm[i] * gain);
+			}
 		}
 		RemoteTalker& talker = m_remote[xuid];
 		if (!talker.playback) {

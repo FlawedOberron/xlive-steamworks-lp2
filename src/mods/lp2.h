@@ -163,6 +163,11 @@ struct RadarShotInfo {
 int RadarRecentShots(RadarShotInfo* out, int max, unsigned long age); // gunfire in the last age ms, newest not first
 // mode: 0 Always On, 1 Near Data Post, 2 Hidden; players / vs: 0 Always, 1 Moving, 2 Running, 3 Shooting; team: 1 = blips in team colours (own blue, enemy red)
 void RadarRulesSet(int mode, int players, int vs, int team);
+// voice.cpp: the match's voice chat rules (0 Always, 1 Living, 2 Nearby, 3 None; enemy: everyone outside team games)
+void VoiceInstall();
+void VoiceRulesSet(int team, int enemy);
+void VoiceFrame(); // every battle HUD frame, game thread, after the life reports
+float VoiceGain(uint64_t xuid); // any thread: how loud this talker is played here now (0 not at all)
 void RulesNextCreateIsBotMatch(); // the next create screen comes from the Multiplayer screen's Bot Match (rules.cpp)
 bool BotsInPlayerMatch(); // this machine hosts a player match with bots filled in (rules.cpp)
 // The overlay mod file that replaces a game file (overlay.cpp), or nullptr.
