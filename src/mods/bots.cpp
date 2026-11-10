@@ -1003,7 +1003,9 @@ int AreaAt(const float* p)
 // distance: it's quick, a grapple a lot: only where walking is much longer). Grapples beyond the match's anchor range
 // aren't links at all. The point to run to: across a walk link, the next zone; else the link's start, then its end once
 // there (a ledge to drop off, a launch volume to walk into: force.cpp throws the bot, a grapple's firing spot).
-const float kHopAt = 600.0f;
+const float kHopAt = 600.0f;      // a link's start counts as reached this close
+const float kLookAhead = 1200.0f; // route points closer than this are skipped (the game counts itself arrived early)
+const float kJumpUp = 50.0f, kJumpGap = 150.0f; // a jump link needs a jump past these (else it's run across)
 
 const float* ZoneWaypoint(const float* from, const float* goal, int start, int end, int* hopFrom, int* hopTo, const Hop** link)
 {
@@ -1047,7 +1049,7 @@ const float* ZoneWaypoint(const float* from, const float* goal, int start, int e
 		return goal;
 	}
 	// The game's move action stops a few metres short of the point it's given (bots stood 3 - 9 m from a hop for a
-	// minute): walk hops within kHopAt are skipped for the next one on the route, a link counts as reached there too.
+	// minute): route points within kLookAhead are skipped for the next one, a link's start counts as reached at kHopAt.
 	std::vector<int> path;
 	for (int at = end; at != start; at = prev[at]) {
 		path.push_back(at);
@@ -1059,9 +1061,15 @@ const float* ZoneWaypoint(const float* from, const float* goal, int start, int e
 		*hopFrom = before;
 		*hopTo = hop;
 		*link = h;
-		if (!h || h->kind == kNavWalk) {
+		// walked: a walk link, a drop, a jump that needs none (the navmesh links those, lp2navgen.cross_links)
+		bool run = !h || h->kind == kNavWalk || h->kind == kNavDrop;
+		if (h && h->kind == kNavJump) {
+			float dx = h->b[0] - h->a[0], dz = h->b[2] - h->a[2];
+			run = h->b[1] - h->a[1] < kJumpUp && sqrtf(dx * dx + dz * dz) < kJumpGap;
+		}
+		if (run) {
 			const float* point = hop == end ? goal : g_areas[hop].pos;
-			if (hop == end || Distance2(from, point) > kHopAt * kHopAt) {
+			if (hop == end || Distance2(from, point) > kLookAhead * kLookAhead) {
 				return point;
 			}
 			before = hop;
@@ -1474,7 +1482,6 @@ const float kJumpAt = 150.0f, kGrappleAt = 900.0f;
 // a grapple only to its firing spot.
 const uint32_t kThinkMoveDir = 0x1e0;
 const float kSteerFrom = 700.0f, kSteerEdge = 120.0f;
-const float kJumpUp = 50.0f, kJumpGap = 150.0f;
 const DWORD kLinkFresh = 700, kJumpRest = 900, kGrappleRest = 4000, kAimFor = 350, kUnstickAfter = 1800, kUnstickRest = 2500;
 
 void Traverse(uint8_t* think, uint8_t* unit)
