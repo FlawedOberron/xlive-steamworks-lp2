@@ -76,7 +76,7 @@ struct Cursor {
 
 struct Added {
 	std::string name, cls;
-	int kind; // 0 new (raw deflate), 1 ops against the stock entry of that name
+	int kind; // 0 new (raw deflate), 1 ops against the stock entry of that name, 2 copied from the archive data names
 	uint32_t size, crc;
 	const uint8_t* data;
 	uint32_t length;
@@ -257,6 +257,55 @@ bool StockAreaGenerate(int map, const std::wstring& source, const std::wstring& 
 	if (patched == 0) {
 		return false;
 	}
+	// Capcom's own navmesh from the training version of the stage (the player's aArea_TUTOREAL_NN.arc), still compressed
+	std::wstring dir = source.substr(0, source.find_last_of(L"\\/") + 1);
+	std::wstring loadedName;
+	Bytes other;
+	for (const Added& a : added) {
+		if (a.kind != 2) {
+			continue;
+		}
+		std::wstring name(a.data, a.data + a.length);
+		if (name != loadedName) {
+			other.clear();
+			loadedName = name;
+			if (!ReadWholeFile(dir + name, &other) || other.size() < 8 || memcmp(other.data(), "ARC\0", 4) != 0) {
+				XLS_LOG_WARN("mods: stock nav: map %d: %ls can't be read; no navmesh there.", map, name.c_str());
+				return false;
+			}
+		}
+		uint32_t n = other[6] | other[7] << 8;
+		bool found = false;
+		for (uint32_t i = 0; i < n && 8 + 80 * (size_t)(i + 1) <= other.size(); i++) {
+			const uint8_t* h = &other[8 + 80 * (size_t)i];
+			Row r{};
+			memcpy(r.name, h, 64);
+			memcpy(&r.hash, h + 64, 4);
+			memcpy(&r.stored, h + 68, 4);
+			memcpy(&r.sizeField, h + 72, 4);
+			uint32_t offset;
+			memcpy(&offset, h + 76, 4);
+			if (_strnicmp(r.name, a.name.c_str(), 64) != 0 || r.hash != ClassHash(a.cls.c_str()) || (r.sizeField & 0x1fffffff) != a.size ||
+			    (size_t)offset + r.stored > other.size() || r.stored < 2) {
+				continue;
+			}
+			Bytes raw(a.size);
+			unsigned long got = a.size, packed = r.stored - 2;
+			if (puff(raw.data(), &got, &other[offset] + 2, &packed) != 0 || got != a.size || Crc32(raw.data(), raw.size()) != a.crc) {
+				continue;
+			}
+			r.own.assign(&other[offset], &other[offset] + r.stored);
+			r.src = nullptr;
+			rows.push_back(std::move(r));
+			found = true;
+			break;
+		}
+		if (!found) {
+			XLS_LOG_WARN("mods: stock nav: map %d: %s isn't in %ls as expected; no navmesh there.", map, a.name.c_str(), name.c_str());
+			return false;
+		}
+	}
+	Bytes().swap(other);
 	for (const Added& a : added) {
 		if (a.kind != 0) {
 			continue;
