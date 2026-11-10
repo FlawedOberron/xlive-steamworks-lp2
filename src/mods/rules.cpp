@@ -816,26 +816,28 @@ uint8_t* AttackerBody(uint8_t* attacker)
 // +0x19ec, up to 6 x u32 part byte (the collision hit's +7) at +0x19f0, flags (+4) at +0x1a08; DX9 the same 0x10 lower (0x19dc, checked)
 // Which part is the head isn't known yet: the first 120 soldier hits log the list and the hit's
 // height above the victim's feet (hit info: arg 2 +0x180 -> +0x48).
-void HitPartProbe(uint8_t* character, uint8_t* body, uint32_t b)
+// Probe: which collision part a hit landed on. vf151 (DX11 0x9d4210) finds the hit shape (arg a) in the character's part
+// list (+0x10d0 DX11 / +0x10c0 DX9: pointers at +4, count at +0x14; FUN_00f99140) and passes the index on.
+void HitPartProbe(uint8_t* character, uint8_t* body, uint32_t a)
 {
 	static LONG logged = 0;
-	if (!character || character[0x1f] != 1 || logged >= 120) {
+	if (!character || character[0x1f] != 1 || !a || logged >= 200) {
 		return;
 	}
 	bool dx9 = g_staggerBuild == 1 || g_staggerBuild == 3;
-	uint32_t at = dx9 ? 0x19dc : 0x19ec;
-	uint32_t n = *(uint32_t*)(character + at);
-	const uint32_t* parts = (const uint32_t*)(character + at + 4);
-	const uint32_t* flags = (const uint32_t*)(character + at + 0x1c);
-	uint8_t* info = b ? *(uint8_t**)(uintptr_t)(b + 0x180) : nullptr;
-	float height = info ? *(float*)(info + 0x4c) - ((float*)(character + 0xd0))[1] : -1.0f;
-	char list[96] = "";
-	for (uint32_t i = 0, w = 0; i < n && i < 6; i++) {
-		w += snprintf(list + w, sizeof list - w, "%s%u/%u", i ? " " : "", parts[i], flags[i]);
+	uint8_t* list = character + (dx9 ? 0x10c0 : 0x10d0);
+	uint32_t* shapes = *(uint32_t**)(list + 4);
+	uint32_t count = *(uint32_t*)(list + 0x14);
+	int part = -1;
+	for (uint32_t i = 0; shapes && i < count && i < 256; i++) {
+		if (shapes[i] == a) {
+			part = (int)i;
+			break;
+		}
 	}
 	InterlockedIncrement(&logged);
-	XLS_LOG_INFO("mods: rules: hit part probe: player %d hit by player %d (local %d): %u hit(s) this frame [%s], hit %.0f cm above the feet.",
-	             RulesSlotOf(character), body ? RulesSlotOf(body) : -1, RulesLocalSlot(), n, list, height);
+	XLS_LOG_INFO("mods: rules: hit part probe: player %d hit by player %d (local %d): part %d of %u.", RulesSlotOf(character),
+	             body ? RulesSlotOf(body) : -1, RulesLocalSlot(), part, count);
 }
 
 float __attribute__((thiscall)) HitHandler(void* character, uint32_t a, uint32_t b, uint32_t attacker, uint32_t d)
@@ -845,7 +847,7 @@ float __attribute__((thiscall)) HitHandler(void* character, uint32_t a, uint32_t
 	t_attacker = body;
 	t_noFlinch = false;
 	float result = g_hitHandlerOriginal(character, a, b, attacker, d);
-	HitPartProbe((uint8_t*)character, body, b);
+	HitPartProbe((uint8_t*)character, body, a);
 	if (t_noFlinch) {
 		bool dx9 = g_staggerBuild == 1 || g_staggerBuild == 3;
 		*(uint32_t*)((uint8_t*)character + (dx9 ? 0xd6c : 0xd7c)) &= ~8u;
