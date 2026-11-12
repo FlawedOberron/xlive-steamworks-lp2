@@ -89,6 +89,16 @@ struct ForceVolume {
 	int sid = -1;
 };
 
+// A spawn zone (respawn.cpp, Spawning > Spawn Area: Zones): team games spawn their players at the free-for-all and team
+// points inside the zones their team owns. "team": 0 / 1 the team owning it at the start, -1 nobody; "order": its place
+// along the line from team 0's side to team 1's (Zones: Dynamic hands a zone over only next to one the taker owns).
+struct SpawnVolume {
+	float min[3], max[3];  // cm, game axes, before the turn
+	float turn[2] = {1.0f, 0.0f}; // "yaw" (InBox)
+	int team = -1;
+	int order = 0;
+};
+
 // Visual scripting (map.json "script", scripts.cpp; the editor's scripts.gd, lp2mapc.script_manifest).
 enum ScriptType { kScriptStart, kScriptEnter, kScriptTimer, kScriptDelay, kScriptFlipflop, kScriptCounter, kScriptSet,
 	kScriptIf, kScriptVolume, kScriptLog, kScriptRandom, kScriptMath, kScriptCompare, kScriptSetValue, kScriptPlayers,
@@ -302,6 +312,7 @@ struct MapPhysics {
 	std::vector<DamageVolume> damage;   // "damage_volumes": [{"min", "max", "player", "vs", "player_kill", "vs_kill"}] (damage.cpp)
 	std::vector<OnewayVolume> oneway;   // "oneway_volumes": [{"min", "max", "players", "vs", "bullets", "grenades", "akrid"}] (oneway.cpp)
 	std::vector<ForceVolume> force;     // "force_volumes": [{"min", "max", "mode", "force": [x,y,z], flags as oneway's}] (force.cpp)
+	std::vector<SpawnVolume> spawn;     // "spawn_volumes": [{"min", "max", "yaw", "team", "order"}] (respawn.cpp)
 	ScriptGraph script;                 // "script", "script_volumes" (scripts.cpp)
 	NavZones nav;                       // "nav_zones" (bots.cpp)
 };

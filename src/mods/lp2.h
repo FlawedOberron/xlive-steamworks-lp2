@@ -167,6 +167,15 @@ void RadarRulesSet(int mode, int players, int vs, int team);
 void VoiceInstall();
 void VoiceRulesSet(int team, int enemy);
 void VoiceFrame(); // every battle HUD frame, game thread, after the life reports
+// respawn.cpp: Spawning rules (pick 0 Default / 1 Random / 2 Safe / 3 Unsafe; area 0 Whole Map / 1 Near Allies / 2 Zones:
+// Set / 3 Zones: Dynamic; distance 0 Any / 1 Near / 2 Medium / 3 Far; posts 0 Default / 1 Add Nearby Points / 2 Ignored).
+// Before / After wrap the player controller's update (rules.cpp) for the players this PC runs; Frame every battle HUD frame.
+void RespawnInit(unsigned char* base, unsigned char** game);
+void RespawnRulesSet(int pick, int area, int distance, int posts);
+void RespawnSetMap(const struct MapPhysics* physics);
+void RespawnFrame();
+void RespawnBefore(unsigned char* ctl, int slot);
+void RespawnAfter(unsigned char* ctl, int slot);
 float VoiceGain(uint64_t xuid); // any thread: how loud this talker is played here now (0 not at all)
 void RulesNextCreateIsBotMatch(); // the next create screen comes from the Multiplayer screen's Bot Match (rules.cpp)
 bool BotsInPlayerMatch(); // this machine hosts a player match with bots filled in (rules.cpp)

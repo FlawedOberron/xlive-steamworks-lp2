@@ -498,6 +498,21 @@ bool ReadManifest(const Zip& zip, const std::wstring& label, MapPackage* map)
 			map->physics.damage.push_back(v);
 		}
 	}
+	for (const Json& e : root["spawn_volumes"].Elements()) {
+		SpawnVolume v;
+		bool ok = e["min"].Elements().size() == 3 && e["max"].Elements().size() == 3;
+		for (int i = 0; ok && i < 3; i++) {
+			v.min[i] = (float)e["min"].Elements()[i].GetNumber(0.0);
+			v.max[i] = (float)e["max"].Elements()[i].GetNumber(0.0);
+		}
+		SetTurn(v.turn, e["yaw"].GetNumber(0.0));
+		v.team = (int)e["team"].GetInt(-1);
+		v.team = v.team == 0 || v.team == 1 ? v.team : -1;
+		v.order = (int)e["order"].GetInt(0);
+		if (ok) {
+			map->physics.spawn.push_back(v);
+		}
+	}
 	for (const Json& e : root["oneway_volumes"].Elements()) {
 		OnewayVolume v;
 		bool ok = e["min"].Elements().size() == 3 && e["max"].Elements().size() == 3;

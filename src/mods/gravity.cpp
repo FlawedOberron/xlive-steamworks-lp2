@@ -93,6 +93,7 @@ void __cdecl AreaFlags(const char* area)
 	WaterSetMap(g_active ? &g_physics : nullptr);
 	DamageSetMap(g_active ? &g_physics : nullptr);
 	OnewaySetMap(g_active ? &g_physics : nullptr);
+	RespawnSetMap(g_active ? &g_physics : nullptr);
 	if (!g_active && episode == 7) {
 		// a stock online map (System Link or online): its embedded bot zones, as a package's
 		MapPhysics stock;

@@ -112,6 +112,7 @@ function lp2SetupText()
    while(i < lp2SetupItems.length)
    {
       var row = itemMainArray[i];
+      row._visible = (Number(lp2SetupKinds[i]) & 8) == 0;
       if(lp2SetupItems[i] >= lp2SetupFirst)
       {
          var kind = Number(lp2SetupKinds[i]);
@@ -134,6 +135,41 @@ function lp2SetupText()
             row.txt_TitleItem.text = lp2SetupLabels[i];
          }
          lp2SetupFit(row,"-");
+      }
+      i++;
+   }
+   lp2SetupDividers();
+}
+// The pinned rows' dividers: a wide line under a sub-menu's Back (kind 16) and over Begin Match (kind 32), halfway between
+// the row and its neighbour (blank filler rows, kind 8, are hidden but keep their place).
+function lp2SetupDividers()
+{
+   var first = itemMainArray[0];
+   if(first == undefined)
+   {
+      return undefined;
+   }
+   var parent = first._parent;
+   var d = parent.lp2Div;
+   if(d == undefined)
+   {
+      d = parent.createEmptyMovieClip("lp2Div",30001);
+      parent.lp2Div = d;
+   }
+   d.clear();
+   var i = 0;
+   while(i < lp2SetupItems.length)
+   {
+      var kind = Number(lp2SetupKinds[i]);
+      var other = (kind & 16) != 0 ? itemMainArray[i + 1] : ((kind & 32) != 0 ? itemMainArray[i - 1] : undefined);
+      if(other != undefined)
+      {
+         var b = itemMainArray[i].getBounds(parent);
+         var o = other.getBounds(parent);
+         var y = (kind & 16) != 0 ? (b.yMax + o.yMin) / 2 : (o.yMax + b.yMin) / 2;
+         d.lineStyle(4,10479871,85);
+         d.moveTo(b.xMin,y);
+         d.lineTo(b.xMax,y);
       }
       i++;
    }
