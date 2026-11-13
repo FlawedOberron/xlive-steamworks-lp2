@@ -5819,6 +5819,7 @@ void RulesInstall(unsigned char* base)
 	RadarInstall(base, build);
 	ResupplyInstall(base, build);
 	CareerInstall(base, build);
+	GameLogInstall(base, build);
 	g_pushRulesOriginal = (PushRulesFn)Detour(base + (kRulesVas[build].pushRules - 0x400000), kPushRulesPrologue, sizeof(kPushRulesPrologue), (void*)&PushRules);
 	if (g_pushRulesOriginal) {
 		PatchRowTable(base + (kRulesVas[build].rowTable - 0x400000));

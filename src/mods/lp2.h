@@ -167,6 +167,7 @@ BotOptions BotMenuOptions();
 void RadarInstall(uint8_t* base, int build); // radar.cpp
 void ResupplyInstall(uint8_t* base, int build); // resupply.cpp
 void CareerInstall(uint8_t* base, int build); // career.cpp: bot matches add to the career points
+void GameLogInstall(uint8_t* base, int build); // gamelog.cpp: the game network library's messages to our log
 void ResupplySet(bool on);
 uint8_t* ResupplyViewerBody(); // the local player's character, or nullptr
 struct RadarShotInfo {
