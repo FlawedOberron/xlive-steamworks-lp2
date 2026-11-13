@@ -23,6 +23,8 @@ const char* BuildName(int build);
 int GameBuild();
 void CrashLogInstall(); // logs faults (module + offset, registers, call trail) to the xlive log
 void MemoryLogNow(const char* why); // address space free / largest block / limit to the log
+void* CountedMalloc(size_t size);     // malloc / free counted as this DLL's own memory (the memory log's "own allocations")
+void CountedFree(void* p);
 
 // Hooks the game's file opens so files in enabled mod folders replace the game's own
 // (mods/<name>/nativePC/... overrides <game>/nativePC/...). Called from DllMain.

@@ -31,7 +31,21 @@ it to 4 GB. Custom maps and parts need the headroom.
 | System | How |
 |---|---|
 | Linux / Steam Deck (Proton) | Launch option: `WINE_LARGE_ADDRESS_AWARE=1 %command%` |
-| Windows | Run the LAA patcher on your own `LP2DX11.exe` (planned; re-run it after Steam verifies or updates the game) |
+| Windows | Patch your own `LP2DX9.exe` / `LP2DX11.exe`, see below |
+
+On Windows (do this for each exe you play with; keep a copy of the original first):
+
+1. Steam copy only: unpack the exe with [Steamless](https://github.com/atom0s/Steamless). The Steam exes are
+   wrapped by Steam's DRM stub, and the next step doesn't hold on a wrapped exe. Steamless writes
+   `LP2DX11.exe.unpacked.exe`; rename it over `LP2DX11.exe`. A disc copy has no wrapper, skip this step.
+2. Run NTCore's [4GB Patch](https://ntcore.com/4gb-patch/) on the exe.
+3. Start the game and look at the top of `xlive_steamworks.log`: it says "memory: the exe is Large Address Aware;
+   this process can use 4 GB".
+
+Steam's "Verify integrity of game files" (or a game update) restores the original exe: repeat the steps after it.
+
+Without it the game stops with "ERR08 : Memory overrun" once the 2 GB are used up, even with no mods
+installed: seen in Campaign 1-1 when the mine area loads, and more likely with the DX9 exe and in long sessions.
 
 The limit is address space, not RAM or VRAM. With the DX9 exe, textures usually take room both
 in VRAM and inside the 4 GB; with DX11 they mostly stay in VRAM.

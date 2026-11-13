@@ -231,6 +231,7 @@ bool Context(float height)
 	}
 	g_context = true;
 	IMGUI_CHECKVERSION();
+	ImGui::SetAllocatorFunctions([](size_t size, void*) { return CountedMalloc(size); }, [](void* p, void*) { CountedFree(p); });
 	ImGui::CreateContext();
 	ImGuiIO& io = ImGui::GetIO();
 	io.IniFilename = nullptr;
