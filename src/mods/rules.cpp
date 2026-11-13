@@ -193,9 +193,21 @@ const char* const kHeadStaggerNames[] = {"As Bullet Stagger", "Off", "Knock Occa
 const char* const kAirHeadStaggerNames[] = {"As Rows Above", "Off", "Knock Occasional", "Knock", "Flinch Occasional", "Flinch", "Knockdown", "Knockdown Pull", "Knockdown Push", "Stun"};
 // Values run from mildest to hardest. Knock, Knock Occasional: no stagger, but the hit still shows on the body
 // and the camera (the character's "hit this frame" flag and the shake stay, which Off takes away too); occasional: at most
-// one such hit every kOccasionalMs, the rest as Off
+// one such hit every Occasional Interval (g_occasionalMs), the rest as Off
 enum { kReactDefault, kReactOff, kReactKnockOccasional, kReactKnock, kReactOccasional, kReactFlinch, kReactBack, kReactBackPull, kReactBackPush, kReactDown };
-const DWORD kOccasionalMs = 1500; // Occasional: at most one reaction this often
+// Occasional Interval (rule key staggerEvery / socc=): at most one Occasional reaction this often; 1.5 s was the fixed value
+const char* const kOccasionalNames[] = {"0.5 s", "1 s", "1.5 s", "2 s", "2.5 s", "3 s", "3.5 s", "4 s", "4.5 s", "5 s"};
+const int kOccasionalValues = 10, kOccasionalDefault = 2;
+// Spawn T-ENG (rule key spawnTeng / steng=): a soldier's T-ENG at each spawn. The spawn (DX11 FUN_008fb130, our Spawn) sets the
+// character's T-ENG (+0x18e4 DX11, +0x18d4 DX9; its cap +0x18e0 / +0x18d0) and adds the Start T-ENG abilities; a value set
+// here replaces all that (the cap is raised to it when it's higher). Default leaves the game's (2000 in VS).
+const char* const kTengNames[] = {"Default", "0", "500", "1000", "2000", "3000", "4000", "5000", "6000", "7000", "8000", "9000", "9999"};
+const int kTengValues[] = {-1, 0, 500, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 9999};
+const int kTengCount = 13;
+DWORD OccasionalMs(int index)
+{
+	return 500u * (DWORD)(index % kOccasionalValues + 1);
+}
 // Thresholds (Fall Stagger, Massive Shot Threshold): the game's limit times the scale, higher is harder to reach.
 const char* const kThresholdNames[] = {"Default", "0.5x", "0.75x", "1.25x", "1.5x", "2x", "3x", "Never"};
 const float kThresholdScales[] = {1.0f, 0.5f, 0.75f, 1.25f, 1.5f, 2.0f, 3.0f, 1000000.0f};
@@ -292,6 +304,8 @@ struct Rules {
 	int spawnPick = 0, spawnArea = 0, spawnDistance = 0, spawnPosts = 0; // respawn.cpp: kSpawn*Names indexes
 	int massive = 0, massiveThreshold = 0; // kMassiveNames, kThresholdScales indexes
 	int push = 0; // kPushNames index
+	int staggerEvery = kOccasionalDefault; // kOccasionalNames index
+	int spawnTeng = 0; // kTengNames index
 	int radar = 1, detectPlayers = 0, detectVs = 0, radarTeam = 1; // radar.cpp
 	int grenadeCount = 0;  // 0 the game's amounts, else 1 + the count (so 1 is none)
 	int grenadePickup = 0; // 0 the game's amounts, else the count
@@ -327,9 +341,12 @@ std::atomic<bool> g_matchBots{false}, g_botsInMatch{false};
 std::atomic<int> g_roundsRule{0}, g_switchRule{1}, g_rounds{0}, g_switchEvery{1};
 std::atomic<int> g_quickResupplyRule{0}, g_grenadeCountRule{0}, g_grenadePickupRule{0}, g_grenadeCount{0}, g_grenadePickup{0};
 thread_local int g_inSpawn = 0; // weapons set up during a spawn are the player's own, any other is a pickup
+std::atomic<int> g_spawnsRunning{0}; // spawns run on worker threads; resupply.cpp leaves empty grenade slots alone meanwhile
 std::atomic<int> g_radarTeamRule{1};
 std::atomic<int> g_voiceTeamRule{0}, g_voiceEnemyRule{0};
 std::atomic<int> g_spawnPickRule{0}, g_spawnAreaRule{0}, g_spawnDistanceRule{0}, g_spawnPostsRule{0};
+std::atomic<int> g_staggerEveryRule{kOccasionalDefault}, g_spawnTengRule{0}, g_spawnTeng{0};
+std::atomic<DWORD> g_occasionalMs{1500};
 std::atomic<int> g_radarMode{1}, g_radarPlayers{0}, g_radarVs{0}, g_anchorRangeRule{kGrappleDefault}, g_anchorSpeedRule{kAnchorSpeedDefault}, g_fallRule{0};
 const char* const kDifficultyNames[] = {"Easy", "Normal", "Hard", "Veteran"};
 const char* const kBrainNames[] = {"Stock", "Improved"};
@@ -366,7 +383,7 @@ const uint8_t* WeaponEntry(const uint8_t* weapon)
 
 std::string Format(const Rules& r)
 {
-	return FormatA("ammo=%d;grenades=%d;secondary=%d;magazines=%d;survival=%d;lives=%d;team=%d;harmonizer=%d;grapple=%d;stagger=%d;radar=%d;detectp=%d;detectv=%d;anchor=%d;fall=%d;gcount=%d;gpick=%d;qres=%d;rnd=%d;sw=%d;rteam=%d;sexp=%d;sanc=%d;smel=%d;mshot=%d;mthr=%d;kpush=%d;vswmag=%d;vsmag=%d;shead=%d;sair=%d;sairh=%d;vteam=%d;venemy=%d;spawn=%d;sarea=%d;sdist=%d;spost=%d", r.ammo, r.grenades, r.secondary, r.supply, r.survival, r.lives, r.team, r.harmonizer, r.grapple, r.stagger, r.radar, r.detectPlayers, r.detectVs, r.anchorSpeed, r.fall, r.grenadeCount, r.grenadePickup, r.quickResupply, r.rounds, r.switchEvery, r.radarTeam, r.staggerExplosion, r.staggerAnchor, r.staggerMelee, r.massive, r.massiveThreshold, r.push, r.supplyVsWeapon, r.supplyVs, r.staggerHead, r.staggerAir, r.staggerAirHead, r.voiceTeam, r.voiceEnemy, r.spawnPick, r.spawnArea, r.spawnDistance, r.spawnPosts);
+	return FormatA("ammo=%d;grenades=%d;secondary=%d;magazines=%d;survival=%d;lives=%d;team=%d;harmonizer=%d;grapple=%d;stagger=%d;radar=%d;detectp=%d;detectv=%d;anchor=%d;fall=%d;gcount=%d;gpick=%d;qres=%d;rnd=%d;sw=%d;rteam=%d;sexp=%d;sanc=%d;smel=%d;mshot=%d;mthr=%d;kpush=%d;vswmag=%d;vsmag=%d;shead=%d;sair=%d;sairh=%d;vteam=%d;venemy=%d;spawn=%d;sarea=%d;sdist=%d;spost=%d;socc=%d;steng=%d", r.ammo, r.grenades, r.secondary, r.supply, r.survival, r.lives, r.team, r.harmonizer, r.grapple, r.stagger, r.radar, r.detectPlayers, r.detectVs, r.anchorSpeed, r.fall, r.grenadeCount, r.grenadePickup, r.quickResupply, r.rounds, r.switchEvery, r.radarTeam, r.staggerExplosion, r.staggerAnchor, r.staggerMelee, r.massive, r.massiveThreshold, r.push, r.supplyVsWeapon, r.supplyVs, r.staggerHead, r.staggerAir, r.staggerAirHead, r.voiceTeam, r.voiceEnemy, r.spawnPick, r.spawnArea, r.spawnDistance, r.spawnPosts, r.staggerEvery, r.spawnTeng);
 }
 
 Rules Parse(const std::string& s)
@@ -412,6 +429,8 @@ Rules Parse(const std::string& s)
 	r.spawnArea = small("sarea=", kSpawnAreaValues, 0);
 	r.spawnDistance = small("sdist=", kSpawnDistanceValues, 0);
 	r.spawnPosts = small("spost=", kSpawnPostValues, 0);
+	r.staggerEvery = small("socc=", kOccasionalValues, kOccasionalDefault);
+	r.spawnTeng = small("steng=", kTengCount, 0);
 	r.massive = small("mshot=", kMassiveValues, 0);
 	r.massiveThreshold = small("mthr=", kThresholdValues, 0);
 	r.push = small("kpush=", kPushValues, 0);
@@ -457,6 +476,8 @@ Rules Own()
 	r.spawnArea = g_spawnAreaRule;
 	r.spawnDistance = g_spawnDistanceRule;
 	r.spawnPosts = g_spawnPostsRule;
+	r.staggerEvery = g_staggerEveryRule;
+	r.spawnTeng = g_spawnTengRule;
 	r.massive = g_massiveRule;
 	r.massiveThreshold = g_massiveThresholdRule;
 	r.push = g_pushRule;
@@ -904,6 +925,7 @@ bool CharacterAirborne(const uint8_t* character)
 
 float __attribute__((thiscall)) HitHandler(void* character, uint32_t a, uint32_t b, uint32_t attacker, uint32_t d)
 {
+	CostScope cost(kCostHit);
 	uint8_t* was = t_attacker;
 	uint8_t* body = AttackerBody((uint8_t*)(uintptr_t)attacker);
 	t_attacker = body;
@@ -1109,8 +1131,9 @@ bool __attribute__((thiscall)) StaggerAdd(void* character, uint32_t delta, uint3
 	t_hitAt = now;
 	DWORD sinceReaction = now - StaggerSeenGet(character).reacted;
 	// (a hit asks each pool in turn: for Knock Occasional the same hit's later calls, within 50 ms, aren't "another hit")
-	t_hitQuiet = setting == kReactOff || (setting == kReactOccasional && sinceReaction < kOccasionalMs) ||
-	             (setting == kReactKnockOccasional && sinceReaction >= 50 && sinceReaction < kOccasionalMs);
+	DWORD occasional = g_occasionalMs;
+	t_hitQuiet = setting == kReactOff || (setting == kReactOccasional && sinceReaction < occasional) ||
+	             (setting == kReactKnockOccasional && sinceReaction >= 50 && sinceReaction < occasional);
 	t_noFlinch = t_noFlinch || t_hitQuiet;
 	switch (setting) {
 	case kReactDefault: {
@@ -1124,12 +1147,12 @@ bool __attribute__((thiscall)) StaggerAdd(void* character, uint32_t delta, uint3
 	case kReactKnock:
 		return true;
 	case kReactKnockOccasional:
-		if (sinceReaction >= kOccasionalMs) {
+		if (sinceReaction >= occasional) {
 			StaggerSeenSet(character, true, false, now);
 		}
 		return true;
 	case kReactOccasional: {
-		if (now - StaggerSeenGet(character).reacted < kOccasionalMs) {
+		if (now - StaggerSeenGet(character).reacted < occasional) {
 			return true;
 		}
 		bool standing = g_staggerOriginal[Pool](character, delta, b);
@@ -1299,6 +1322,8 @@ DWORD WINAPI SyncThread(LPVOID)
 		g_massive = r.massive;
 		g_massiveThreshold = r.massiveThreshold;
 		g_push = r.push;
+		g_occasionalMs = OccasionalMs(r.staggerEvery);
+		g_spawnTeng = versus ? r.spawnTeng : 0; // the Campaign keeps its T-ENG (carried between areas)
 		g_grenadeCount = r.grenades ? 0 : r.grenadeCount; // infinite grenades: the counts are hidden and mean nothing
 		g_grenadePickup = r.grenades ? 0 : r.grenadePickup;
 		RadarRulesSet(r.radar, r.detectPlayers, r.detectVs, r.radarTeam);
@@ -2413,12 +2438,9 @@ void __attribute__((thiscall)) ControlUpdate(uint8_t* ctl)
 		timers[1] = timers[1] < 1.0f ? 1.0f : timers[1];
 	}
 	bool runs = ctl && ctl[kCtlSlot] < 16 && (local || g_offline || hostBot);
-	if (runs && !hold && !((g_roundDead >> ctl[kCtlSlot]) & 1)) {
-		RespawnBefore(ctl, ctl[kCtlSlot]); // Spawning: the instant picks skip the respawn dialog
-	}
 	g_ctlUpdateOriginal(ctl);
-	if (runs) {
-		RespawnAfter(ctl, ctl[kCtlSlot]);
+	if (runs) { // Spawning: the instant picks skip the respawn menu
+		RespawnAfter(ctl, ctl[kCtlSlot], !hold && !((g_roundDead >> ctl[kCtlSlot]) & 1));
 	}
 	if (ctl && ctl[kCtlSlot] < 16) {
 		g_slotState[ctl[kCtlSlot]] = ctl[kCtlState];
@@ -3504,7 +3526,9 @@ uint32_t __attribute__((thiscall)) Spawn(uint8_t* spawner, uint32_t respawn, voi
 		RespawnSecondJump(true);
 	}
 	g_inSpawn++;
+	g_spawnsRunning++;
 	uint32_t r = g_spawnOriginal(spawner, respawn, a, b);
+	g_spawnsRunning--;
 	g_inSpawn--;
 	if ((respawn & 0xff) && b && g_magazine && g_grenadeCount != 0) { // the old grenade object carries over
 		auto* m = (int16_t*)((uint8_t*)b + g_magazine);
@@ -3527,6 +3551,21 @@ uint32_t __attribute__((thiscall)) Spawn(uint8_t* spawner, uint32_t respawn, voi
 		}
 		const float* at = (const float*)(unit + 0x30);
 		XLS_LOG_INFO("mods: rules: player %u unit %p id %08x at %.0f %.0f %.0f.", spawner[kCtlSlot], unit, *(uint32_t*)(unit + 0x1c), at[0], at[1], at[2]);
+		int teng = kTengValues[g_spawnTeng % kTengCount];
+		if (teng >= 0 && unit[0x1f] == 1 && g_staggerBuild >= 0) {
+			bool dx9 = g_staggerBuild == 1 || g_staggerBuild == 3;
+			float* now = (float*)(unit + (dx9 ? 0x18d4 : 0x18e4));
+			float* cap = now - 1;
+			float was = *now, capWas = *cap;
+			if (*cap < (float)teng) {
+				*cap = (float)teng;
+			}
+			*now = (float)teng;
+			static std::atomic<int> logged{0};
+			if (logged.fetch_add(1) < 6) {
+				XLS_LOG_INFO("mods: rules: player %u spawn T-ENG %.0f (cap %.0f) -> %d (cap %.0f).", spawner[kCtlSlot], was, capWas, teng, *cap);
+			}
+		}
 	}
 	else {
 		XLS_LOG_WARN("mods: rules: player %u: no unit made.", spawner[kCtlSlot]);
@@ -3635,12 +3674,12 @@ const int kFillerArg = -1;         // a blank kKindHeader row filling a short pa
 enum SetupAction { kActNone, kActTypes, kActType, kActOptions, kActCreate, kActSection, kActDefault, kActProfile, kActBots, kActRadar, kActAnchor, kActStagger, kActSpawning, kActBack };
 const char* const kBotRuleKeys[] = {"bots", "botDifficulty", "botBrain", "botPersona", "botTaunts", "radar", "radarPlayers", "radarVs", "anchorRange", "anchorSpeed", "fallStagger", "grenadeCount", "grenadePickup", "quickResupply", "rounds", "switchSides", "radarTeam",
 	"explosionStagger", "anchorStagger", "meleeStagger", "massiveShot", "massiveThreshold", "knockdownPush", "vsWeaponSupply", "vsSupply", "headStagger", "airStagger", "airHeadStagger", "voiceTeam", "voiceEnemy",
-	"spawning", "spawnArea", "spawnDistance", "spawnPosts"};
+	"spawning", "spawnArea", "spawnDistance", "spawnPosts", "staggerEvery", "spawnTeng"};
 const int kBotRuleCounts[] = {2, 4, 2, 6, 4, 3, 4, 4, 13, 12, kThresholdValues, 12, 11, 2, 14, 11, 2, kStaggerValues, kStaggerValues, kStaggerValues, kMassiveValues, kThresholdValues, kPushValues, kSupplyValues, kSupplyValues, kStaggerValues, kStaggerValues, kStaggerValues, kVoiceValues, kVoiceValues,
-	kSpawnValues, kSpawnAreaValues, kSpawnDistanceValues, kSpawnPostValues};
+	kSpawnValues, kSpawnAreaValues, kSpawnDistanceValues, kSpawnPostValues, kOccasionalValues, kTengCount};
 const char* const kRadarNames[] = {"Always On", "Near Data Post", "Hidden"};
 const int kOwnVoiceTeam = 28, kOwnVoiceEnemy = 29; // extras indexes (kBotRuleKeys)
-const int kOwnSpawn = 30, kOwnSpawnArea = 31, kOwnSpawnDistance = 32, kOwnSpawnPosts = 33;
+const int kOwnSpawn = 30, kOwnSpawnArea = 31, kOwnSpawnDistance = 32, kOwnSpawnPosts = 33, kOwnStaggerEvery = 34, kOwnSpawnTeng = 35;
 const char* const kDetectNames[] = {"Always Show", "Moving & Shooting", "Running & Shooting", "Shooting"};
 struct SetupRow {
 	SetupKind kind;
@@ -3771,6 +3810,9 @@ void SetupBuild(const uint8_t* rules)
 			int count = GameRulesExtras()["grenadeCount"];
 			navRow(kKindOwn, kActNone, 11, "Grenades at Spawn", count ? std::to_string(count - 1) : "Default");
 		}
+		if ((size_t)at.arg == kSectionPlayer) {
+			navRow(kKindOwn, kActNone, kOwnSpawnTeng, "Spawn T-ENG", kTengNames[GameRulesExtras()["spawnTeng"] % kTengCount]);
+		}
 		if ((size_t)at.arg == kSectionWeapons && !(rules[0x2f] & kInfiniteGrenades)) {
 			int pickup = GameRulesExtras()["grenadePickup"];
 			navRow(kKindOwn, kActNone, 12, "Grenade Pickups", pickup ? std::to_string(pickup) : "Default");
@@ -3828,6 +3870,7 @@ void SetupBuild(const uint8_t* rules)
 		navRow(kKindOwn, kActNone, 17, "Explosion Stagger", kStaggerNames[x["explosionStagger"] % kStaggerValues]);
 		navRow(kKindOwn, kActNone, 18, "Anchor Stagger", kStaggerNames[x["anchorStagger"] % kStaggerValues]);
 		navRow(kKindOwn, kActNone, 19, "Melee Stagger", kStaggerNames[x["meleeStagger"] % kStaggerValues]);
+		navRow(kKindOwn, kActNone, kOwnStaggerEvery, "Occasional Interval", kOccasionalNames[x["staggerEvery"] % kOccasionalValues]);
 		navRow(kKindOwn, kActNone, 20, "Massive Shot", kMassiveNames[x["massiveShot"] % kMassiveValues]);
 		navRow(kKindOwn, kActNone, 21, "Massive Shot Threshold", kThresholdNames[x["massiveThreshold"] % kThresholdValues]);
 		navRow(kKindOwn, kActNone, 22, "Knockdown Force", kPushNames[x["knockdownPush"] % kPushValues]);
@@ -4289,6 +4332,8 @@ void BotRulesSync()
 	g_spawnAreaRule = x["spawnArea"] % kSpawnAreaValues;
 	g_spawnDistanceRule = x["spawnDistance"] % kSpawnDistanceValues;
 	g_spawnPostsRule = x["spawnPosts"] % kSpawnPostValues;
+	g_staggerEveryRule = x["staggerEvery"] % kOccasionalValues;
+	g_spawnTengRule = x["spawnTeng"] % kTengCount;
 	g_vsWeaponSupplyRule = x["vsWeaponSupply"];
 	g_vsSupplyRule = x["vsSupply"];
 }
@@ -4635,6 +4680,7 @@ const LobbyRow kLobbyOwnRows[] = {
 	{"Player", "Default Secondary", kLobbyMenu, kRowSecondary},
 	{"Player", "Harmonizer", kLobbyMenu, kRowHarmonizer},
 	{"Player", "Grenades at Spawn", kLobbyOwn, 11},
+	{"Player", "Spawn T-ENG", kLobbyOwn, kOwnSpawnTeng},
 	{"Stagger", "Bullet Stagger", kLobbyMenu, kRowStagger},
 	{"Stagger", "Headshot Stagger", kLobbyOwn, 25},
 	{"Stagger", "Airborne Bullet Stagger", kLobbyOwn, 26},
@@ -4642,6 +4688,7 @@ const LobbyRow kLobbyOwnRows[] = {
 	{"Stagger", "Explosion Stagger", kLobbyOwn, 17},
 	{"Stagger", "Anchor Stagger", kLobbyOwn, 18},
 	{"Stagger", "Melee Stagger", kLobbyOwn, 19},
+	{"Stagger", "Occasional Interval", kLobbyOwn, kOwnStaggerEvery},
 	{"Stagger", "Massive Shot", kLobbyOwn, 20},
 	{"Stagger", "Massive Shot Threshold", kLobbyOwn, 21},
 	{"Stagger", "Knockdown Force", kLobbyOwn, 22},
@@ -4789,6 +4836,8 @@ std::string OwnValueName(int own, int v)
 	case kOwnSpawnArea: return kSpawnAreaNames[v % kSpawnAreaValues];
 	case kOwnSpawnDistance: return kSpawnDistanceNames[v % kSpawnDistanceValues];
 	case kOwnSpawnPosts: return kSpawnPostNames[v % kSpawnPostValues];
+	case kOwnStaggerEvery: return kOccasionalNames[v % kOccasionalValues];
+	case kOwnSpawnTeng: return kTengNames[v % kTengCount];
 	case 11: return v ? std::to_string(v - 1) : "Default";
 	case 12: return v ? std::to_string(v) : "Default";
 	case 13: case 16: return v ? "On" : "Off";
@@ -5769,6 +5818,7 @@ void RulesInstall(unsigned char* base)
 	StaggerInstall(base, build);
 	RadarInstall(base, build);
 	ResupplyInstall(base, build);
+	CareerInstall(base, build);
 	g_pushRulesOriginal = (PushRulesFn)Detour(base + (kRulesVas[build].pushRules - 0x400000), kPushRulesPrologue, sizeof(kPushRulesPrologue), (void*)&PushRules);
 	if (g_pushRulesOriginal) {
 		PatchRowTable(base + (kRulesVas[build].rowTable - 0x400000));
@@ -6351,6 +6401,11 @@ int RulesTeamOf(int slot)
 bool RulesTeams()
 {
 	return TeamGame();
+}
+
+bool RulesSpawning()
+{
+	return g_spawnsRunning.load() != 0;
 }
 
 }

@@ -82,7 +82,7 @@ bool Decode(const StockNavBlob& b, NavZones* out)
 		for (float& f : l.b) {
 			f = r.get<float>();
 		}
-		if (l.from < (int)zones && l.to < (int)zones && l.kind <= kNavLaunch) {
+		if (l.from < (int)zones && l.to < (int)zones && l.kind < kNavKinds) {
 			out->links.push_back(l);
 		}
 	}

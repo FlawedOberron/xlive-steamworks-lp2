@@ -38,6 +38,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <map>
 #include <atomic>
 #include <math.h>
 
@@ -98,13 +99,16 @@ struct Archetype {
 	const char* name;
 	float attacker, calm, quickness, hold, impatient, grenade, appeal;
 	int taunt; // % chance per 4 s window that a taunt may be picked
+	// ours, per slot with jitter (SlotTraits): social 0 lone wolf .. 1 co-dependent, bold 0 cautious .. 1 rushes in to
+	// melee, grapple: how much cheaper a grapple link is in its routes (1 = the base cost)
+	float social, bold, grapple;
 };
 const Archetype kArchetypes[] = {
-	{"aggressor", 1.6f, 0.5f, 0.8f, 0.5f, 1.5f, 1.0f, 1.5f, 40},
-	{"tactician", 1.0f, 1.3f, 1.3f, 1.3f, 1.0f, 1.4f, 1.0f, 15},
-	{"cautious", 0.6f, 1.2f, 1.6f, 1.8f, 0.7f, 1.0f, 0.5f, 5},
-	{"show-off", 1.3f, 0.8f, 1.0f, 0.8f, 1.2f, 0.8f, 3.0f, 70},
-	{"grenadier", 1.1f, 1.0f, 1.1f, 1.0f, 1.0f, 2.2f, 1.2f, 25},
+	{"aggressor", 1.6f, 0.5f, 0.8f, 0.5f, 1.5f, 1.0f, 1.5f, 40, 0.25f, 0.95f, 0.6f},
+	{"tactician", 1.0f, 1.3f, 1.3f, 1.3f, 1.0f, 1.4f, 1.0f, 15, 0.70f, 0.35f, 0.9f},
+	{"cautious", 0.6f, 1.2f, 1.6f, 1.8f, 0.7f, 1.0f, 0.5f, 5, 0.85f, 0.10f, 1.3f},
+	{"show-off", 1.3f, 0.8f, 1.0f, 0.8f, 1.2f, 0.8f, 3.0f, 70, 0.20f, 0.80f, 0.5f},
+	{"grenadier", 1.1f, 1.0f, 1.1f, 1.0f, 1.0f, 2.2f, 1.2f, 25, 0.55f, 0.50f, 1.0f},
 };
 const int kArchetypeCount = (int)(sizeof(kArchetypes) / sizeof(kArchetypes[0]));
 
@@ -122,6 +126,11 @@ struct Persona {
 };
 std::unordered_map<uint8_t*, Persona> g_personality; // unit -> what it was given
 int g_slotArchetype[16] = {};           // archetype + 1 (0: none yet), reset at each area load
+struct SlotTraits {
+	bool set = false;
+	float social = 0.5f, bold = 0.5f, grapple = 1.0f;
+};
+SlotTraits g_slotTraits[16];            // with the archetype (Personality), reset with it
 std::atomic<uint8_t*> g_slotUnit[16];   // the unit each slot's think last ran (ThinkBody)
 std::mutex g_personalityLock;
 const size_t kFilterCharacterSize = 0x16b0; // past the other weapon slot on every build
@@ -283,6 +292,24 @@ void Scale(uint8_t* p, uint32_t at, float m)
 	p[at] = (uint8_t)(v < 0 ? 0 : v > 200 ? 200 : v);
 }
 
+const float kCoDependent = 0.6f, kLoneWolf = 0.35f;
+
+int BotSlot(const uint8_t* unit) // the AI slot whose think last ran this unit, -1 none
+{
+	for (int i = 0; i < 16; i++) {
+		if (g_slotUnit[i].load(std::memory_order_relaxed) == unit) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+SlotTraits Traits(const uint8_t* unit)
+{
+	int s = BotSlot(unit);
+	return s >= 0 && g_slotTraits[s].set ? g_slotTraits[s] : SlotTraits();
+}
+
 int Personality(uint8_t* unit)
 {
 	static const uint32_t kTraits[7] = {kAttacker, kCalm, kQuickness, kHold, kImpatient, kGrenade, kAppeal};
@@ -320,6 +347,18 @@ int Personality(uint8_t* unit)
 	}
 	if (slot >= 0) {
 		g_slotArchetype[slot] = a + 1;
+		SlotTraits& t = g_slotTraits[slot];
+		if (!t.set) {
+			auto jitter = [](float v, float by) {
+				v += ((int)(Rand() % 201) - 100) / 100.0f * by;
+				return v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v;
+			};
+			const Archetype& k = kArchetypes[a];
+			t.social = jitter(k.social, 0.2f);
+			t.bold = jitter(k.bold, 0.15f);
+			t.grapple = k.grapple * (0.8f + (Rand() % 41) / 100.0f);
+			t.set = true;
+		}
 	}
 	Persona q;
 	q.archetype = a;
@@ -346,8 +385,10 @@ int Personality(uint8_t* unit)
 		q.after[i] = p[kTraits[i]];
 	}
 	g_personality[unit] = q;
-	XLS_LOG_INFO("mods: bots: %p (slot %d) is a %s, difficulty x%.1f (attacker %u -> %u%s, quickness %u -> %u, appeal %u -> %u; cursor speed trait %u).", unit, slot,
-	             k.name, d, q.before[0], q.after[0], raised ? ", raised from a partner's" : "", q.before[2], q.after[2], q.before[6], q.after[6], p[4]);
+	const SlotTraits t = slot >= 0 ? g_slotTraits[slot] : SlotTraits();
+	XLS_LOG_INFO("mods: bots: %p (slot %d) is a %s, difficulty x%.1f (attacker %u -> %u%s, quickness %u -> %u, appeal %u -> %u; cursor speed trait %u; %s %.2f, bold %.2f, grapple cost x%.2f).", unit, slot,
+	             k.name, d, q.before[0], q.after[0], raised ? ", raised from a partner's" : "", q.before[2], q.after[2], q.before[6], q.after[6], p[4],
+	             t.social >= kCoDependent ? "co-dependent" : t.social <= kLoneWolf ? "lone wolf" : "social", t.social, t.bold, t.grapple);
 	return a;
 }
 
@@ -383,7 +424,20 @@ void LogAimValues()
 // magazine. Weapon (character's held one) +0x210c reload timer, above 0 while reloading (the game's FUN_0091f640 waits on
 // it); +0x20fc rounds loaded, +0x20fe in reserve. DX9 weapons are 0x10 lower.
 bool BotLogOn();
-const uint32_t kModeTargetReload = 15;
+const uint32_t kModeTargetReload = 15, kModeOwnEmpty = 16, kModeBold = 17;
+// Mode 16: 100 while the bot's own held weapon is reloading or its magazine is empty (a gun: something to shoot with).
+// Mode 17: the bot's boldness (SlotTraits), 0-100. Brains: melee rushes (lp2brain.py MeleeRush / MeleePush).
+bool OwnEmpty(uint8_t* unit)
+{
+	uint8_t* weapon = *(uint8_t**)(unit + g_vas->held);
+	if (!weapon) {
+		return false;
+	}
+	const uint32_t d = g_vas->held == 0x1688 ? 0 : 0x10;
+	float timer = *(float*)(weapon + 0x210c - d);
+	int16_t loaded = *(int16_t*)(weapon + 0x20fc - d);
+	return timer > 0.0f || loaded == 0;
+}
 bool TargetReloading(uint8_t* unit)
 {
 	uint8_t* target = *(uint8_t**)(unit + g_vas->target);
@@ -417,6 +471,12 @@ float __attribute__((thiscall)) EvalParam(uint8_t* eval, uint8_t* unit, void* b,
 		return r ? 1.0f : 0.0f;
 	}
 	int a = Personality(unit);
+	if (*(uint32_t*)(eval + kEvalMode) == kModeOwnEmpty) {
+		return OwnEmpty(unit) ? 1.0f : 0.0f;
+	}
+	if (*(uint32_t*)(eval + kEvalMode) == kModeBold) {
+		return Traits(unit).bold;
+	}
 	if (*(uint32_t*)(eval + kEvalMode) == kModeAppeal) {
 		uint32_t roll = Mix((uint32_t)(uintptr_t)unit ^ (GetTickCount() / 4000) * 0x9e3779b9u) % 100;
 		const float kTauntScale[] = {0.0f, 0.4f, 1.0f, 2.0f};
@@ -439,6 +499,9 @@ struct Reaction {
 	float damage = 0.0f;
 	uint8_t* pending = nullptr;
 	DWORD due = 0, nextSwitch = 0;
+	bool miss = false;        // pending is someone who fired at it and missed (else hit it)
+	float angle = 0.0f;       // degrees between its facing and the attacker then (log)
+	DWORD shotSeen = 0, missCheck = 0; // the newest shot looked at; when it last looked
 };
 Reaction g_reactions[16]; // by slot; each slot's think runs on one thread at a time
 const int kThinkSlot = 0x84, kGrudgeCount = 16, kGrudgeStride = 8, kGrudgeFighter = 4, kGrudgeValue = 8, kGrudgeAge = 0xa;
@@ -468,6 +531,24 @@ uint8_t* NewestAttacker(uint8_t* think)
 
 void TargetAttacker(uint8_t* think, uint8_t* unit, uint8_t* attacker)
 {
+	// someone who only shot at it (no hit) has no grudge yet: it takes the place of the smallest (FUN_0090ffb0 sorts the
+	// table by value and targets the top one with a value and a fighter)
+	int have = -1, low = 0;
+	for (int i = 0; i < kGrudgeCount; i++) {
+		uint8_t* entry = think + i * kGrudgeStride;
+		if (*(uint8_t**)(entry + kGrudgeFighter) == attacker) {
+			have = i;
+		}
+		uint8_t* low_e = think + low * kGrudgeStride;
+		if (!*(uint8_t**)(entry + kGrudgeFighter) || (*(uint8_t**)(low_e + kGrudgeFighter) && *(uint16_t*)(entry + kGrudgeValue) < *(uint16_t*)(low_e + kGrudgeValue))) {
+			low = i;
+		}
+	}
+	if (have < 0) {
+		uint8_t* entry = think + low * kGrudgeStride;
+		*(uint8_t**)(entry + kGrudgeFighter) = attacker;
+		*(uint16_t*)(entry + kGrudgeAge) = 0;
+	}
 	for (int i = 0; i < kGrudgeCount; i++) { // the game targets by biggest grudge: make that this attacker
 		uint8_t* entry = think + i * kGrudgeStride;
 		uint16_t& value = *(uint16_t*)(entry + kGrudgeValue);
@@ -623,6 +704,68 @@ uint32_t __attribute__((thiscall)) HmAction(uint8_t* move, uint8_t* unit, uint8_
 	return r;
 }
 
+// Reaction time: by difficulty, longer the further round the attacker is from where the bot faces (kAngleCost: the extra,
+// as a share of the base, for someone right behind; veterans turn faster), and longer for a miss (nothing hit it: it
+// notices the shots going past). A miss: a shot in the last kMissWindow ms from someone facing it within kMissWide
+// (plus kMissSpread of the distance: facing isn't aim) to either side, up to kMissRange away and kMissUp above / below.
+const DWORD kReaction[4] = {900, 500, 250, 100};       // easy, normal, hard, veteran (hit, facing it)
+const DWORD kMissExtra[4] = {700, 450, 250, 120};
+const float kAngleCost[4] = {1.6f, 1.3f, 1.0f, 0.7f};
+const float kMissRange = 6000.0f, kMissWide = 250.0f, kMissSpread = 0.07f, kMissUp = 600.0f;
+const DWORD kMissWindow = 600, kMissEvery = 100;
+
+float OffFacing(uint8_t* unit, const float* from) // degrees, 0 (in front) to 180 (behind); 90 when unknown
+{
+	float f[2];
+	const float* here = (const float*)(unit + 0xd0);
+	float dx = from[0] - here[0], dz = from[2] - here[2], d = sqrtf(dx * dx + dz * dz);
+	if (!UnitFacing(unit, f) || d < 1.0f) {
+		return 90.0f;
+	}
+	float c = (dx * f[0] + dz * f[1]) / d;
+	return acosf(c < -1.0f ? -1.0f : c > 1.0f ? 1.0f : c) * 57.29578f;
+}
+
+DWORD ReactionDelay(int difficulty, float angle, bool miss)
+{
+	float t = (float)kReaction[difficulty & 3] + (miss ? (float)kMissExtra[difficulty & 3] : 0.0f);
+	t *= 1.0f + kAngleCost[difficulty & 3] * (miss ? 1.0f : 0.5f) * angle / 180.0f; // a hit shows its direction: half
+	return (DWORD)(t * (0.85f + (Rand() % 300) / 1000.0f));
+}
+
+// Someone shooting this way: the shooter (nullptr none) and how far (cm)
+uint8_t* FiredAt(uint8_t* unit, Reaction& r, DWORD now, bool everyone, float* dist)
+{
+	RadarShotInfo shots[32];
+	int n = RadarRecentShots(shots, 32, kMissWindow);
+	const float* here = (const float*)(unit + 0xd0);
+	uint8_t* best = nullptr;
+	float bestD = kMissRange;
+	DWORD newest = r.shotSeen;
+	for (int i = 0; i < n; i++) {
+		const RadarShotInfo& s = shots[i];
+		if (r.shotSeen && (int)(s.at - r.shotSeen) <= 0) {
+			continue; // looked at already
+		}
+		if (newest == r.shotSeen || (int)(s.at - newest) > 0) {
+			newest = s.at;
+		}
+		if (s.who == unit || (!everyone && s.team == unit[g_vas->team]) || (s.dir[0] == 0.0f && s.dir[1] == 0.0f)) {
+			continue;
+		}
+		float vx = here[0] - s.pos[0], vz = here[2] - s.pos[2], d = sqrtf(vx * vx + vz * vz);
+		float along = vx * s.dir[0] + vz * s.dir[1], side = fabsf(vx * s.dir[1] - vz * s.dir[0]);
+		if (d < 100.0f || d >= bestD || along <= 0.0f || fabsf(here[1] - s.pos[1]) > kMissUp || side > kMissWide + kMissSpread * d) {
+			continue;
+		}
+		best = s.who;
+		bestD = d;
+	}
+	r.shotSeen = newest;
+	*dist = bestD;
+	return best;
+}
+
 void ReactToHit(uint8_t* think, uint8_t* unit)
 {
 	const uint8_t slot = think[kThinkSlot];
@@ -664,9 +807,10 @@ void ReactToHit(uint8_t* think, uint8_t* unit)
 		const bool freeForAll = kind >= 1 && kind <= 3; // Elimination: everyone's an enemy
 		if (attacker && attacker != unit && attacker != current && Alive(attacker) &&
 		    (freeForAll || attacker[g_vas->team] != unit[g_vas->team])) {
-			const DWORD kReaction[] = {900, 500, 250, 100};
 			r.pending = attacker;
-			r.due = now + kReaction[BotMenuOptions().difficulty & 3];
+			r.miss = false;
+			r.angle = OffFacing(unit, (const float*)(attacker + 0xd0));
+			r.due = now + ReactionDelay(BotMenuOptions().difficulty, r.angle, false);
 		}
 		else if (!attacker) {
 			static bool logged = false;
@@ -674,6 +818,31 @@ void ReactToHit(uint8_t* think, uint8_t* unit)
 				logged = true;
 				XLS_LOG_WARN("mods: bots: a bot was hit but its attacker list is empty.");
 			}
+		}
+	}
+	if (!r.pending && (int)(now - r.nextSwitch) >= 0 && now - r.missCheck >= kMissEvery) {
+		r.missCheck = now;
+		const int kind = GameKind();
+		float d = 0.0f;
+		uint8_t* shooter = FiredAt(unit, r, now, kind >= 1 && kind <= 3, &d);
+		// worth turning to: it has nobody, or the shooter is clearly nearer than who it's fighting
+		bool turn = false;
+		if (shooter && shooter != current && Alive(shooter)) {
+			if (!current || !Alive(current)) {
+				turn = true;
+			}
+			else {
+				const float* a = (const float*)(unit + 0xd0);
+				const float* c = (const float*)(current + 0xd0);
+				float dx = c[0] - a[0], dz = c[2] - a[2];
+				turn = d < 0.8f * sqrtf(dx * dx + dz * dz);
+			}
+		}
+		if (turn) {
+			r.pending = shooter;
+			r.miss = true;
+			r.angle = OffFacing(unit, (const float*)(shooter + 0xd0));
+			r.due = now + ReactionDelay(BotMenuOptions().difficulty, r.angle, true);
 		}
 	}
 	if (r.pending && (int)(now - r.due) >= 0) {
@@ -684,8 +853,9 @@ void ReactToHit(uint8_t* think, uint8_t* unit)
 			TargetAttacker(think, unit, attacker);
 			r.nextSwitch = now + 2000;
 			static LONG logged = 0;
-			if (InterlockedIncrement(&logged) <= 20) {
-				XLS_LOG_INFO("mods: bots: slot %u hit, target %p -> attacker %p (now %p).", slot, current, attacker, *(uint8_t**)(unit + g_vas->target));
+			if (InterlockedIncrement(&logged) <= 30) {
+				XLS_LOG_INFO("mods: bots: slot %u %s (%.0f deg off its facing), target %p -> attacker %p (now %p).", slot,
+					r.miss ? "shot at" : "hit", r.angle, current, attacker, *(uint8_t**)(unit + g_vas->target));
 			}
 		}
 	}
@@ -705,7 +875,7 @@ const DWORD kShotHeard = 3000, kNoiseLasts = 10000, kNoiseCheck = 250, kStuckChe
 struct RoamGoal {
 	float pos[3] = {0, 0, 0};
 	float best = 0;
-	bool has = false, noise = false;
+	bool has = false, noise = false, follow = false; // follow: a co-dependent's goal is a teammate (re-picked as they move)
 	DWORD used = 0, set = 0, heard = 0, progress = 0, rest = 0;
 	int hopFrom = -1, hopTo = -1; // the area link it's running along, its best distance to the hop's end and when that last improved
 	float hopBest = 0;
@@ -717,6 +887,8 @@ struct RoamGoal {
 	float way[3] = {0, 0, 0};   // the waypoint last given to the game (Resolve)
 	float markPos[3] = {0, 0, 0}; // where it last made kStallStep of progress, when: standing since then (Traverse)
 	DWORD markAt = 0, stallLogged = 0;
+	float idlePos[3] = {0, 0, 0}; // stall map (Traverse): where it last moved kStallStep, when, and the last tick counted
+	DWORD idleAt = 0, idleTick = 0;
 	DWORD jumpAt = 0, grappleAt = 0, aimFrom = 0, unstickAt = 0; // last presses; when it started aiming the anchor
 	DWORD steerAt = 0;      // Traverse steering it across a link: last frame it did, and whether it's past the start
 	bool steerPast = false;
@@ -784,6 +956,16 @@ std::vector<Region> g_regions;
 std::vector<int> g_zoneRegion; // per zone
 LONG g_traceLines = 0;          // movement trace lines this map (Resolve)
 LONG g_stallLines = 0;          // stall steering lines this map (Traverse)
+// Stall map: seconds bots stood still past kIdleFrom, summed in kIdleCell cells, logged every kIdleDump (under g_goalLock).
+struct IdleCell {
+	float plan = 0, noPlan = 0;      // seconds standing with a move plan running (stalled), and with none
+	float pos[3] = {0, 0, 0};        // the first spot seen in the cell
+	float way[3] = {0, 0, 0};        // the waypoint the last stalled bot had
+	int bots = 0;
+	uint32_t botMask = 0;
+};
+std::map<int64_t, IdleCell> g_idleCells;
+DWORD g_idleDumped = 0;
 const void* g_areaSet = nullptr;
 uint32_t g_areaCount = 0;
 
@@ -933,6 +1115,8 @@ void RegionsBuild()
 	}
 	g_traceLines = 0;
 	g_stallLines = 0;
+	g_idleCells.clear();
+	g_idleDumped = 0;
 	XLS_LOG_INFO("mods: bots: %u zones in %u regions (%d open: one look sweeps them).", (unsigned)n, (unsigned)g_regions.size(), open);
 }
 
@@ -970,19 +1154,19 @@ void AreasBuild()
 			}
 			g_areas.push_back(a);
 		}
-		int kinds[5] = {};
+		int kinds[kNavKinds] = {};
 		for (const NavLink& l : g_nav.links) {
 			Hop h = {l.to, l.kind, {l.a[0], l.a[1], l.a[2]}, {l.b[0], l.b[1], l.b[2]}, l.length};
 			g_areas[l.from].hops.push_back(h);
 			if (std::find(g_areas[l.from].links.begin(), g_areas[l.from].links.end(), l.to) == g_areas[l.from].links.end()) {
 				g_areas[l.from].links.push_back(l.to);
 			}
-			kinds[l.kind % 5]++;
+			kinds[l.kind % kNavKinds]++;
 		}
 		g_blocked.clear();
-		XLS_LOG_INFO("mods: bots: the map's %u zones, links: %d walk, %d jump, %d drop, %d grapple (%s), %d launch.", (unsigned)g_areas.size(),
+		XLS_LOG_INFO("mods: bots: the map's %u zones, links: %d walk, %d jump, %d drop, %d grapple (%s), %d launch, %d ladder.", (unsigned)g_areas.size(),
 		             kinds[kNavWalk], kinds[kNavJump], kinds[kNavDrop], kinds[kNavGrapple], kBotsGrapple ? "used within the anchor range" : "not used yet",
-		             kinds[kNavLaunch]);
+		             kinds[kNavLaunch], kinds[kNavLadder]);
 		RegionsBuild();
 		return;
 	}
@@ -1107,12 +1291,16 @@ int AreaAt(const float* p)
 }
 
 // Zone routes: a link's cost is its run plus what crossing it takes (a jump or a drop a little, a launch less than its
-// distance: it's quick, a grapple a lot: only where walking is much longer). Grapples beyond the match's anchor range
+// distance: it's quick, a grapple a flat cost plus half its length, times the bot's grapple liking: bold archetypes
+// grapple up where walking round is a little longer, cautious ones only where it's a lot longer). Grapples beyond the match's anchor range
 // aren't links at all. The point to run to: across a walk link, the next zone; else the link's start, then its end once
 // there (a ledge to drop off, a launch volume to walk into: force.cpp throws the bot, a grapple's firing spot).
 const float kHopAt = 600.0f;      // a link's start counts as reached this close
 const float kLookAhead = 1200.0f; // route points closer than this are skipped (the game counts itself arrived early)
 const float kJumpUp = 50.0f, kJumpGap = 150.0f; // a jump link needs a jump past these (else it's run across)
+
+thread_local float t_grappleCost = 1.0f; // the routing bot's grapple liking (Resolve sets it around Waypoint)
+const float kGrappleCross = 350.0f, kGrappleRun = 0.5f; // a grapple: a flat cost (aim, fire) plus half its length (reeling is quick)
 
 const float* ZoneWaypoint(const float* from, const float* goal, int start, int end, int* hopFrom, int* hopTo, const Hop** link)
 {
@@ -1140,8 +1328,9 @@ const float* ZoneWaypoint(const float* from, const float* goal, int start, int e
 				continue;
 			}
 			float run = sqrtf(Distance2(g_areas[u].pos, h.a)) + sqrtf(Distance2(h.b, g_areas[h.to].pos));
-			float cross = h.kind == kNavWalk ? 0.0f : h.kind == kNavJump ? 300.0f : h.kind == kNavDrop ? 200.0f : h.kind == kNavLaunch ? 150.0f : 1500.0f;
-			cross += h.kind == kNavLaunch ? sqrtf(Distance2(h.a, h.b)) * 0.3f : sqrtf(Distance2(h.a, h.b));
+			float cross = h.kind == kNavWalk ? 0.0f : h.kind == kNavJump ? 300.0f : h.kind == kNavDrop ? 200.0f : h.kind == kNavLaunch ? 150.0f : h.kind == kNavLadder ? 200.0f : 0.0f;
+			float span = sqrtf(Distance2(h.a, h.b));
+			cross += h.kind == kNavLaunch ? span * 0.3f : h.kind == kNavGrapple ? (kGrappleCross + span * kGrappleRun) * t_grappleCost : h.kind == kNavLadder ? span * 1.5f : span; // climbing: ~2/3 running speed
 			auto it = g_blocked.find((int64_t)u * 4096 + h.to);
 			bool blocked = it != g_blocked.end() && now - it->second < kBlockedFor;
 			float c = cost[u] + run + cross + (blocked ? 1e6f : 0.0f);
@@ -1169,7 +1358,7 @@ const float* ZoneWaypoint(const float* from, const float* goal, int start, int e
 		*hopTo = hop;
 		*link = h;
 		// walked: a walk link, a drop, a jump that needs none (the navmesh links those, lp2navgen.cross_links)
-		bool run = !h || h->kind == kNavWalk || h->kind == kNavDrop;
+		bool run = !h || h->kind == kNavWalk || h->kind == kNavDrop || h->kind == kNavLadder; // ladder: the game's pathing climbs it
 		if (h && h->kind == kNavJump) {
 			float dx = h->b[0] - h->a[0], dz = h->b[2] - h->a[2];
 			run = h->b[1] - h->a[1] < kJumpUp && sqrtf(dx * dx + dz * dz) < kJumpGap;
@@ -1185,8 +1374,8 @@ const float* ZoneWaypoint(const float* from, const float* goal, int start, int e
 		static DWORD logged = 0;
 		if (GetTickCount() - logged > 3000) {
 			logged = GetTickCount();
-			static const char* const kKinds[] = {"walk", "jump", "drop", "grapple", "launch"};
-			XLS_LOG_INFO("mods: bots: route from zone %d to %d by %s (%.0f m to its start).", before, hop, kKinds[h->kind % 5], sqrtf(Distance2(from, h->a)) / 100.0f);
+			static const char* const kKinds[] = {"walk", "jump", "drop", "grapple", "launch", "ladder"};
+			XLS_LOG_INFO("mods: bots: route from zone %d to %d by %s (%.0f m to its start).", before, hop, kKinds[h->kind % kNavKinds], sqrtf(Distance2(from, h->a)) / 100.0f);
 		}
 		return Distance2(from, h->a) > kHopAt * kHopAt ? h->a : h->b;
 	}
@@ -1254,6 +1443,9 @@ bool Checked(const Area& a, int team, DWORD shotAt)
 	return a.swept[team] && (int)(a.swept[team] - shotAt) > (int)kCheckedAfter;
 }
 
+const float kBuddyRange = 8000.0f, kBuddyNear = 800.0f, kLonerSpace = 40.0f; // cm, cm, m
+const DWORD kFollowEvery = 3000;
+
 bool RoamPoint(uint8_t* unit, const float* from, RoamGoal& g)
 {
 	AreasBuild();
@@ -1279,6 +1471,61 @@ bool RoamPoint(uint8_t* unit, const float* from, RoamGoal& g)
 		return false;
 	};
 	auto avoided = [&](const Area& a) { return a.avoid[team] && now - a.avoid[team] < kAvoidFor; }; // a bot gave up on a goal there
+	// Social. Teammates on foot or in a VS (team games only): co-dependents run to the nearest human (counted as closer) or
+	// co-dependent bot within kBuddyRange and stay near; lone wolves mark down areas near any teammate.
+	const SlotTraits traits = Traits(unit);
+	const float* bodies[16];
+	int nBodies = 0;
+	const float* buddy = nullptr;
+	float buddyScore = kBuddyRange;
+	bool buddyHuman = false;
+	int mine = RulesSlotOf(unit);
+	uint8_t* slotTable = *(uint8_t**)At(g_vas->slots);
+	if (RulesTeams() && mine >= 0 && slotTable) {
+		for (int s = 0; s < 16; s++) {
+			uint8_t* body = s == mine ? nullptr : RulesBody(s);
+			if (!body || !Alive(body) || RulesTeamOf(s) != RulesTeamOf(mine)) {
+				continue;
+			}
+			const float* at = (const float*)(body + 0xd0);
+			bodies[nBodies++] = at;
+			bool human = !slotTable[0x1b1 + s * 0x7c];
+			if (!human && !(g_slotTraits[s].set && g_slotTraits[s].social >= kCoDependent)) {
+				continue;
+			}
+			float score = sqrtf(Distance2(from, at)) * (human ? 0.6f : 1.0f);
+			if (score < buddyScore) {
+				buddyScore = score;
+				buddy = at;
+				buddyHuman = human;
+			}
+		}
+	}
+	g.follow = false;
+	if (traits.social >= kCoDependent && buddy) {
+		if (Distance2(from, buddy) < kBuddyNear * kBuddyNear) {
+			return false; // close enough: no goal of its own (the brain's fight / look-around items run)
+		}
+		memcpy(g.pos, buddy, sizeof(g.pos));
+		g.has = g.follow = true;
+		g.noise = false;
+		if (BotLogOn()) {
+			XLS_LOG_INFO("mods: bots: %p (co-dependent) sticks with a %s %.0f m away.", unit, buddyHuman ? "player" : "co-dependent bot",
+			             sqrtf(Distance2(from, buddy)) / 100.0f);
+		}
+		return true;
+	}
+	auto loner = [&](const float* p) { // a lone wolf: up to 60 (points ~ metres) for an area near a teammate
+		if (traits.social > kLoneWolf) {
+			return 0.0f;
+		}
+		float worst = 0.0f;
+		for (int i = 0; i < nBodies; i++) {
+			float d = sqrtf(Distance2(p, bodies[i])) / 100.0f;
+			worst = std::max(worst, kLonerSpace - d);
+		}
+		return worst * 1.5f;
+	};
 	int pick = -1;
 	float bestScore = 1e30f;
 	bool fight = false;
@@ -1304,7 +1551,7 @@ bool RoamPoint(uint8_t* unit, const float* from, RoamGoal& g)
 				if (z == here || (a.swept[team] && now - a.swept[team] < kSweptFor) || avoided(a)) {
 					continue;
 				}
-				float score = (taken(a.pos) ? 100.0f : 0.0f) + Rand() % 50;
+				float score = (taken(a.pos) ? 100.0f : 0.0f) + loner(a.pos) + Rand() % 50;
 				if (score < bestScore) {
 					bestScore = score;
 					pick = z;
@@ -1319,7 +1566,7 @@ bool RoamPoint(uint8_t* unit, const float* from, RoamGoal& g)
 					continue;
 				}
 				const float* c = g_areas[r.center].pos;
-				float score = sqrtf(Distance2(from, c)) / 100.0f + (taken(c) ? 100.0f : 0.0f) + Rand() % 20;
+				float score = sqrtf(Distance2(from, c)) / 100.0f + (taken(c) ? 100.0f : 0.0f) + loner(c) + Rand() % 20;
 				if (score < bestScore) {
 					bestScore = score;
 					pick = r.center;
@@ -1342,7 +1589,7 @@ bool RoamPoint(uint8_t* unit, const float* from, RoamGoal& g)
 			if ((int)i == here || (a.swept[team] && now - a.swept[team] < kSweptFor) || avoided(a)) {
 				continue;
 			}
-			float score = sqrtf(Distance2(from, a.pos)) / 100.0f + (taken(a.pos) ? 100.0f : 0.0f) + Rand() % 20;
+			float score = sqrtf(Distance2(from, a.pos)) / 100.0f + (taken(a.pos) ? 100.0f : 0.0f) + loner(a.pos) + Rand() % 20;
 			if (score < bestScore) {
 				bestScore = score;
 				pick = (int)i;
@@ -1455,7 +1702,10 @@ void GoalUpdate(uint8_t* unit, RoamGoal& g, DWORD now)
 	bool renew = !g.has;
 	if (g.has) {
 		float d = sqrtf(Distance2(here, g.pos));
-		if (d < kArrive || (g.noise && now - g.set > kNoiseLasts)) {
+		if (g.follow && (d < kBuddyNear || now - g.set > kFollowEvery)) {
+			renew = true; // the teammate moved on (or it caught up): look again
+		}
+		else if (d < kArrive || (g.noise && now - g.set > kNoiseLasts)) {
 			if (g.noise) {
 				g.rest = now + kNoiseRest; // it's seen what there was to see
 				int na = AreaAt(g.pos);
@@ -1506,6 +1756,7 @@ const uint8_t kPathStepPrologue[] = {0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf0, 0x83, 0
 
 uint32_t __attribute__((thiscall)) PathStep(void* self, uint8_t* unit, float* from, float* to, uint32_t a5, float radius, float* out, int a8)
 {
+	CostScope cost(kCostPath);
 	uint32_t r = g_pathStepOriginal(self, unit, from, to, a5, radius, out, a8);
 	if (unit && from && to && unit[0x1f] == 1 && g_traceLines < 150) { // only while the trace still logs
 		std::lock_guard<std::mutex> lock(g_goalLock);
@@ -1527,6 +1778,7 @@ uint32_t __attribute__((thiscall)) PathStep(void* self, uint8_t* unit, float* fr
 
 char __attribute__((thiscall)) Resolve(void* self, uint8_t* unit, uint8_t* plan, void* ctx, uint32_t target, float* out, void* info)
 {
+	CostScope cost(kCostRoute);
 	const uint8_t type = target & 0xff;
 	if ((type != kTgtPost && type != kTgtRoam) || !unit || !plan) {
 		return g_resolveOriginal(self, unit, plan, ctx, target, out, info);
@@ -1565,7 +1817,9 @@ char __attribute__((thiscall)) Resolve(void* self, uint8_t* unit, uint8_t* plan,
 	const float* here = (const float*)(unit + 0xd0);
 	int hopFrom, hopTo;
 	const Hop* link = nullptr;
+	t_grappleCost = Traits(unit).grapple;
 	const float* to = Waypoint(here, g.pos, &hopFrom, &hopTo, &link);
+	t_grappleCost = 1.0f;
 	g.linkKind = link ? link->kind : -1;
 	if (link) {
 		memcpy(g.linkA, link->a, sizeof(g.linkA));
@@ -1641,6 +1895,58 @@ const float kStallStep = 60.0f, kWayHere = 150.0f;
 const DWORD kStallAfter = 300, kSidestepAfter = 2500, kSidestepTurn = 900;
 const DWORD kLinkFresh = 700, kJumpRest = 900, kGrappleRest = 4000, kAimFor = 350, kUnstickAfter = 1800, kUnstickRest = 2500;
 
+// Stall map, for finding where on a map bots stand about: a bot that hasn't moved kStallStep for kIdleFrom adds the time
+// to its kIdleCell cell, split into standing with a move plan (stalled: the steering below is at it) and without one
+// (no path, a goal given up, or fighting from cover). Every kIdleDump the worst cells go to the log with world positions.
+const DWORD kIdleFrom = 3000, kIdleDump = 60000;
+const float kIdleCell = 500.0f;
+
+void IdleTrack(RoamGoal& g, uint8_t* unit, const float* here, DWORD now, bool plan)
+{
+	float dx = here[0] - g.idlePos[0], dz = here[2] - g.idlePos[2];
+	if (!g.idleAt || dx * dx + dz * dz > kStallStep * kStallStep) {
+		memcpy(g.idlePos, here, sizeof(g.idlePos));
+		g.idleAt = now;
+	}
+	DWORD tick = g.idleTick;
+	g.idleTick = now;
+	if (tick && now - g.idleAt > kIdleFrom && now - tick < 1000) {
+		int64_t cx = (int64_t)floorf(here[0] / kIdleCell), cz = (int64_t)floorf(here[2] / kIdleCell);
+		IdleCell& c = g_idleCells[(cx << 32) ^ (cz & 0xffffffff)];
+		if (!c.bots) {
+			memcpy(c.pos, here, sizeof(c.pos));
+		}
+		uint32_t bit = 1u << (((uintptr_t)unit >> 4) & 31);
+		if (!(c.botMask & bit)) {
+			c.botMask |= bit;
+			c.bots++;
+		}
+		float sec = (now - tick) / 1000.0f;
+		(plan ? c.plan : c.noPlan) += sec;
+		if (plan) {
+			memcpy(c.way, g.way, sizeof(c.way));
+		}
+	}
+	if (!g_idleDumped) {
+		g_idleDumped = now;
+	}
+	if (now - g_idleDumped < kIdleDump || g_idleCells.empty()) {
+		return;
+	}
+	g_idleDumped = now;
+	std::vector<std::pair<float, const IdleCell*>> worst;
+	for (auto& kv : g_idleCells) {
+		worst.push_back({kv.second.plan + kv.second.noPlan, &kv.second});
+	}
+	std::sort(worst.begin(), worst.end(), [](auto& a, auto& b) { return a.first > b.first; });
+	XLS_LOG_INFO("mods: bots: stall map (so far this map, %u cells, standing past %.0f s): the worst:", (unsigned)worst.size(), kIdleFrom / 1000.0f);
+	for (size_t i = 0; i < worst.size() && i < 10 && worst[i].first >= 5.0f; i++) {
+		const IdleCell& c = *worst[i].second;
+		XLS_LOG_INFO("mods: bots:   at %.0f %.0f %.0f: %.0f s stalled on a path (waypoint %.0f %.0f %.0f), %.0f s with no path, ~%d bot(s).",
+		             c.pos[0], c.pos[1], c.pos[2], c.plan, c.way[0], c.way[1], c.way[2], c.noPlan, c.bots);
+	}
+}
+
 void Traverse(uint8_t* think, uint8_t* unit)
 {
 	uint8_t* game = *(uint8_t**)At(g_vas->game);
@@ -1668,6 +1974,7 @@ void Traverse(uint8_t* think, uint8_t* unit)
 				             (here[1] - g.grappleY) / 100.0f);
 			}
 		}
+		IdleTrack(g, unit, here, now, now - g.linkSeen <= kLinkFresh);
 		if (now - g.linkSeen > kLinkFresh) {
 			g.aimFrom = 0;
 			g.markAt = 0; // no move plan: standing isn't a stall
@@ -1752,7 +2059,7 @@ void Traverse(uint8_t* think, uint8_t* unit)
 		}
 		else {
 			g.aimFrom = 0;
-			if (g.hopFrom >= 0 && g.linkKind != kNavLaunch && now - g.hopProgress > kUnstickAfter && now - g.unstickAt > kUnstickRest &&
+			if (g.hopFrom >= 0 && g.linkKind != kNavLaunch && g.linkKind != kNavLadder && now - g.hopProgress > kUnstickAfter && now - g.unstickAt > kUnstickRest &&
 			    now - g.jumpAt > kJumpRest) {
 				press = kPadJump;
 				g.unstickAt = g.jumpAt = now;
@@ -1811,8 +2118,35 @@ struct AimState {
 	float e[3] = {}, ev[3] = {};      // the tracking error and its speed
 	float n[3] = {}, nGoal[3] = {};   // the wander
 	float targetSpeed = 0, ownSpeed = 0;
+	bool head = false;     // this spell aims at the head (else the body)
+	double headNext = 0;   // when to roll again
+	float pointUp = 0;     // the game's aim point above the target's feet (log)
 };
 AimState g_aim[16];
+
+// Where on a soldier a bot aims. The game's aim point is the head (bots were headshot machines), so most of the time the
+// point is lowered to the torso: kAimBody of the way up from the feet (crouching scales with it). A head spell is rolled
+// every kHeadRoll s, more likely the harder the difficulty.
+const float kAimBody = 0.62f;
+const float kHeadChance[4] = {0.05f, 0.15f, 0.35f, 0.60f}; // easy, normal, hard, veteran
+const double kHeadRoll = 1.5;
+
+void AimHeight(AimState& s, uint8_t* unit, double now)
+{
+	uint8_t* target = *(uint8_t**)(unit + g_vas->target);
+	if (!target || target[0x1f] != 1) { // soldiers only: a VS or an Akrid keeps the game's point
+		return;
+	}
+	if (now >= s.headNext || target != s.target) {
+		s.head = (Rand() % 1000) < (unsigned)(kHeadChance[BotMenuOptions().difficulty & 3] * 1000.0f);
+		s.headNext = now + kHeadRoll + (Rand() % 1000) / 1000.0;
+	}
+	float feet = ((const float*)(target + 0xd0))[1], up = s.truth[1] - feet;
+	s.pointUp = up;
+	if (!s.head && up > 60.0f && up < 250.0f) {
+		s.truth[1] = feet + up * kAimBody;
+	}
+}
 
 double Seconds()
 {
@@ -1898,8 +2232,9 @@ void AimApply(AimState& s, uint8_t* unit, float* aim, uint8_t slot, double now)
 	if (GetTickCount() - logged > 2000 && lines < 40) { // a sample every 2 s, the first 40: enough to judge the numbers
 		logged = GetTickCount();
 		lines++;
-		XLS_LOG_INFO("mods: bots: aim: slot %u aims %.0f cm off at %.1f m (target moving %.1f m/s, itself %.1f m/s).", slot,
-		             sqrtf(Distance2(aim, s.truth)), range / 100.0f, s.targetSpeed / 100.0f, s.ownSpeed / 100.0f);
+		XLS_LOG_INFO("mods: bots: aim: slot %u aims %.0f cm off at %.1f m (target moving %.1f m/s, itself %.1f m/s); the game's point "
+		             "%.0f cm above the feet, aiming at the %s.", slot, sqrtf(Distance2(aim, s.truth)), range / 100.0f,
+		             s.targetSpeed / 100.0f, s.ownSpeed / 100.0f, s.pointUp, s.head ? "head" : "body");
 	}
 }
 
@@ -1921,6 +2256,7 @@ void __attribute__((thiscall)) CursorFollow(uint8_t* cursor, uint8_t* unit, uint
 			// a frame the game left the point alone still has our error in it: its own point is the last one then
 			if (!s.has || s.unit != unit || memcmp(point, s.wrote, sizeof(s.wrote)) != 0) {
 				memcpy(s.truth, point, sizeof(s.truth));
+				AimHeight(s, unit, Seconds());
 			}
 			AimApply(s, unit, point, (uint8_t)slot, Seconds());
 		}
@@ -1930,6 +2266,7 @@ void __attribute__((thiscall)) CursorFollow(uint8_t* cursor, uint8_t* unit, uint
 
 uint32_t __attribute__((thiscall)) ThinkBody(uint8_t* think, uint8_t* unit)
 {
+	CostScope cost(kCostThink);
 	if (think[kThinkSlot] < 16 && unit) {
 		g_slotUnit[think[kThinkSlot]].store(unit, std::memory_order_relaxed); // whose bot it is (Personality)
 	}
@@ -2249,6 +2586,9 @@ void BotsSetMap(const MapPhysics* physics)
 		std::lock_guard<std::mutex> lock(g_personalityLock); // a new match: its units and slots are new
 		g_personality.clear();
 		memset(g_slotArchetype, 0, sizeof(g_slotArchetype));
+		for (SlotTraits& t : g_slotTraits) {
+			t = SlotTraits();
+		}
 	}
 	std::lock_guard<std::mutex> lock(g_goalLock);
 	g_goals.clear();

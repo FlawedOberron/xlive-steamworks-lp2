@@ -17,33 +17,38 @@
 //   equipping clears the mark. Other machines' messages can still name the object safely, and vf65 skips one we marked.
 // Each machine does this itself, for puppets too: no message says the weapon went, so a machine that doesn't see the touch keeps
 // showing it until someone there runs over it. Only the machine that owns a fighter adds its ammo.
+// Grenades: with none left (the grenade slot, 1, empty or at 0), running over a grenade of another kind takes it: the game's own
+// equip (DX11 FUN_009d3f80, thiscall(fighter, weapon, slot, quiet): what the pickup button and the network's weapon messages
+// call; it drops what the slot held, which is then hidden like a taken weapon). A grenade of the same kind refills as any gun.
 
 namespace xls::mods {
 
 namespace {
 
 struct Vas {
-	uint32_t scan, canTake, transfer, popup, popupThis, viewer, game, shift;
+	uint32_t scan, canTake, transfer, popup, popupThis, viewer, game, shift, equip;
 };
 const Vas kVas[kBuildCount] = {
-	{0x9db4c0, 0xc7acc0, 0xc7cee0, 0x859460, 0x1852144, 0x1852078, 0x18520c0, 0},
-	{0x9cbb00, 0xc6b0b0, 0xc6d2d0, 0x84a010, 0x18420a4, 0x1841fd8, 0x1842020, 0x10},
-	{0x9db3a0, 0xc7ace0, 0xc7cf00, 0x8596a0, 0x1853144, 0x1853078, 0x18530c0, 0},
-	{0x9cb7f0, 0xc6aca0, 0xc6cec0, 0x84a140, 0x18420a4, 0x1841fd8, 0x1842020, 0x10},
+	{0x9db4c0, 0xc7acc0, 0xc7cee0, 0x859460, 0x1852144, 0x1852078, 0x18520c0, 0, 0x9d3f80},
+	{0x9cbb00, 0xc6b0b0, 0xc6d2d0, 0x84a010, 0x18420a4, 0x1841fd8, 0x1842020, 0x10, 0x9c45c0},
+	{0x9db3a0, 0xc7ace0, 0xc7cf00, 0x8596a0, 0x1853144, 0x1853078, 0x18530c0, 0, 0x9d3ee0},
+	{0x9cb7f0, 0xc6aca0, 0xc6cec0, 0x84a140, 0x18420a4, 0x1841fd8, 0x1842020, 0x10, 0x9c4340},
 };
 const uint8_t kPrologue[] = {0x55, 0x8b, 0xec, 0x83, 0xe4, 0xf0};
-const int kKindHuman = 1, kKindWeapon = 4, kKindHandgun = 0x0c, kSlots = 8, kPopupAmmo = 0x13;
+const int kKindHuman = 1, kKindWeapon = 4, kKindHandgun = 0x0c, kSlots = 8, kPopupAmmo = 0x13, kGrenadeSlot = 1;
 const float kReach = 120.0f, kReachUp = 200.0f; // cm: vf65 runs well before a weapon is underfoot
 
 using ScanFn = void(__attribute__((thiscall)) *)(uint8_t*, int, int, uint8_t*);
 using CanTakeFn = uint32_t(__attribute__((thiscall)) *)(uint8_t*);
 using TransferFn = uint32_t(__attribute__((thiscall)) *)(uint8_t*, int, int);
 using PopupFn = void(__attribute__((thiscall)) *)(void*, int, int, uint32_t, int, int, int);
+using EquipFn = void(__attribute__((thiscall)) *)(uint8_t*, uint8_t*, int, int);
 
 ScanFn g_scan = nullptr;
 CanTakeFn g_canTake = nullptr;
 TransferFn g_transfer = nullptr;
 PopupFn g_popup = nullptr;
+EquipFn g_equip = nullptr;
 void** g_popupThis = nullptr;
 uint8_t** g_viewer = nullptr;
 uint8_t** g_game = nullptr;
@@ -85,6 +90,11 @@ bool Near(const uint8_t* a, const uint8_t* b)
 	return dx * dx + dz * dz < kReach * kReach && dy * dy < kReachUp * kReachUp;
 }
 
+bool GrenadeKind(uint8_t kind)
+{
+	return kind == 8 || (kind >= 0x15 && kind <= 0x19);
+}
+
 // True when the weapon was taken.
 bool Touch(uint8_t* fighter, uint8_t* weapon)
 {
@@ -103,11 +113,13 @@ bool Touch(uint8_t* fighter, uint8_t* weapon)
 		uint8_t role = fighter[0xcd0 - g_shift];
 		if (!handgun && role != 2 && role != 3) {
 			// the game's ammo add (FUN_00c7aa20) also tops up the magazine (+0x20fc, the total +0x20fe includes it); a quick
-			// resupply only adds to the reserve, so the magazine stays as it was and the reload is still the player's
+			// resupply only adds to the reserve, so the magazine stays as it was and the reload is still the player's. Not
+			// for grenades: they're thrown from the "magazine" and never reload, so one kept at 0 locked the grenade button
+			// (user test 2026-11-13)
 			int16_t& mag = *(int16_t*)(mine + 0x20fc - g_shift);
 			int16_t before = mag;
 			g_transfer(mine, ammo, 0);
-			if (before >= 0 && mag > before) {
+			if (!GrenadeKind(weapon[0x1e]) && before >= 0 && mag > before) {
 				mag = before;
 			}
 		}
@@ -126,6 +138,44 @@ bool Touch(uint8_t* fighter, uint8_t* weapon)
 	return false;
 }
 
+// True when the grenade was taken in place of an empty one of another kind.
+bool GrenadeSwap(uint8_t* fighter, uint8_t* weapon)
+{
+	if (!g_equip || !GrenadeKind(weapon[0x1e])) {
+		return false;
+	}
+	auto** slots = (uint8_t**)(fighter + 0x1688 - g_shift);
+	uint8_t* mine = slots[kGrenadeSlot];
+	if (mine && !Live(mine)) {
+		return false;
+	}
+	uint32_t id = *(uint32_t*)(weapon + 0x1c);
+	if (mine && *(uint32_t*)(mine + 0x1c) >> 8 == id >> 8) {
+		return false; // the same kind: refilled by Touch
+	}
+	if (!mine && RulesSpawning()) {
+		// a body being spawned has no grenade yet: the spawn (another thread) puts the player's own in a moment, and one taken
+		// from the floor meanwhile was lost with it (user test 2026-11-13: spawned with no grenades)
+		return false;
+	}
+	int16_t left = mine ? *(int16_t*)(mine + 0x20fe - g_shift) : 0;
+	int16_t has = *(int16_t*)(weapon + 0x20fe - g_shift);
+	if (left > 0 || has <= 0) {
+		return false;
+	}
+	g_equip(fighter, weapon, kGrenadeSlot, 0);
+	bool took = slots[kGrenadeSlot] == weapon;
+	if (took && mine && Live(mine) && !*(uint8_t**)(mine + 0x24)) {
+		Hide(mine); // the empty one the equip dropped
+	}
+	static std::atomic<int> logged{0};
+	if (logged.fetch_add(1) < 20) {
+		XLS_LOG_INFO("mods: resupply: grenades: %s %08x (%d) for an empty %08x.", took ? "took" : "couldn't take", id, has,
+		             mine ? *(uint32_t*)(mine + 0x1c) : 0);
+	}
+	return took;
+}
+
 void __attribute__((thiscall)) Scan(uint8_t* fighter, int a, int b, uint8_t* other)
 {
 	if (g_on && other && fighter && g_game && *g_game && (*g_game)[0x256] && other[0x1f] == kKindWeapon && Live(other) &&
@@ -133,7 +183,7 @@ void __attribute__((thiscall)) Scan(uint8_t* fighter, int a, int b, uint8_t* oth
 		if (Marked(other)) {
 			return;
 		}
-		if (fighter[0x1f] == kKindHuman && Near(fighter, other) && Touch(fighter, other)) {
+		if (fighter[0x1f] == kKindHuman && Near(fighter, other) && (GrenadeSwap(fighter, other) || Touch(fighter, other))) {
 			return;
 		}
 	}
@@ -168,6 +218,7 @@ void ResupplyInstall(uint8_t* base, int build)
 	g_transfer = (TransferFn)at(v.transfer);
 	g_popup = (PopupFn)at(v.popup);
 	g_popupThis = (void**)at(v.popupThis);
+	g_equip = (EquipFn)at(v.equip);
 	g_viewer = (uint8_t**)at(v.viewer);
 	g_game = (uint8_t**)at(v.game);
 	g_scan = (ScanFn)Detour(at(v.scan), kPrologue, sizeof(kPrologue), (void*)&Scan);

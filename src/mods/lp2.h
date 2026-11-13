@@ -29,6 +29,17 @@ void CountedFree(void* p);
 // Hooks the game's file opens so files in enabled mod folders replace the game's own
 // (mods/<name>/nativePC/... overrides <game>/nativePC/...). Called from DllMain.
 void OverlayInstall();
+// ui.cpp frame watch: frames much slower than the running average are logged with the time our hooks took in them
+// (a CostScope at the top of a hook adds its time; scopes can nest: think includes the routing it calls).
+enum CostKind { kCostThink, kCostRoute, kCostPath, kCostHit, kCostRadar, kCostKinds };
+void CostAdd(int kind, int64_t ticks);
+int64_t CostNow();
+struct CostScope {
+	int kind;
+	int64_t at;
+	explicit CostScope(int k) : kind(k), at(CostNow()) {}
+	~CostScope() { CostAdd(kind, CostNow() - at); }
+};
 // ui.cpp: our own UI drawn over the game each frame (Dear ImGui). A layer draws with ImGui (width, height = the back
 // buffer); none draws anything unless it chooses to. UiFont: our normal and large fonts (nullptr before the first frame).
 using UiDrawFn = void (*)(float width, float height);
@@ -128,6 +139,7 @@ bool RulesEliminated(int slot);
 bool RulesInPlay(int slot);
 int RulesTeamOf(int slot);           // the lobby's team (0 / 1), -1 none
 bool RulesTeams();                   // a team game type
+bool RulesSpawning();                // a spawn is being set up (on another thread): its slots are still being filled
 void ZonesSetMap(const struct MapPhysics* physics);
 int ZonesShow(const char* pattern, bool show, uint32_t rgb, float height, float seconds);
 void ZonesPack(std::vector<uint8_t>* m);
@@ -154,14 +166,31 @@ struct BotOptions {
 BotOptions BotMenuOptions();
 void RadarInstall(uint8_t* base, int build); // radar.cpp
 void ResupplyInstall(uint8_t* base, int build); // resupply.cpp
+void CareerInstall(uint8_t* base, int build); // career.cpp: bot matches add to the career points
 void ResupplySet(bool on);
 uint8_t* ResupplyViewerBody(); // the local player's character, or nullptr
 struct RadarShotInfo {
 	float pos[3];
+	float dir[2]; // the shooter's facing then (x, z, unit length; 0, 0 unknown): UnitFacing
 	uint8_t* who; // compare only: it may be gone
 	uint8_t team;
 	unsigned long at;
 };
+// A unit's facing seen from above (x, z, unit length): its world matrix's Z row (uCoord: matrix at +0xa0, rows X Y Z,
+// then the position at +0xd0, which everything here reads). False when the row is degenerate.
+inline bool UnitFacing(const uint8_t* unit, float out[2])
+{
+	const float* z = (const float*)(unit + 0xc0);
+	float n = z[0] * z[0] + z[2] * z[2];
+	if (!(n > 1e-6f) || n > 1e6f) {
+		out[0] = out[1] = 0.0f;
+		return false;
+	}
+	n = 1.0f / __builtin_sqrtf(n);
+	out[0] = z[0] * n;
+	out[1] = z[2] * n;
+	return true;
+}
 int RadarRecentShots(RadarShotInfo* out, int max, unsigned long age); // gunfire in the last age ms, newest not first
 // mode: 0 Always On, 1 Near Data Post, 2 Hidden; players / vs: 0 Always, 1 Moving, 2 Running, 3 Shooting; team: 1 = blips in team colours (own blue, enemy red)
 void RadarRulesSet(int mode, int players, int vs, int team);
@@ -171,13 +200,13 @@ void VoiceRulesSet(int team, int enemy);
 void VoiceFrame(); // every battle HUD frame, game thread, after the life reports
 // respawn.cpp: Spawning rules (pick 0 Default / 1 Random / 2 Safe / 3 Unsafe; area 0 Whole Map / 1 Near Allies / 2 Zones:
 // Set / 3 Zones: Dynamic; distance 0 Any / 1 Near / 2 Medium / 3 Far; posts 0 Default / 1 Add Nearby Points / 2 Ignored).
-// Before / After wrap the player controller's update (rules.cpp) for the players this PC runs; Frame every battle HUD frame.
+// After follows the player controller's update (rules.cpp) for the players this PC runs (free: not held by survival or
+// rounds); Frame every battle HUD frame.
 void RespawnInit(unsigned char* base, unsigned char** game);
 void RespawnRulesSet(int pick, int area, int distance, int posts);
 void RespawnSetMap(const struct MapPhysics* physics);
 void RespawnFrame();
-void RespawnBefore(unsigned char* ctl, int slot);
-void RespawnAfter(unsigned char* ctl, int slot);
+void RespawnAfter(unsigned char* ctl, int slot, bool free);
 float VoiceGain(uint64_t xuid); // any thread: how loud this talker is played here now (0 not at all)
 void RulesNextCreateIsBotMatch(); // the next create screen comes from the Multiplayer screen's Bot Match (rules.cpp)
 bool BotsInPlayerMatch(); // this machine hosts a player match with bots filled in (rules.cpp)

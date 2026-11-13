@@ -574,7 +574,7 @@ bool ReadManifest(const Zip& zip, const std::wstring& label, MapPackage* map)
 			l.from = (int)e["from"].GetInt(-1);
 			l.to = (int)e["to"].GetInt(-1);
 			const std::string kind = e["kind"].GetString("walk");
-			l.kind = kind == "jump" ? kNavJump : kind == "drop" ? kNavDrop : kind == "grapple" ? kNavGrapple : kind == "launch" ? kNavLaunch : kNavWalk;
+			l.kind = kind == "jump" ? kNavJump : kind == "drop" ? kNavDrop : kind == "grapple" ? kNavGrapple : kind == "launch" ? kNavLaunch : kind == "ladder" ? kNavLadder : kNavWalk;
 			l.length = (float)e["length"].GetNumber(0.0);
 			if (l.from >= 0 && l.from < count && l.to >= 0 && l.to < count && vec3(e["a"], l.a) && vec3(e["b"], l.b)) {
 				map->physics.nav.links.push_back(l);

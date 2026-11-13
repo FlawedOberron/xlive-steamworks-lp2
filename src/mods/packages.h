@@ -281,7 +281,7 @@ struct ScriptGraph {
 void ParseScriptGraph(const Json& js, const std::wstring& label, ScriptGraph* out);
 
 // The bots' zones and links (map.json "nav_zones", lp2navmap.zones_and_links): bots.cpp routes zone to zone.
-enum NavKind { kNavWalk, kNavJump, kNavDrop, kNavGrapple, kNavLaunch };
+enum NavKind { kNavWalk, kNavJump, kNavDrop, kNavGrapple, kNavLaunch, kNavLadder, kNavKinds }; // ladder: walked, the game's pathing climbs (navmesh flag 0x8000)
 struct NavZone {
 	std::string name;
 	float pos[3];  // a spot on the walkable surface near its middle, cm

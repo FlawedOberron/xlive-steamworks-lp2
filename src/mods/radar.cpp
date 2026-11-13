@@ -28,11 +28,12 @@
 //   A grappling player reels faster than the run pace, so needs no case of its own; one hanging still counts as still.
 //
 // Team colours: the game draws blips itself (the radar Flash only has the frame). FUN_00ed8aa0 adds one, thiscall(radar, kind,
-// a, flags, float* pos, sub, b) -> slot index, into entry buffer +0x1bac (0x32 entries of 0x30 at radar+0x370 + buf*0x960:
+// a, flags, float* pos, sub, b) (returns a pointer, see Add), into entry buffer +0x1bac (0x32 entries of 0x30 at radar+0x370 + buf*0x960:
 // +0 kind, +2 flags, +3 sub, +0x10 pos). FUN_00edd730 reads the other buffer into the draw list (radar+0x1634, 0x1c each, count
 // +0x1c0c: +0 code, +4 sub, +0x14/+0x18 the entry's pos x/z), sorted. FUN_00ed8fb0 draws one, thiscall(radar, ctx, code, sub,
-// ...): code -> sprite + colour, then FUN_00ecc050 (sprite draw, colour its 7th argument). Players and VS (kinds 1-4) are codes
-// 5-7, all one green. Here: each add notes its unit's side by slot; after the list is built a player entry gets the side in
+// ...): code -> sprite + colour, then FUN_00ecc050 (sprite draw, colour its 7th argument). Players and VS: kinds 1-4 are codes
+// 5-7 (green), kinds 5-9 codes 8-0xb (the game's red enemy markers; in a bot match it adds teammates as kind 5 too), so both
+// ranges are recoloured. Here: each add notes its unit's side by slot; after the list is built a player entry gets the side in
 // its sub (unused for those codes), matched back to its entry by position; the draw passes our colour to the sprite draw.
 
 namespace xls::mods {
@@ -73,7 +74,8 @@ uint8_t** g_viewer = nullptr;
 std::atomic<int> g_mode{kRadarNear}, g_players{kShowAlways}, g_vs{kShowAlways}, g_team{1};
 
 enum { kSideNone, kSideOwn, kSideEnemy };
-const uint32_t kColourOwn = 0xff4c9cff, kColourEnemy = 0xffff4848; // ARGB: blue, red
+// ABGR, as the radar draw uses them (FUN_00ed8fb0: enemy codes 8-0xd 0xff4040ff red, code 0x21 0xffff8060 blue): blue, red
+const uint32_t kColourOwn = 0xffff8060, kColourEnemy = 0xff4040ff;
 const uint32_t kSideMark = 0x5a00; // in a draw entry's sub: kSideMark + side
 using AddFn = int(__attribute__((thiscall)) *)(uint8_t*, uint32_t, uint32_t, uint32_t, float*, uint32_t, uint32_t);
 using DrawFn = void(__attribute__((thiscall)) *)(uint8_t*, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
@@ -131,6 +133,7 @@ void MarkSides(uint8_t* radar, int read);
 
 uint32_t __attribute__((thiscall)) Check(void* posts, float* pos)
 {
+	CostScope cost(kCostRadar);
 	if (g_mode == kRadarAlways && Versus()) {
 		return 1;
 	}
@@ -216,6 +219,7 @@ void BlipAdd(uint8_t* unit)
 
 void __attribute__((thiscall)) Blip(uint8_t* unit)
 {
+	CostScope cost(kCostRadar);
 	int players = g_players, vs = g_vs;
 	if ((players == kShowAlways && vs == kShowAlways) || !Versus()) {
 		BlipAdd(unit);
@@ -245,9 +249,16 @@ void __attribute__((thiscall)) Blip(uint8_t* unit)
 
 int __attribute__((thiscall)) Add(uint8_t* radar, uint32_t kind, uint32_t a, uint32_t flags, float* pos, uint32_t sub, uint32_t b)
 {
-	int slot = g_addOriginal(radar, kind, a, flags, pos, sub, b);
+	CostScope cost(kCostRadar);
+	// The add returns a pointer on its usual path, not the entry: a new entry goes at the buffer's count (+0x1630 + buf * 2,
+	// raised by one); with the buffer full it replaces the farthest one and returns its index (when b is 0).
+	int buf = radar[0x1bac] & 1;
+	int before = *(int16_t*)(radar + 0x1630 + buf * 2);
+	int ret = g_addOriginal(radar, kind, a, flags, pos, sub, b);
+	int after = *(int16_t*)(radar + 0x1630 + buf * 2);
+	int slot = after == before + 1 ? before : (after == before && (uint8_t)b == 0 ? ret : -1);
 	if (slot >= 0 && slot < 0x32) {
-		g_sides[radar[0x1bac] & 1][slot] = (uint8_t)t_side;
+		g_sides[buf][slot] = (uint8_t)t_side;
 		static bool logged[16];
 		uint8_t k = (uint8_t)kind;
 		if (t_side != kSideNone && k < 16 && !logged[k]) { // which kinds own team and enemies use
@@ -255,10 +266,10 @@ int __attribute__((thiscall)) Add(uint8_t* radar, uint32_t kind, uint32_t a, uin
 			XLS_LOG_INFO("mods: radar: blip kind %u for %s.", (unsigned)k, t_side == kSideOwn ? "own team" : "an enemy");
 		}
 	}
-	return slot;
+	return ret;
 }
 
-// After the draw list is built: a player / VS entry (codes 5-7) gets its unit's side, found by position in the buffer it came from.
+// After the draw list is built: a player / VS entry (codes 5-0xb) gets its unit's side, found by position in the buffer it came from.
 void MarkSides(uint8_t* radar, int read)
 {
 	int count = *(int32_t*)(radar + 0x1c0c);
@@ -269,13 +280,13 @@ void MarkSides(uint8_t* radar, int read)
 	for (int i = 0; i < count; i++) {
 		uint8_t* d = radar + 0x1634 + i * 0x1c;
 		int code = d[0] & 0x7f;
-		if (code < 5 || code > 7) {
+		if (code < 5 || code > 0xb) {
 			continue;
 		}
 		float x = *(float*)(d + 0x14), z = *(float*)(d + 0x18);
 		for (int j = 0; j < entries; j++) {
 			uint8_t* e = radar + 0x370 + (read * 0x32 + j) * 0x30;
-			if (e[0] >= 1 && e[0] <= 4 && *(float*)(e + 0x10) == x && *(float*)(e + 0x18) == z) {
+			if (e[0] >= 1 && e[0] <= 9 && *(float*)(e + 0x10) == x && *(float*)(e + 0x18) == z) {
 				if (g_sides[read][j] != kSideNone) {
 					*(uint32_t*)(d + 4) = kSideMark + g_sides[read][j];
 				}
@@ -287,7 +298,8 @@ void MarkSides(uint8_t* radar, int read)
 
 void __attribute__((thiscall)) Draw(uint8_t* radar, uint32_t ctx, uint32_t code, uint32_t sub, uint32_t a, uint32_t x, uint32_t y, uint32_t b, uint32_t scale)
 {
-	if (code >= 5 && code <= 7 && (sub == kSideMark + kSideOwn || sub == kSideMark + kSideEnemy)) {
+	uint32_t c = code & 0x7f;
+	if (c >= 5 && c <= 0xb && (sub == kSideMark + kSideOwn || sub == kSideMark + kSideEnemy)) {
 		t_colour = sub == kSideMark + kSideOwn ? kColourOwn : kColourEnemy;
 		g_drawOriginal(radar, ctx, code, 0, a, x, y, b, scale);
 		t_colour = 0;
@@ -308,13 +320,22 @@ std::mutex g_shotLock;
 
 void __attribute__((thiscall)) Shot(uint8_t* weapon)
 {
+	CostScope cost(kCostRadar);
 	if (Versus()) {
 		uint8_t* who = *(uint8_t**)(weapon + g_vas->holder);
 		if (who) {
 			std::lock_guard<std::mutex> lock(g_shotLock);
 			RadarShotInfo& s = g_shots[g_shotNext++ % 32];
 			memcpy(s.pos, who + kUnitPos, sizeof(s.pos));
+			UnitFacing(who, s.dir);
 			s.who = who;
+			static bool told = false;
+			if (!told) { // the facing is read from the world matrix's Z row: one line to check it against the quaternion at +0x40
+				told = true;
+				const float* q = (const float*)(who + 0x40);
+				float fx = 2.0f * (q[0] * q[2] + q[3] * q[1]), fz = 1.0f - 2.0f * (q[0] * q[0] + q[1] * q[1]);
+				XLS_LOG_INFO("mods: radar: first shot: facing %.2f %.2f (matrix), %.2f %.2f (quaternion %.2f %.2f %.2f %.2f).", s.dir[0], s.dir[1], fx, fz, q[0], q[1], q[2], q[3]);
+			}
 			s.team = who[g_vas->team];
 			s.at = GetTickCount();
 		}

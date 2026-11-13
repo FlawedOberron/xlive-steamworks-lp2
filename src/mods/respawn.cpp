@@ -16,16 +16,17 @@
 #include <string>
 #include <vector>
 
-// Spawning rules (Game Options > Spawning). Default leaves the game's respawn as it is: the death view, then the respawn
-// dialog (its countdown, where the player picks a base or an owned data post), then the spawn. The instant picks keep the
-// countdown's length but spend it in the death view, skip the dialog, and put the new character at a point of ours:
+// Spawning rules (Game Options > Spawning). Default leaves the game's respawn as it is: the death camera, then the
+// respawn menu (pick a base or an owned data post, with its own timer), then the spawn. The instant picks keep the death
+// camera, skip the menu and put the new character at a point of ours:
 //
-//   Controller (rules.cpp ControlUpdate; DX11 FUN_008ff650) +0x19 state: 1 death view (timers +0xfc / +0x100), 2 sets
-//   3 and clears the pick's own state (+0x64), 3 the dialog counting +0x104 down, 4 the pick handshake (FUN_008fa660 on
-//   +0x64, talks to the host), 5 the spawn (FUN_008fb130, then the character is put at the chosen point), 6 alive.
-//   On state 2 (the countdown just set by state 1) we hold the death view for that long (state 1, timers = what's left),
-//   then go straight to 4 with +0x64 cleared, as state 2 / 3 would have; once the spawn has run (state 6 or later) the
-//   character is moved to our point (CharacterTeleport, on the PC that runs that player: its own, the host its bots).
+//   Controller (rules.cpp ControlUpdate; DX11 FUN_008ff650) +0x19 state: 1 dead: +0x100 the death camera's timer, then
+//   the menu while +0xfc runs (the cockpit, uIdCockpitGFx FUN_00ee01e0, shows it while +0x100 <= 0 < +0xfc); 2 sets 3
+//   and clears the pick's own state (+0x64), 3 counts +0x104 down, 4 the spawn handshake (FUN_008fa660 on +0x64, talks
+//   to the host), 5 the spawn (FUN_008fb130, at the game's chosen point), 6 alive.
+//   Once the death camera's timer is done (RespawnAfter, right after the controller's update and before the cockpit's)
+//   both timers are cleared and the controller goes to 4 with +0x64 cleared; once the spawn has run (state 6 or later)
+//   the character is moved to our point (CharacterTeleport, on the PC that runs that player: its own, the host its bots).
 //
 // Points:
 //   the match's start points: game +0x52e4 rInitPosSet (count +0x70, records +0x7c: pos +0x10, dir u16 degrees +0x20,
@@ -60,7 +61,7 @@ const int kBest = 3;                   // Safe / Unsafe: the pick is weighted am
 const uint32_t kGameSet = 0x52e4, kSetCount = 0x70, kSetArray = 0x7c, kRecPos = 0x10, kRecDir = 0x20, kRecKind = 0x26;
 const uint32_t kGameArea = 0xac, kGameVariant = 0x255, kGameVersus = 0x256, kGameMap = 0x25a;
 const uint32_t kTableCount = 0xd6c, kTableOwner = 0xd80, kTablePos = 0xe80, kTablePostBase = 0x4e90;
-const uint32_t kCtlState = 0x19, kCtlPick = 0x64, kCtlBody = 0x40, kCtlTimers = 0xfc, kCtlCountdown = 0x104;
+const uint32_t kCtlState = 0x19, kCtlPick = 0x64, kCtlBody = 0x40, kCtlTimers = 0xfc; // timers: +0xfc the menu, +0x100 the death camera
 const uint8_t kStateDeath = 1, kStateCount = 2, kStatePick = 4, kStateAlive = 6;
 
 // sResource (as mappics.cpp): the manager global (RVAs); its vf11 finds / loads (flags 0x80: find only), vf13 releases.
@@ -98,7 +99,6 @@ std::vector<Death> g_deaths, g_spawns;
 LifeState g_lastState[16] = {};
 float g_lastPos[16][3] = {};
 bool g_hasPos[16] = {};
-DWORD g_waitUntil[16] = {};
 struct Pending {
 	bool on = false;
 	Point at;
@@ -539,7 +539,6 @@ void RespawnSetMap(const MapPhysics* physics)
 	for (int s = 0; s < 16; s++) {
 		g_lastState[s] = LifeState::None;
 		g_hasPos[s] = false;
-		g_waitUntil[s] = 0;
 		g_pending[s].on = false;
 	}
 	if (!g_zones.empty()) {
@@ -579,50 +578,38 @@ void RespawnFrame()
 	ZonesTick(dt);
 }
 
-void RespawnBefore(unsigned char* ctl, int slot)
+// Called after the controller's update (rules.cpp), on the PC that runs this player. free: no survival hold or
+// round-out wait on it. The respawn menu (the cockpit, uIdCockpitGFx, FUN_00ee01e0) shows while the death view's
+// camera timer (+0x100) has run out and its menu timer (+0xfc) hasn't; state 1 goes on to 2 when the menu timer runs
+// out or the pick is confirmed. So the moment the camera timer is done (or the game went to 2 itself) both timers are
+// cleared and the controller goes straight to the spawn handshake (4) in this same update, before the cockpit's.
+void RespawnAfter(unsigned char* ctl, int slot, bool free)
 {
+	if (!ctl || slot < 0 || slot >= 16) {
+		return;
+	}
 	uint8_t* game = Game();
-	if (!ctl || slot < 0 || slot >= 16 || !On(game)) {
-		if (slot >= 0 && slot < 16) {
-			g_waitUntil[slot] = 0;
+	float* timers = (float*)(ctl + kCtlTimers);
+	bool viewDone = ctl[kCtlState] == kStateDeath && !(timers[1] > 0.0f);
+	if (free && On(game) && (viewDone || ctl[kCtlState] == kStateCount) && !g_pending[slot].on) {
+		Point p;
+		std::string why;
+		g_pending[slot].on = Choose(game, slot, &p, &why);
+		if (g_pending[slot].on) {
+			g_pending[slot].at = p;
+			g_pending[slot].since = GetTickCount();
+			XLS_LOG_INFO("mods: respawn: player %d -> %s at %.0f %.0f %.0f (%s).", slot, PointName(p), p.pos[0], p.pos[1], p.pos[2], why.c_str());
 		}
+		else {
+			XLS_LOG_INFO("mods: respawn: player %d: no point of ours (%s), the game's own spawn.", slot, why.c_str());
+		}
+		timers[0] = 0.0f;
+		timers[1] = 0.0f;
+		*(int32_t*)(ctl + kCtlPick) = 0; // as state 2 does
+		ctl[kCtlState] = kStatePick;     // the menu and the countdown skipped
 		return;
 	}
-	if (ctl[kCtlState] != kStateCount) {
-		return;
-	}
-	DWORD now = GetTickCount();
-	if (!g_waitUntil[slot]) {
-		float count = *(float*)(ctl + kCtlCountdown); // what state 1 just set for the dialog
-		count = count == count ? std::clamp(count, 0.0f, 30.0f) : 0.0f;
-		g_waitUntil[slot] = now + (DWORD)(count * 1000.0f) + 1;
-	}
-	if ((LONG)(g_waitUntil[slot] - now) > 0) { // the death view goes on for the countdown's length
-		float left = (g_waitUntil[slot] - now) / 1000.0f;
-		ctl[kCtlState] = kStateDeath;
-		((float*)(ctl + kCtlTimers))[0] = left;
-		((float*)(ctl + kCtlTimers))[1] = left;
-		return;
-	}
-	g_waitUntil[slot] = 0;
-	Point p;
-	std::string why;
-	g_pending[slot].on = Choose(game, slot, &p, &why);
-	if (g_pending[slot].on) {
-		g_pending[slot].at = p;
-		g_pending[slot].since = now;
-		XLS_LOG_INFO("mods: respawn: player %d -> %s at %.0f %.0f %.0f (%s).", slot, PointName(p), p.pos[0], p.pos[1], p.pos[2], why.c_str());
-	}
-	else {
-		XLS_LOG_INFO("mods: respawn: player %d: no point of ours (%s), the game's own spawn.", slot, why.c_str());
-	}
-	*(int32_t*)(ctl + kCtlPick) = 0; // as state 2 does
-	ctl[kCtlState] = kStatePick;     // the dialog skipped
-}
-
-void RespawnAfter(unsigned char* ctl, int slot)
-{
-	if (!ctl || slot < 0 || slot >= 16 || !g_pending[slot].on) {
+	if (!g_pending[slot].on) {
 		return;
 	}
 	Pending& p = g_pending[slot];

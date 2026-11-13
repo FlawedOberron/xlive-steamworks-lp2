@@ -272,8 +272,64 @@ bool Anything()
 	return !g_layers.empty();
 }
 
+// Frame watch: the time from one Present to the next. A frame over kSlowFrameMs and kSlowFrameTimes the running average
+// is logged with what our hooks took in it (at most one line per kSlowLogMs; the ones skipped are counted). Frames over
+// kLoadFrameMs are loads, not spikes. Our hooks taking over kOwnSlowMs in one frame is logged too, slow or not.
+std::atomic<int64_t> g_cost[kCostKinds];
+std::atomic<int> g_costCalls[kCostKinds];
+const double kSlowFrameMs = 40.0, kSlowFrameTimes = 2.5, kLoadFrameMs = 1500.0, kOwnSlowMs = 6.0;
+const DWORD kSlowLogMs = 2000;
+
+void FrameWatch()
+{
+	static int64_t last = 0, freq = 0;
+	static double avg = 0.0;
+	static DWORD logged = 0;
+	static int skipped = 0, slowFrames = 0;
+	if (!freq) {
+		LARGE_INTEGER f;
+		QueryPerformanceFrequency(&f);
+		freq = f.QuadPart;
+	}
+	int64_t now = CostNow();
+	double ms = last ? (double)(now - last) * 1000.0 / (double)freq : 0.0;
+	last = now;
+	double cost[kCostKinds];
+	int calls[kCostKinds];
+	double ours = 0.0;
+	for (int k = 0; k < kCostKinds; k++) {
+		cost[k] = (double)g_cost[k].exchange(0) * 1000.0 / (double)freq;
+		calls[k] = g_costCalls[k].exchange(0);
+		ours += k == kCostRoute ? 0.0 : cost[k]; // the routing runs inside the think
+	}
+	if (ms <= 0.0 || ms > kLoadFrameMs) {
+		return;
+	}
+	bool slow = avg > 0.0 && ms > kSlowFrameMs && ms > avg * kSlowFrameTimes;
+	if (slow) {
+		slowFrames++;
+	}
+	if (slow || ours > kOwnSlowMs) {
+		if (GetTickCount() - logged >= kSlowLogMs) {
+			logged = GetTickCount();
+			XLS_LOG_INFO("mods: frame: %s %.1f ms (average %.1f ms, %d slow frames so far, %d not logged); our hooks: bot think %.2f ms (%d), "
+			             "routing %.2f ms (%d, in the think), path steps %.2f ms (%d), hits %.2f ms (%d), radar %.2f ms (%d).",
+			             slow ? "slow frame" : "our hooks slow in a frame of", ms, avg, slowFrames, skipped, cost[kCostThink], calls[kCostThink],
+			             cost[kCostRoute], calls[kCostRoute], cost[kCostPath], calls[kCostPath], cost[kCostHit], calls[kCostHit], cost[kCostRadar], calls[kCostRadar]);
+			skipped = 0;
+		}
+		else {
+			skipped++;
+		}
+	}
+	if (!slow) {
+		avg = avg > 0.0 ? avg * 0.97 + ms * 0.03 : ms;
+	}
+}
+
 HRESULT STDMETHODCALLTYPE Present9(IDirect3DDevice9* dev, const RECT* a, const RECT* b, HWND w, const RGNDATA* r)
 {
+	FrameWatch();
 	if (!g_failed && Anything()) {
 		if (!g_dev9) {
 			g_dev9 = dev;
@@ -345,6 +401,9 @@ void ReleaseTarget11()
 
 HRESULT STDMETHODCALLTYPE Present11(IDXGISwapChain* sc, UINT sync, UINT flags)
 {
+	if (!(flags & DXGI_PRESENT_TEST)) {
+		FrameWatch();
+	}
 	if (!g_failed && Anything() && !(flags & DXGI_PRESENT_TEST)) {
 		if (!g_dev11) {
 			DXGI_SWAP_CHAIN_DESC desc = {};
@@ -703,6 +762,21 @@ void UiInstall(int build)
 	if (thread) {
 		CloseHandle(thread);
 	}
+}
+
+void CostAdd(int kind, int64_t ticks)
+{
+	if (kind >= 0 && kind < kCostKinds) {
+		g_cost[kind] += ticks;
+		g_costCalls[kind]++;
+	}
+}
+
+int64_t CostNow()
+{
+	LARGE_INTEGER t;
+	QueryPerformanceCounter(&t);
+	return t.QuadPart;
 }
 
 }
