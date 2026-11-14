@@ -677,6 +677,7 @@ struct AirCount {
 	int used = 0;    // shots fired in the air since it last stood on the ground
 	int rno = 0;     // cJump Rno last frame
 	bool out = false; // the anchor out last frame (+0xcc0 bit 0x400000)
+	DWORD groundSince = 0; // standing (Rno 0 / 1, anchor in) since this tick, 0 while not
 };
 AirCount g_airCounts[16];
 bool g_airDx9 = false;
@@ -2205,8 +2206,18 @@ void AirGrappleFrame()
 			c.used++;
 			XLS_LOG_INFO("mods: rules: Air Grapple: player %d anchor shot in the air (%d of %d).", slot, c.used, g_airGrapple - 1);
 		}
-		if ((rno == 0 || rno == 1) && c.used) {
-			c.used = 0; // landed
+		// Rno reads 1 while hanging on the anchor too, so a landing is Rno 0 / 1 with the anchor in, held for a moment
+		bool standing = (rno == 0 || rno == 1) && !out;
+		DWORD now = GetTickCount();
+		if (!standing) {
+			c.groundSince = 0;
+		}
+		else if (!c.groundSince) {
+			c.groundSince = now | 1;
+		}
+		if (c.used && c.groundSince && now - c.groundSince >= 120) {
+			XLS_LOG_INFO("mods: rules: Air Grapple: player %d landed, count reset.", slot);
+			c.used = 0;
 		}
 		c.rno = rno;
 		c.out = out;
@@ -4816,6 +4827,7 @@ const LobbyRow kLobbyOwnRows[] = {
 	{"Weapons", "Quick Resupply", kLobbyOwn, 13},
 	{"Anchor", "Range", kLobbyOwn, 8},
 	{"Anchor", "Speed", kLobbyOwn, 9},
+	{"Anchor", "Air Grapple", kLobbyOwn, kOwnAirGrapple},
 	{"Radar", "Radar", kLobbyOwn, 5},
 	{"Radar", "Players Show", kLobbyOwn, 6},
 	{"Radar", "VS Show", kLobbyOwn, 7},
@@ -4885,6 +4897,34 @@ std::vector<LobbyLine> g_lobbyLines; // the draw's copy
 int g_lobbyCursorShown = 0;
 std::atomic<bool> g_lobbyPanelOpen{false}, g_lobbyHost{false};
 std::atomic<DWORD> g_lobbySeenAt{0};
+std::atomic<bool> g_lobbyPanelWant{false}; // the Ctrl shortcut menu's Change Match Settings asked for the panel
+
+// The Ctrl shortcut menu (uIdShortCutIcon, flash shortcut icons) entry 2, Change Match Settings: DX11 FUN_00f3cec0,
+// fastcall(menu) -> bool, opens the stock cut-in window 0x28 (0x29 in a Battle Series) when the menu's +0x1bc bit 2
+// says the entry is on (the host). In the lobby, as host, ours opens the Match Settings panel instead and answers
+// "nothing opened" (as a disabled entry does); the menu closes itself either way. Elsewhere the stock window opens.
+const uint32_t kShortcutSettings[kBuildCount] = {0xf3cec0, 0xf2d160, 0xf3d2f0, 0xf2d1f0};
+const uint8_t kShortcutSettingsPrologue[] = {0x56, 0x8b, 0xf1, 0x8b, 0x86, 0xbc, 0x01, 0x00, 0x00}; // push esi; mov esi,ecx; mov eax,[esi+0x1bc]
+typedef bool(__attribute__((fastcall)) * ShortcutFn)(uint8_t*);
+ShortcutFn g_shortcutSettingsOriginal = nullptr;
+
+extern "C" bool __attribute__((fastcall)) ShortcutSettings(uint8_t* menu)
+{
+	// The lobby's input doesn't run while this menu is up, so ask the session (not g_lobbyHost / g_lobbySeenAt). Outside a
+	// match (the lobby, or the results before it) the panel opens as soon as the lobby takes input again.
+	bool on = (*(uint32_t*)(menu + 0x1bc) >> 2) & 1;
+	bool host = g_isHost && g_lobbySession && *g_lobbySession && g_isHost(*g_lobbySession) == 1;
+	bool inMatch = GetTickCount() - g_hudSeenAt < 1000;
+	if (on && host && !inMatch) {
+		g_lobbyPanelWant = true;
+		XLS_LOG_INFO("mods: lobby settings: Change Match Settings (shortcut menu) -> our panel (%s).",
+		             GetTickCount() - g_lobbySeenAt < 3000 ? "lobby" : "opens back in the lobby");
+		return false;
+	}
+	XLS_LOG_INFO("mods: lobby settings: Change Match Settings (shortcut menu) -> stock window (entry %s, %s, %s).", on ? "on" : "off",
+	             host ? "host" : "not host", inMatch ? "in a match" : "not in a match");
+	return g_shortcutSettingsOriginal(menu);
+}
 int g_lobbyCursor = 0;
 bool g_lobbyChanged = false, g_lobbyStockChanged = false, g_lobbyCarry = false;
 uint8_t g_lobbyBlock[kBlockSize];      // the panel's copy of the rule block while it's open
@@ -4953,6 +4993,7 @@ std::string OwnValueName(int own, int v)
 	case kOwnSpawnPosts: return kSpawnPostNames[v % kSpawnPostValues];
 	case kOwnStaggerEvery: return kOccasionalNames[v % kOccasionalValues];
 	case kOwnSpawnTeng: return kTengNames[v % kTengCount];
+	case kOwnAirGrapple: return kAirGrappleNames[v % kAirGrappleValues];
 	case 11: return v ? std::to_string(v - 1) : "Default";
 	case 12: return v ? std::to_string(v) : "Default";
 	case 13: case 16: return v ? "On" : "Off";
@@ -5193,7 +5234,7 @@ bool LobbyPanelTick(uint8_t* screen)
 	bool toggle = key && !g_lobbyKeyWas;
 	g_lobbyKeyWas = key;
 	if (!g_lobbyPanelOpen) {
-		if (toggle) {
+		if (toggle || g_lobbyPanelWant.exchange(false)) {
 			LobbyPanelOpen();
 			return true;
 		}
@@ -5360,6 +5401,7 @@ bool LobbyWantsBots()
 	return g_matchBots && g_isHost && g_lobbySession && *g_lobbySession && g_isHost(*g_lobbySession) == 1;
 }
 
+void SoloSet(bool on);
 void __attribute__((thiscall)) LobbyInput(uint8_t* screen, int mode);
 void __attribute__((thiscall)) LobbyPrompt(uint8_t* screen, int mode);
 
@@ -5380,6 +5422,7 @@ void LobbyBoosted(uint8_t* screen, int mode, LobbyFn original)
 
 void __attribute__((thiscall)) LobbyInput(uint8_t* screen, int mode)
 {
+	SoloSet(LobbyWantsBots());
 	if (LobbyPanelTick(screen) && g_input && *g_input) {
 		// the panel has the input: the lobby runs on with none
 		uint32_t& pressed = *(uint32_t*)(*g_input + kInputPressed);
@@ -5500,6 +5543,141 @@ extern "C" void __attribute__((naked)) BotClass()
 	    "jmp *_g_botClassOriginal\n");
 }
 
+// A match with bots and one human: the stock game wants two network members. Its checks, patched only while the host's lobby
+// has bots (stock Player Matches keep them), were the DevTools plugin's solo_start, which the release zips never had
+// ("Failed to initiate game session", alert 0x66, at Start or at GO):
+//  - lobby confirm (FUN_00e969f0): mov eax,1 / mov eax,2 minimum members -> 0
+//  - match start (FUN_00e97690): occupied member slots must be more than one (jg -> jmp)
+//  - match start: the network member count (+0xa208) must be more than one (jg -> jmp)
+//  - in the match: the monitor (FUN_0100e1a0) ends it with reason 7 (not enough players / a team empty) from FUN_01008be0
+struct SoloByte {
+	uint8_t* at;
+	uint8_t stock, patched;
+};
+SoloByte g_soloBytes[4];
+int g_soloCount = 0;
+bool g_soloOn = false, g_soloForeign = false; // foreign: another patcher (DevTools solo_start) owns these bytes
+typedef int(__cdecl* ViableFn)();
+ViableFn g_viableOriginal = nullptr;
+
+bool SoloWrite(uint8_t* at, uint8_t value)
+{
+	DWORD old = 0;
+	if (!VirtualProtect(at, 1, PAGE_EXECUTE_READWRITE, &old)) {
+		return false;
+	}
+	*at = value;
+	VirtualProtect(at, 1, old, &old);
+	FlushInstructionCache(GetCurrentProcess(), at, 1);
+	return true;
+}
+
+bool MatchHasBots()
+{
+	uint8_t* slots = g_lobbySlots ? *g_lobbySlots : nullptr;
+	if (!slots) {
+		return false;
+	}
+	for (int i = 0; i < 16; i++) {
+		if (slots[kSlotAi + i * 0x7c]) {
+			return true;
+		}
+	}
+	return false;
+}
+
+extern "C" int __cdecl MatchViable()
+{
+	int reason = g_viableOriginal();
+	if (reason == 7 && (g_soloOn || MatchHasBots())) {
+		return 0;
+	}
+	return reason;
+}
+
+void SoloSet(bool on)
+{
+	if (on == g_soloOn || g_soloForeign || !g_soloCount) {
+		return;
+	}
+	for (int i = 0; i < g_soloCount; i++) {
+		if (*g_soloBytes[i].at != (g_soloOn ? g_soloBytes[i].patched : g_soloBytes[i].stock)) {
+			g_soloForeign = true;
+			XLS_LOG_INFO("mods: bots: the one-human start checks were changed by something else (DevTools solo_start?), left to it.");
+			return;
+		}
+	}
+	for (int i = 0; i < g_soloCount; i++) {
+		SoloWrite(g_soloBytes[i].at, on ? g_soloBytes[i].patched : g_soloBytes[i].stock);
+	}
+	g_soloOn = on;
+	XLS_LOG_INFO("mods: bots: one-human start checks %s.", on ? "off (the lobby has bots)" : "back to stock");
+}
+
+bool SoloMatches(const uint8_t* at, const uint8_t* bytes, const uint8_t* mask, size_t size)
+{
+	for (size_t i = 0; i < size; i++) {
+		if (mask[i] && at[i] != bytes[i]) {
+			return false;
+		}
+	}
+	return true;
+}
+
+void SoloInstall(uint8_t* base, int build)
+{
+	// mask 0 at the bytes we write, which DevTools may have written already (then its solo_start keeps them)
+	static const uint8_t kConfirm[] = {0x8b, 0x8e, 0xb0, 0x05, 0x00, 0x00, 0xb8, 0x01, 0x00, 0x00, 0x00, 0x74, 0x05, 0xb8, 0x02, 0x00, 0x00, 0x00, 0x3b, 0xc8, 0x0f, 0x8e};
+	static const uint8_t kConfirmMask[] = {1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1};
+	static const uint8_t kSlots[] = {0x05, 0xf0, 0x01, 0x00, 0x00, 0x2b, 0xd3, 0x75, 0, 0x3b, 0xcb, 0x7f, 0, 0x8b, 0x0d, 0, 0, 0, 0, 0x53, 0x52, 0x6a, 0x02, 0x6a, 0x66};
+	static const uint8_t kSlotsMask[] = {1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1};
+	static const uint8_t kNet[] = {0x83, 0xb8, 0x08, 0xa2, 0x00, 0x00, 0x01, 0x7f, 0, 0x8b, 0x0d, 0, 0, 0, 0, 0x6a, 0x01, 0x53, 0x6a, 0x02, 0x6a, 0x66};
+	static const uint8_t kNetMask[] = {1, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1};
+	static const uint8_t kViable[] = {0x38, 0x8b, 0x5f, 0x02, 0x00, 0x00, 0x0f, 0x85, 0, 0, 0, 0, 0x8b, 0xcd, 0xe8, 0, 0, 0, 0, 0x8b, 0xf0, 0x85, 0xf6, 0x0f, 0x84};
+	static const uint8_t kViableMask[] = {1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1};
+	static const uint32_t kConfirmAt[kBuildCount] = {0xe96c87, 0xe86bb7, 0xe970d7, 0xe87097};
+	static const uint32_t kSlotsAt[kBuildCount] = {0xe976c6, 0xe875f6, 0xe97b16, 0xe87ad6};
+	static const uint32_t kNetAt[kBuildCount] = {0xe9af70, 0xe8aea0, 0xe9b220, 0xe8b380};
+	static const uint32_t kViableAt[kBuildCount] = {0x100e4c0, 0xffe0e0, 0x100e7b0, 0xffe3f0};
+	uint8_t* confirm = base + (kConfirmAt[build] - 0x400000);
+	uint8_t* slots = base + (kSlotsAt[build] - 0x400000);
+	uint8_t* net = base + (kNetAt[build] - 0x400000);
+	uint8_t* viable = base + (kViableAt[build] - 0x400000);
+	bool ok = SoloMatches(confirm, kConfirm, kConfirmMask, sizeof(kConfirm)) && SoloMatches(slots, kSlots, kSlotsMask, sizeof(kSlots)) &&
+	          SoloMatches(net, kNet, kNetMask, sizeof(kNet));
+	if (ok) {
+		g_soloBytes[0] = {confirm + 7, 0x01, 0x00};
+		g_soloBytes[1] = {confirm + 14, 0x02, 0x00};
+		g_soloBytes[2] = {slots + 11, 0x7f, 0xeb};
+		g_soloBytes[3] = {net + 7, 0x7f, 0xeb};
+		g_soloCount = 4;
+		for (int i = 0; i < g_soloCount; i++) {
+			if (*g_soloBytes[i].at != g_soloBytes[i].stock) {
+				g_soloForeign = true;
+			}
+		}
+	}
+	bool hooked = false;
+	if (SoloMatches(viable, kViable, kViableMask, sizeof(kViable))) {
+		uint8_t* call = viable + 14;
+		g_viableOriginal = (ViableFn)(call + 5 + *(int32_t*)(call + 1));
+		int32_t rel = (int32_t)((uint8_t*)&MatchViable - (call + 5));
+		DWORD old = 0;
+		if (VirtualProtect(call + 1, 4, PAGE_EXECUTE_READWRITE, &old)) {
+			*(int32_t*)(call + 1) = rel;
+			VirtualProtect(call + 1, 4, old, &old);
+			FlushInstructionCache(GetCurrentProcess(), call + 1, 4);
+			hooked = true;
+		}
+	}
+	if (!ok || !hooked) {
+		XLS_LOG_WARN("mods: bots: one-human start checks not recognised (start %d, in match %d): a bot match with one human may fail to "
+		             "start.", ok, hooked);
+		return;
+	}
+	XLS_LOG_INFO("mods: bots: one-human start checks found%s.", g_soloForeign ? " (already changed by DevTools solo_start)" : "");
+}
+
 void BotsLobbyInstall(uint8_t* base, int build)
 {
 	static const uint32_t kBotClass[kBuildCount] = {0x7e3320, 0x7d4460, 0x7e3440, 0x7d45c0};
@@ -5543,7 +5721,12 @@ void BotsLobbyInstall(uint8_t* base, int build)
 	g_lobbyInputOriginal = (LobbyFn)Detour(base + (kInput[build] - 0x400000), kInputPrologue, sizeof(kInputPrologue), (void*)&LobbyInput);
 	g_lobbyPromptOriginal = (LobbyFn)Detour(base + (kPrompt[build] - 0x400000), kPromptPrologue, sizeof(kPromptPrologue), (void*)&LobbyPrompt);
 	g_lobbyStartOriginal = (LobbyTickFn)Detour(base + (kStart[build] - 0x400000), kStartPrologue, sizeof(kStartPrologue), (void*)&LobbyStart);
+	g_shortcutSettingsOriginal = (ShortcutFn)Detour(base + (kShortcutSettings[build] - 0x400000), kShortcutSettingsPrologue, sizeof(kShortcutSettingsPrologue), (void*)&ShortcutSettings);
+	if (!g_shortcutSettingsOriginal) {
+		XLS_LOG_WARN("mods: lobby settings: shortcut menu's Change Match Settings not found, it opens the stock window.");
+	}
 	g_lobbyLeaveOriginal = (LobbyTickFn)Detour(base + (kLeave[build] - 0x400000), kLeavePrologue, sizeof(kLeavePrologue), (void*)&LobbyLeave);
+	SoloInstall(base, build);
 	if (g_lobbyInputOriginal && g_input) {
 		UiAddLayer("lobby settings", LobbyPanelDraw);
 	}
