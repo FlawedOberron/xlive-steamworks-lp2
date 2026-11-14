@@ -172,6 +172,8 @@ const char* const kGrappleNames[] = {"Off", "1/4", "1/2", "Default", "2X", "3X",
 const float kGrappleScales[] = {0.0f, 0.25f, 0.5f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f};
 const int kGrappleDefault = 3, kAnchorSpeedDefault = 2, kAnchorSpeedValues = 12;
 const int kGrappleValues = (int)(sizeof(kGrappleScales) / sizeof(kGrappleScales[0]));
+const char* const kAirGrappleNames[] = {"Off", "Unlimited", "Max 1", "Max 2", "Max 3", "Max 4", "Max 5"}; // Air Grapple
+const int kAirGrappleValues = 7;
 // Hit Stagger: what a soldier does when a hit of each kind (bullet, explosion, anchor, melee) takes stagger points (see
 // StaggerAdd). The points only decide when, and one hit is enough for most, so the rows pick the reaction instead.
 // the pools: shrink = flinch, blown = knockdown, third = the electric stun (FUN_009b8bb0; user test 2026-11-09)
@@ -310,6 +312,7 @@ struct Rules {
 	int grenadeCount = 0;  // 0 the game's amounts, else 1 + the count (so 1 is none)
 	int grenadePickup = 0; // 0 the game's amounts, else the count
 	int quickResupply = 0; // running over a carried weapon takes its ammo (resupply.cpp)
+	int airGrapple = 0;    // Air Grapple: the anchor fires while jumping or falling too (kAirGrappleNames)
 	int rounds = 0;        // RoundsTotal index: 0-9 = 1-10 rounds, 10-13 = Best of 3/5/7/9
 	int switchEvery = 1;   // sides swap every this many rounds, 0 never
 };
@@ -339,6 +342,7 @@ std::atomic<int> g_botCount{15};
 std::atomic<int> g_botDifficulty{1}, g_botBrain{1}, g_botPersona{0}, g_botTaunts{2};
 std::atomic<bool> g_matchBots{false}, g_botsInMatch{false};
 std::atomic<int> g_roundsRule{0}, g_switchRule{1}, g_rounds{0}, g_switchEvery{1};
+std::atomic<int> g_airGrappleRule{0}, g_airGrapple{0};
 std::atomic<int> g_quickResupplyRule{0}, g_grenadeCountRule{0}, g_grenadePickupRule{0}, g_grenadeCount{0}, g_grenadePickup{0};
 thread_local int g_inSpawn = 0; // weapons set up during a spawn are the player's own, any other is a pickup
 std::atomic<int> g_spawnsRunning{0}; // spawns run on worker threads; resupply.cpp leaves empty grenade slots alone meanwhile
@@ -383,7 +387,7 @@ const uint8_t* WeaponEntry(const uint8_t* weapon)
 
 std::string Format(const Rules& r)
 {
-	return FormatA("ammo=%d;grenades=%d;secondary=%d;magazines=%d;survival=%d;lives=%d;team=%d;harmonizer=%d;grapple=%d;stagger=%d;radar=%d;detectp=%d;detectv=%d;anchor=%d;fall=%d;gcount=%d;gpick=%d;qres=%d;rnd=%d;sw=%d;rteam=%d;sexp=%d;sanc=%d;smel=%d;mshot=%d;mthr=%d;kpush=%d;vswmag=%d;vsmag=%d;shead=%d;sair=%d;sairh=%d;vteam=%d;venemy=%d;spawn=%d;sarea=%d;sdist=%d;spost=%d;socc=%d;steng=%d", r.ammo, r.grenades, r.secondary, r.supply, r.survival, r.lives, r.team, r.harmonizer, r.grapple, r.stagger, r.radar, r.detectPlayers, r.detectVs, r.anchorSpeed, r.fall, r.grenadeCount, r.grenadePickup, r.quickResupply, r.rounds, r.switchEvery, r.radarTeam, r.staggerExplosion, r.staggerAnchor, r.staggerMelee, r.massive, r.massiveThreshold, r.push, r.supplyVsWeapon, r.supplyVs, r.staggerHead, r.staggerAir, r.staggerAirHead, r.voiceTeam, r.voiceEnemy, r.spawnPick, r.spawnArea, r.spawnDistance, r.spawnPosts, r.staggerEvery, r.spawnTeng);
+	return FormatA("ammo=%d;grenades=%d;secondary=%d;magazines=%d;survival=%d;lives=%d;team=%d;harmonizer=%d;grapple=%d;stagger=%d;radar=%d;detectp=%d;detectv=%d;anchor=%d;fall=%d;gcount=%d;gpick=%d;qres=%d;rnd=%d;sw=%d;rteam=%d;sexp=%d;sanc=%d;smel=%d;mshot=%d;mthr=%d;kpush=%d;vswmag=%d;vsmag=%d;shead=%d;sair=%d;sairh=%d;vteam=%d;venemy=%d;spawn=%d;sarea=%d;sdist=%d;spost=%d;socc=%d;steng=%d;agr=%d", r.ammo, r.grenades, r.secondary, r.supply, r.survival, r.lives, r.team, r.harmonizer, r.grapple, r.stagger, r.radar, r.detectPlayers, r.detectVs, r.anchorSpeed, r.fall, r.grenadeCount, r.grenadePickup, r.quickResupply, r.rounds, r.switchEvery, r.radarTeam, r.staggerExplosion, r.staggerAnchor, r.staggerMelee, r.massive, r.massiveThreshold, r.push, r.supplyVsWeapon, r.supplyVs, r.staggerHead, r.staggerAir, r.staggerAirHead, r.voiceTeam, r.voiceEnemy, r.spawnPick, r.spawnArea, r.spawnDistance, r.spawnPosts, r.staggerEvery, r.spawnTeng, r.airGrapple);
 }
 
 Rules Parse(const std::string& s)
@@ -412,6 +416,7 @@ Rules Parse(const std::string& s)
 	r.grenadeCount = small("gcount=", 12, 0);
 	r.grenadePickup = small("gpick=", 11, 0);
 	r.quickResupply = small("qres=", 2, 0);
+	r.airGrapple = small("agr=", kAirGrappleValues, 0);
 	r.rounds = small("rnd=", 14, 0);
 	r.switchEvery = small("sw=", 11, 1);
 	r.detectPlayers = small("detectp=", 4, 0);
@@ -462,6 +467,7 @@ Rules Own()
 	r.grenadeCount = g_grenadeCountRule;
 	r.grenadePickup = g_grenadePickupRule;
 	r.quickResupply = g_quickResupplyRule;
+	r.airGrapple = g_airGrappleRule;
 	r.rounds = g_roundsRule;
 	r.switchEvery = g_switchRule;
 	r.staggerExplosion = g_staggerExplosionRule;
@@ -653,8 +659,81 @@ extern "C" void __attribute__((thiscall)) AnchorReel(void* human)
 	}
 }
 
+// Air Grapple: the player think's free-move handler (DX11 FUN_00928de0) asks for the anchor (FUN_00923af0(think,
+// character, 6, 0): weapon slot 6, pad bit 4) only when the character isn't jumping or falling: uCharacterBase vf119
+// (cJump Rno == 2, going up) and vf120 (Rno == 3, falling), called through the vtable (+0x1dc, +0x1e0) right before it.
+// Those two calls (mov r,[r+0x1dc]; mov ecx,esi; call r) become mov ecx,esi; call AirJumping / AirFalling, which say
+// "no" while the rule is on, else ask the character as before. Found by the anchor probe 2026-11-14 (a press in the air
+// arrives but the anchor-out bit 0x400000 never follows; on the ground it does the next frame).
+const uint32_t kAirGrappleAt[kBuildCount] = {0x929335, 0x9199a5, 0x9295f5, 0x919ba5}; // the vf119 call; vf120's is +0x10
+const uint8_t kAirJumpingCall[] = {0x8b, 0x82, 0xdc, 0x01, 0x00, 0x00, 0x8b, 0xce, 0xff, 0xd0}; // mov eax,[edx+0x1dc]; mov ecx,esi; call eax
+const uint8_t kAirFallingCall[] = {0x8b, 0x82, 0xe0, 0x01, 0x00, 0x00, 0x8b, 0xce, 0xff, 0xd0}; // the same with +0x1e0
+typedef bool(__attribute__((thiscall)) * CharacterCheckFn)(void*);
+
+// The rule: 0 Off, 1 Unlimited, 2..6 Max 1..5 anchor shots in the air, counted per character (AirGrappleFrame) and
+// reset when it's back on the ground.
+struct AirCount {
+	uint8_t* body = nullptr;
+	int used = 0;    // shots fired in the air since it last stood on the ground
+	int rno = 0;     // cJump Rno last frame
+	bool out = false; // the anchor out last frame (+0xcc0 bit 0x400000)
+};
+AirCount g_airCounts[16];
+bool g_airDx9 = false;
+
+bool AirAllowed(void* character)
+{
+	int rule = g_airGrapple;
+	if (rule <= 0) {
+		return false;
+	}
+	if (rule == 1) {
+		return true;
+	}
+	for (const AirCount& c : g_airCounts) {
+		if (c.body == character) {
+			return c.used < rule - 1;
+		}
+	}
+	return true; // not seen yet: nothing used
+}
+
+extern "C" bool __attribute__((thiscall)) AirJumping(void* character)
+{
+	return !AirAllowed(character) && ((CharacterCheckFn)(*(void***)character)[0x1dc / 4])(character);
+}
+
+extern "C" bool __attribute__((thiscall)) AirFalling(void* character)
+{
+	return !AirAllowed(character) && ((CharacterCheckFn)(*(void***)character)[0x1e0 / 4])(character);
+}
+
+void AirGrappleInstall(uint8_t* base, int build)
+{
+	g_airDx9 = build == 1 || build == 3;
+	uint8_t* sites[2] = {base + (kAirGrappleAt[build] - 0x400000), base + (kAirGrappleAt[build] - 0x400000) + 0x10};
+	if (memcmp(sites[0], kAirJumpingCall, sizeof(kAirJumpingCall)) != 0 || memcmp(sites[1], kAirFallingCall, sizeof(kAirFallingCall)) != 0) {
+		XLS_LOG_WARN("mods: rules: anchor jump check not found, the Air Grapple row has no effect.");
+		return;
+	}
+	void* fns[2] = {(void*)&AirJumping, (void*)&AirFalling};
+	for (int i = 0; i < 2; i++) {
+		uint8_t patch[10] = {0x8b, 0xce, 0xe8, 0, 0, 0, 0, 0x90, 0x90, 0x90}; // mov ecx,esi; call fn; nop x3
+		int32_t rel = (int32_t)((uint8_t*)fns[i] - (sites[i] + 7));
+		memcpy(patch + 3, &rel, 4);
+		DWORD old = 0;
+		if (VirtualProtect(sites[i], sizeof(patch), PAGE_EXECUTE_READWRITE, &old)) {
+			memcpy(sites[i], patch, sizeof(patch));
+			VirtualProtect(sites[i], sizeof(patch), old, &old);
+			FlushInstructionCache(GetCurrentProcess(), sites[i], sizeof(patch));
+		}
+	}
+	XLS_LOG_INFO("mods: rules: anchor jump check hooked (Air Grapple).");
+}
+
 void GrappleInstall(uint8_t* base, int build)
 {
+	AirGrappleInstall(base, build);
 	for (int i = 0; i < 2; i++) {
 		g_anchorFireOriginal[i] = (AnchorActionFn)Detour(base + (kAnchorFire[build][i] - 0x400000), kAnchorFirePrologue, sizeof(kAnchorFirePrologue), i == 0 ? (void*)&AnchorShot : (void*)&AnchorReel);
 		if (!g_anchorFireOriginal[i]) {
@@ -1330,6 +1409,7 @@ DWORD WINAPI SyncThread(LPVOID)
 		VoiceRulesSet(r.voiceTeam, r.voiceEnemy);
 		RespawnRulesSet(r.spawnPick, r.spawnArea, r.spawnDistance, r.spawnPosts);
 		ResupplySet(r.quickResupply != 0);
+		g_airGrapple = versus ? r.airGrapple : 0;
 		g_rounds = r.rounds;
 		g_switchEvery = r.switchEvery;
 		g_team = r.team;
@@ -2101,8 +2181,41 @@ void ReportLife(int slot);
 bool InPlay(int slot);
 bool TeamGame();
 
+// Air Grapple's Max counts, each frame for every character: an anchor shot that leaves while the character was going
+// up or falling (cJump Rno 2 / 3, DX11 +0x17c0, DX9 +0x17b0) counts; standing (Rno 0 / 1) resets the count.
+void AirGrappleFrame()
+{
+	if (g_airGrapple < 2) {
+		return;
+	}
+	for (int slot = 0; slot < 16; slot++) {
+		AirCount& c = g_airCounts[slot];
+		uint8_t* player = PlayerOf(slot);
+		uint8_t* body = player ? *(uint8_t**)(player + kPlayerBody) : nullptr;
+		if (body != c.body) {
+			c = AirCount();
+			c.body = body;
+		}
+		if (!body) {
+			continue;
+		}
+		int rno = *(const int*)(body + (g_airDx9 ? 0x17b0 : 0x17c0));
+		bool out = (*(const uint32_t*)(body + (g_airDx9 ? 0xcb0 : 0xcc0)) & 0x400000) != 0;
+		if (out && !c.out && (c.rno == 2 || c.rno == 3)) {
+			c.used++;
+			XLS_LOG_INFO("mods: rules: Air Grapple: player %d anchor shot in the air (%d of %d).", slot, c.used, g_airGrapple - 1);
+		}
+		if ((rno == 0 || rno == 1) && c.used) {
+			c.used = 0; // landed
+		}
+		c.rno = rno;
+		c.out = out;
+	}
+}
+
 void __attribute__((thiscall)) HudUpdate(uint8_t* hud)
 {
+	AirGrappleFrame();
 	g_hudSeenAt = GetTickCount();
 	int self = g_localIndex;
 	HeldTick();
@@ -3674,12 +3787,12 @@ const int kFillerArg = -1;         // a blank kKindHeader row filling a short pa
 enum SetupAction { kActNone, kActTypes, kActType, kActOptions, kActCreate, kActSection, kActDefault, kActProfile, kActBots, kActRadar, kActAnchor, kActStagger, kActSpawning, kActBack };
 const char* const kBotRuleKeys[] = {"bots", "botDifficulty", "botBrain", "botPersona", "botTaunts", "radar", "radarPlayers", "radarVs", "anchorRange", "anchorSpeed", "fallStagger", "grenadeCount", "grenadePickup", "quickResupply", "rounds", "switchSides", "radarTeam",
 	"explosionStagger", "anchorStagger", "meleeStagger", "massiveShot", "massiveThreshold", "knockdownPush", "vsWeaponSupply", "vsSupply", "headStagger", "airStagger", "airHeadStagger", "voiceTeam", "voiceEnemy",
-	"spawning", "spawnArea", "spawnDistance", "spawnPosts", "staggerEvery", "spawnTeng"};
+	"spawning", "spawnArea", "spawnDistance", "spawnPosts", "staggerEvery", "spawnTeng", "airGrapple"};
 const int kBotRuleCounts[] = {2, 4, 2, 6, 4, 3, 4, 4, 13, 12, kThresholdValues, 12, 11, 2, 14, 11, 2, kStaggerValues, kStaggerValues, kStaggerValues, kMassiveValues, kThresholdValues, kPushValues, kSupplyValues, kSupplyValues, kStaggerValues, kStaggerValues, kStaggerValues, kVoiceValues, kVoiceValues,
-	kSpawnValues, kSpawnAreaValues, kSpawnDistanceValues, kSpawnPostValues, kOccasionalValues, kTengCount};
+	kSpawnValues, kSpawnAreaValues, kSpawnDistanceValues, kSpawnPostValues, kOccasionalValues, kTengCount, kAirGrappleValues};
 const char* const kRadarNames[] = {"Always On", "Near Data Post", "Hidden"};
 const int kOwnVoiceTeam = 28, kOwnVoiceEnemy = 29; // extras indexes (kBotRuleKeys)
-const int kOwnSpawn = 30, kOwnSpawnArea = 31, kOwnSpawnDistance = 32, kOwnSpawnPosts = 33, kOwnStaggerEvery = 34, kOwnSpawnTeng = 35;
+const int kOwnSpawn = 30, kOwnSpawnArea = 31, kOwnSpawnDistance = 32, kOwnSpawnPosts = 33, kOwnStaggerEvery = 34, kOwnSpawnTeng = 35, kOwnAirGrapple = 36;
 const char* const kDetectNames[] = {"Always Show", "Moving & Shooting", "Running & Shooting", "Shooting"};
 struct SetupRow {
 	SetupKind kind;
@@ -3896,6 +4009,7 @@ void SetupBuild(const uint8_t* rules)
 		std::map<std::string, int>& x = GameRulesExtras();
 		navRow(kKindOwn, kActNone, 8, "Range", kGrappleNames[x["anchorRange"] % kGrappleValues]);
 		navRow(kKindOwn, kActNone, 9, "Speed", kGrappleNames[(x["anchorSpeed"] + 1) % kGrappleValues]);
+		navRow(kKindOwn, kActNone, kOwnAirGrapple, "Air Grapple", kAirGrappleNames[x["airGrapple"] % kAirGrappleValues]);
 		break;
 	}
 	case kSetupName:
@@ -4318,6 +4432,7 @@ void BotRulesSync()
 	g_grenadeCountRule = x["grenadeCount"];
 	g_grenadePickupRule = x["grenadePickup"];
 	g_quickResupplyRule = x["quickResupply"];
+	g_airGrappleRule = x["airGrapple"];
 	g_roundsRule = x["rounds"];
 	g_switchRule = x["switchSides"];
 	g_staggerExplosionRule = x["explosionStagger"];
