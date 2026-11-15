@@ -46,9 +46,11 @@ struct ArcEntry {
 	uint32_t classHash;
 	uint32_t flags; // top 3 bits of the size field
 	Bytes data;     // uncompressed
+	Bytes packed;   // with ArcRead(keepPacked): the entry's stream as read, written back as is (clear it when changing data)
 };
-bool ArcRead(const Bytes& file, std::vector<ArcEntry>* out);
-// Writes every entry as a zlib stream of stored blocks, which the game's inflate reads like any other.
+bool ArcRead(const Bytes& file, std::vector<ArcEntry>* out, bool keepPacked = false);
+// Writes every entry as a zlib stream of stored blocks, which the game's inflate reads like any other; an entry with
+// `packed` is written as those bytes (Capcom's own compression kept).
 Bytes ArcWrite(const std::vector<ArcEntry>& entries);
 bool ArcWriteFile(const std::wstring& path, const std::vector<ArcEntry>& entries); // the same, written as it goes (creates parent folders)
 uint32_t ClassHash(const char* className); // crc32 ^ ~0, low 31 bits

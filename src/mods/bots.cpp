@@ -2300,6 +2300,7 @@ bool BotsBuildBrains(std::vector<ArcEntry>* entries)
 	std::vector<ArcEntry> add;
 	for (const EmbeddedBrain& brain : kEmbeddedBrains) {
 		ArcEntry e = *stock;
+		e.packed.clear(); // new data: written uncompressed
 		e.name = std::string(kStockBrain) + "_" + brain.mode;
 		if (!BrainApply(stock->data, brain, &e.data)) {
 			XLS_LOG_WARN("mods: bots: embedded brain %s failed its check: Stock brains only.", brain.mode);

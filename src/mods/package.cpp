@@ -210,7 +210,7 @@ bool Zip::Read(const ZipEntry& e, Bytes* out) const
 	return e.method == 8 && ReadAt(file.h, data, packed.size(), packed.data()) && Inflate(packed.data(), packed.size(), e.size, out);
 }
 
-bool ArcRead(const Bytes& f, std::vector<ArcEntry>* out)
+bool ArcRead(const Bytes& f, std::vector<ArcEntry>* out, bool keepPacked)
 {
 	out->clear();
 	if (f.size() < 8 || memcmp(f.data(), "ARC\0", 4) != 0 || U16(&f[4]) != 8) {
@@ -242,6 +242,9 @@ bool ArcRead(const Bytes& f, std::vector<ArcEntry>* out)
 		else {
 			e.data.assign(src, src + stored);
 		}
+		if (keepPacked) {
+			e.packed.assign(src, src + stored);
+		}
 		out->push_back(std::move(e));
 	}
 	return true;
@@ -251,6 +254,9 @@ namespace {
 
 size_t ArcStreamSize(const ArcEntry& e)
 {
+	if (!e.packed.empty()) {
+		return e.packed.size();
+	}
 	return 2 + 5 * (e.data.empty() ? 1 : (e.data.size() + 65534) / 65535) + e.data.size() + 4;
 }
 
@@ -280,6 +286,12 @@ bool ArcEmit(const std::vector<ArcEntry>& entries, const std::function<bool(cons
 		return false;
 	}
 	for (const ArcEntry& e : entries) {
+		if (!e.packed.empty()) {
+			if (!put(e.packed.data(), e.packed.size())) {
+				return false;
+			}
+			continue;
+		}
 		const uint8_t zlib[2] = {0x78, 0x01};
 		if (!put(zlib, 2)) {
 			return false;

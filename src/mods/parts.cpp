@@ -553,6 +553,7 @@ std::vector<std::wstring> List(const std::wstring& dir, bool folders)
 }
 
 std::wstring BuildMysterySet();
+std::wstring BuildTrainingSet();
 
 void Load()
 {
@@ -560,6 +561,10 @@ void Load()
 	std::wstring mystery = BuildMysterySet();
 	if (!mystery.empty()) {
 		LoadFolder(mystery, L"built-in ? man");
+	}
+	std::wstring training = BuildTrainingSet();
+	if (!training.empty()) {
+		LoadFolder(training, L"built-in training soldier");
 	}
 	for (const std::wstring& d : List(Cfg().partsDir, true)) {
 		LoadFolder(Cfg().partsDir + d + L"\\", d);
@@ -652,6 +657,59 @@ std::wstring BuildMysterySet()
 	std::string g = std::to_string(kGen);
 	WriteWholeFile(dir + L"gen.txt", Bytes(g.begin(), g.end()));
 	XLS_LOG_INFO("mods: parts: built the ? man set from the game's stand-in parts.");
+	return dir;
+}
+// The training soldier (Advanced Training's AI, model\hm\hm3a in autoArc\uHm6d.arc): the stock 2501 parts (set 0x05,
+// variant 1; same models and normal maps) in its own colours, which no stock colour letter has (the back's is colour B).
+// Built from the player's own files at start like the ? man, so every player has the identical set.
+std::wstring BuildTrainingSet()
+{
+	const int kGen = 1;
+	std::wstring dir = Cfg().modCacheDir + L"parts\\builtin\\LPC_training\\";
+	std::wstring parts = ExeDirectory() + L"nativePC\\arcXmlTmpPC\\CustomParts\\";
+	Bytes stamp;
+	if (ReadWholeFile(dir + L"gen.txt", &stamp) && std::string(stamp.begin(), stamp.end()) == std::to_string(kGen)) {
+		return dir;
+	}
+	Bytes raw;
+	std::vector<ArcEntry> soldier;
+	std::wstring soldierArc = ExeDirectory() + L"nativePC\\arcLp2Xml\\autoArc\\uHm6d.arc";
+	if (!ReadWholeFile(soldierArc, &raw) || !ArcRead(raw, &soldier)) {
+		XLS_LOG_WARN("mods: parts: training soldier: %ls missing, not built.", soldierArc.c_str());
+		return std::wstring();
+	}
+	std::string json;
+	for (int s = 0; s < kPartSlotCount; s++) {
+		std::string cat = kSlotNames[s], tmpl = std::string(kPrefixes[s]) + "2501";
+		const ArcEntry* colour = nullptr;
+		for (const ArcEntry& e : soldier) {
+			if (e.classHash == ClassHash("rTexture") && _stricmp(e.name.c_str(), ("model\\hm\\hm3a\\" + tmpl + "_BM-00_A").c_str()) == 0) {
+				colour = &e;
+			}
+		}
+		std::vector<ArcEntry> ents;
+		const ArcEntry* model = nullptr;
+		if (ReadWholeFile(parts + Utf8ToWide(tmpl.c_str()) + L".arc", &raw) && ArcRead(raw, &ents)) {
+			for (const ArcEntry& e : ents) {
+				if (e.classHash == ClassHash("rModel") && _stricmp(e.name.c_str(), ("model\\hm\\hm25\\" + tmpl + "\\" + tmpl).c_str()) == 0) {
+					model = &e;
+				}
+			}
+		}
+		if (!colour || !model) {
+			XLS_LOG_WARN("mods: parts: training soldier: no %s %s, not built.", tmpl.c_str(), colour ? "model" : "colour texture");
+			return std::wstring();
+		}
+		WriteWholeFile(dir + Utf8ToWide((cat + ".rModel").c_str()), model->data);
+		WriteWholeFile(dir + Utf8ToWide((cat + "_BM_A.rTexture").c_str()), colour->data);
+		json += std::string(json.empty() ? "" : ",\n") + "  \"" + cat + "\": {\"file\": \"" + cat + ".rModel\", \"template\": \"" + tmpl +
+		        ".rModel\", \"textures\": {\"BM_A\": \"" + cat + "_BM_A.rTexture\"}}";
+	}
+	json = "{\n \"id\": \"training\",\n \"name\": \"Training Soldier\",\n \"parts\": {\n" + json + "\n }\n}\n";
+	WriteWholeFile(dir + L"lpc.json", Bytes(json.begin(), json.end()));
+	std::string g = std::to_string(kGen);
+	WriteWholeFile(dir + L"gen.txt", Bytes(g.begin(), g.end()));
+	XLS_LOG_INFO("mods: parts: built the training soldier set from uHm6d.arc and the 2501 parts.");
 	return dir;
 }
 const int kSnameCategory[kPartSlotCount] = {1, 2, 3, 4};  // head, body, back, legs

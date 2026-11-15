@@ -1507,11 +1507,13 @@ bool PackagesMapFile(const std::wstring& rel, std::wstring* out)
 }
 
 // The Improved bot brains (bots.cpp BotsBuildBrains), from the player's own uHm6d.arc. An overlay that already has them wins.
+// The archive's own entries are copied still compressed, byte for byte (uHm6d.arc also holds a campaign partner's whole
+// model, model\hm\hm3a): the game gets Capcom's data as shipped, only our brains are new.
 bool GenerateBrains(const std::wstring& source, const std::wstring& out)
 {
 	Bytes file;
 	std::vector<ArcEntry> entries;
-	if (!ReadWholeFile(source, &file) || !ArcRead(file, &entries)) {
+	if (!ReadWholeFile(source, &file) || !ArcRead(file, &entries, true)) {
 		return false;
 	}
 	if (_wcsicmp(source.substr(source.find_last_of(L"\\/") + 1).c_str(), L"uHm6d.arc") == 0) {

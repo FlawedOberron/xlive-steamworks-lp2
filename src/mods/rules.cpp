@@ -319,6 +319,14 @@ struct Rules {
 const int kSlotSecond = 7;
 const DWORD kContextRichMode = 0; // the SPA presence context naming the mode (Campaign, Online...)
 
+// Training's modes in that context (the exe's XLAST): TRAINING 7 (its menu), BASIC_TRAINING 9, ADVANCED_TRAINING 10, BOT_BATTLE 11.
+// System Link is 12, Online 6.
+bool InTraining()
+{
+	DWORD mode = 0;
+	return UserGetContext(0, kContextRichMode, &mode) && (mode == 7 || (mode >= 9 && mode <= 11));
+}
+
 std::mutex g_mutex;
 std::map<uint64_t, Rules> g_memberRules;
 std::atomic<bool> g_ammo{false};
@@ -1354,8 +1362,10 @@ DWORD WINAPI SyncThread(LPVOID)
 		}
 		// The rules are VS match settings: none in the Campaign (the presence context RICH_MODE, id 0, is
 		// SINGLE 0 / COOP 1 / CAMPAIGN 5 there; Online, System Link and Training have their own values)
+		// Training is stock too, but for our AI Enemy Battle rows below: the last VS lobby's grapple, secondary... reached
+		// Advanced Training before.
 		DWORD mode = 0;
-		if (UserGetContext(0, kContextRichMode, &mode) && (mode <= 1 || mode == 5)) {
+		if ((UserGetContext(0, kContextRichMode, &mode) && (mode <= 1 || mode == 5)) || InTraining()) {
 			r = Rules();
 		}
 		if (g_offline && g_botArmed) { // a training bot match: its menu's rows only, not the last VS lobby's rules
@@ -4919,7 +4929,10 @@ extern "C" bool __attribute__((fastcall)) ShortcutSettings(uint8_t* menu)
 		g_lobbyPanelWant = true;
 		XLS_LOG_INFO("mods: lobby settings: Change Match Settings (shortcut menu) -> our panel (%s).",
 		             GetTickCount() - g_lobbySeenAt < 3000 ? "lobby" : "opens back in the lobby");
-		return false;
+		// as the stock opener does, less its window (0x28) and the wait for it (+0x1c0 bit 2): true lets the menu give up
+		// the input (it clears its +4 bit 0x800), +0x60 0 stops it reading the pad
+		menu[0x60] = 0;
+		return true;
 	}
 	XLS_LOG_INFO("mods: lobby settings: Change Match Settings (shortcut menu) -> stock window (entry %s, %s, %s).", on ? "on" : "off",
 	             host ? "host" : "not host", inMatch ? "in a match" : "not in a match");
@@ -5523,9 +5536,11 @@ void __attribute__((thiscall)) LobbyLeave(uint8_t* screen)
 // Its callers count on it leaving every register but eax alone (FUN_007f2ba0 keeps "this" in edx across the call), so this is a thunk.
 extern "C" void* g_botClassOriginal = nullptr;
 
+// Training's versus stages keep their own AI (Advanced Training 1-4: the partners uHm60..6e, whole-body models; as uHm27 they
+// wanted parts nothing loads there: floating guns, test-2026-11-06c to 11-14b).
 extern "C" int BotClassVersus()
 {
-	return g_game && *g_game && (*g_game)[0x256] != 0;
+	return g_game && *g_game && (*g_game)[0x256] != 0 && !InTraining();
 }
 
 extern "C" void __attribute__((naked)) BotClass()
