@@ -56,6 +56,11 @@ const float kEarth = 980.0f;     // cm/s^2
 const float kGroundFriction = 10.0f; // 1/s: how fast what we carry dies away on the ground
 const float kAirDrag = 0.15f;    // 1/s
 const float kRest = 2.0f;        // cm/s: below this (on the ground) nothing is carried
+// A landing / ceiling needs our own vertical step to be at least this (cm a frame): at the top of an arc the step is
+// tiny and the game's own air control (1 - 2 cm) passed for a floor: a "landing" mid-throw handed the player to the
+// game's own fall, which over a gap set off the abyss recovery's anchor (2026-11-17). A real landing is a frame later.
+const float kLandStep = 2.0f;
+const double kLandGrace = 1.0;   // s after a landing the game's fall timer stays at 0 (a landing that wasn't one)
 
 struct Unit {
 	double at = 0.0;
@@ -63,6 +68,7 @@ struct Unit {
 	float placed[3] = {0, 0, 0}; // where we left it last frame
 	bool air = false;            // carried off the ground (characters)
 	float step = 0.0f;           // our last vertical move, cm (landing / ceiling tests)
+	double grace = 0.0;          // until then (after a landing) the game's fall timer is held at 0 too
 	// grenades a velocity volume launched: steered along the players' arc (our gravity and drag) until they hit something,
 	// as Havok's own gravity / damping landed them short of where a player lands
 	bool flying = false;
@@ -229,13 +235,14 @@ void ForceUnit(unsigned char* unit, int kind)
 
 	// the game's own small moves (air control, step offsets) aren't a floor or a ceiling: only a push back of most of our
 	// own last vertical step is (a false landing mid-arc killed the throw and dropped players into gaps)
-	if (character && u.air && u.v[1] < 0.0f && u.step < 0.0f && moved[1] > std::max(0.5f, -0.6f * u.step)) {
+	if (character && u.air && u.v[1] < 0.0f && u.step < -kLandStep && moved[1] > -0.6f * u.step) {
 		u.air = false;   // our move down was pushed back up: landed
+		u.grace = now + kLandGrace;
 		XLS_LOG_INFO("mods: force: a %s landed at %.0f %.0f %.0f (step %.1f cm, pushed back %.1f, still %.0f cm/s across).", KindName(kind),
 			pos[0], pos[1], pos[2], u.step, moved[1], sqrtf(u.v[0] * u.v[0] + u.v[2] * u.v[2]));
 		u.v[1] = 0.0f;
 	}
-	if (character && u.air && u.v[1] > 0.0f && u.step > 0.0f && moved[1] < -std::max(0.5f, 0.6f * u.step)) {
+	if (character && u.air && u.v[1] > 0.0f && u.step > kLandStep && moved[1] < -0.6f * u.step) {
 		u.v[1] = 0.0f;   // a ceiling
 		XLS_LOG_INFO("mods: force: a %s hit a ceiling at %.0f %.0f %.0f (step %.1f cm, pushed back %.1f).", KindName(kind), pos[0], pos[1],
 			pos[2], u.step, moved[1]);
@@ -281,6 +288,9 @@ void ForceUnit(unsigned char* unit, int kind)
 			// a no-ground area into the abyss state: a carried arc over a gap isn't a fall
 			*(float*)(unit + g_build->spd + 0x18) = 0.0f;
 		}
+	}
+	if (kind == kOnewayPlayers && !u.air && now < u.grace) {
+		*(float*)(unit + g_build->spd + 0x18) = 0.0f; // cJump mFallTimer: see above
 	}
 	u.step = u.v[1] * dt;
 	memcpy(u.placed, pos, 12);

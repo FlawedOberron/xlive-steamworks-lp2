@@ -245,9 +245,12 @@ bool Context(float height)
 	return true;
 }
 
+std::atomic<uint32_t> g_presents{0}, g_frames{0}; // the game's presents seen; overlay frames drawn (diagnostics)
+
 // One frame of every layer, between the backend's NewFrame and ImGui::Render.
 void Frame()
 {
+	g_frames++;
 	ImGuiIO& io = ImGui::GetIO();
 	io.DisplaySize = ImVec2(g_width, g_height);
 	DWORD now = GetTickCount();
@@ -330,6 +333,13 @@ void FrameWatch()
 HRESULT STDMETHODCALLTYPE Present9(IDirect3DDevice9* dev, const RECT* a, const RECT* b, HWND w, const RGNDATA* r)
 {
 	FrameWatch();
+	g_presents++;
+	if (dev != g_dev9 && g_dev9) {
+		static LONG said = 0;
+		if (InterlockedIncrement(&said) <= 3) {
+			XLS_LOG_INFO("mods: ui: a present from another device (%p, overlay on %p): not drawn there.", (void*)dev, (void*)g_dev9);
+		}
+	}
 	if (!g_failed && Anything()) {
 		if (!g_dev9) {
 			g_dev9 = dev;
@@ -403,6 +413,7 @@ HRESULT STDMETHODCALLTYPE Present11(IDXGISwapChain* sc, UINT sync, UINT flags)
 {
 	if (!(flags & DXGI_PRESENT_TEST)) {
 		FrameWatch();
+		g_presents++;
 	}
 	if (!g_failed && Anything() && !(flags & DXGI_PRESENT_TEST)) {
 		if (!g_dev11) {
@@ -694,6 +705,16 @@ DWORD WINAPI HookThread(void* param)
 	return 0;
 }
 
+}
+
+uint32_t UiPresents()
+{
+	return g_presents;
+}
+
+uint32_t UiFrames()
+{
+	return g_frames;
 }
 
 void UiAddLayer(const char* name, UiDrawFn draw)

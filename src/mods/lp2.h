@@ -46,6 +46,8 @@ using UiDrawFn = void (*)(float width, float height);
 void UiEarly(); // hooks the game's D3D create import once it is filled in (call from start-up on)
 void UiInstall(int build);
 void UiAddLayer(const char* name, UiDrawFn draw);
+uint32_t UiPresents(); // the game's presents seen so far (diagnostics)
+uint32_t UiFrames();   // overlay frames drawn so far
 ::ImFont* UiFont(bool large);
 ::ImFont* UiFontNamed(const char* name, bool large); // a font this PC has (ModCache\fonts.txt), loaded on first ask; ours until then
 // lives.cpp: each match slot's life state, as rules.cpp reports it, and what follows from it (who an out player watches,
@@ -137,6 +139,7 @@ std::string LivesName(int slot);     // lives.cpp: the player's name ("" unknown
 void RulesEliminate(int slot, bool out); // out of the match until the next round: held, shown as eliminated
 bool RulesEliminated(int slot);
 bool RulesInPlay(int slot);
+bool RulesRunsHere(int slot);         // this PC runs that player (its own, a bot on the host, offline: all)
 int RulesTeamOf(int slot);           // the lobby's team (0 / 1), -1 none
 bool RulesTeams();                   // a team game type
 bool RulesSpawning();                // a spawn is being set up (on another thread): its slots are still being filled

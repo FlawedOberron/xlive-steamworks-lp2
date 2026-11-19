@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <map>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -498,6 +499,60 @@ void ZonesTick(float dt)
 	}
 }
 
+// Shuffled starts: the game puts each slot on a fixed start point, so in a bot match the host (slot 0) always started
+// at the same one. When this PC runs every player in the match (offline, or hosting bots only: no other PC would agree
+// on a shuffle), each slot's first spawn after a map load is moved to a start point of its kind (free-for-all points;
+// in team games its team's), dealt from a deck shuffled at the first spawn. Not in scripted modes (they place players).
+bool g_startDone[16] = {};
+std::map<int, std::vector<Point>> g_startDeck; // kind -> points left
+bool g_startDealt = false;
+
+bool RunsAll()
+{
+	for (int s = 0; s < 16; s++) {
+		if (RulesInPlay(s) && !RulesRunsHere(s)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+void ShuffledStart(uint8_t* ctl, int slot)
+{
+	uint8_t* game = Game();
+	uint8_t* body = *(uint8_t**)(ctl + kCtlBody);
+	if (g_startDone[slot] || !game || !game[kGameVersus] || ModeActive() || !body || ctl[kCtlState] < kStateAlive) {
+		return;
+	}
+	g_startDone[slot] = true; // its first spawn of this map: moved now or never
+	if (!RunsAll()) {
+		return;
+	}
+	std::vector<Point> all;
+	AddSet(*(uint8_t**)(game + kGameSet), &all, [](int kind) { return kind == 0 || kind == 1 || kind == 2 || kind == 3; });
+	if (!g_startDealt) {
+		g_startDealt = true;
+		g_startDeck.clear();
+		for (const Point& p : all) {
+			g_startDeck[Teams() ? p.kind : (p.kind == 0 || p.kind == 3 ? 0 : -1)].push_back(p);
+		}
+		for (auto& kv : g_startDeck) {
+			std::shuffle(kv.second.begin(), kv.second.end(), g_rng);
+		}
+	}
+	int kind = Teams() ? TeamKind(game, slot, all) : 0;
+	std::vector<Point>& deck = g_startDeck[kind];
+	if (deck.empty()) {
+		XLS_LOG_INFO("mods: respawn: player %d: no start point left to shuffle in (kind %d), the game's own.", slot, kind);
+		return;
+	}
+	Point p = deck.back();
+	deck.pop_back();
+	CharacterTeleport(body, p.pos, p.yaw);
+	XLS_LOG_INFO("mods: respawn: player %d starts at a shuffled start point %.0f %.0f %.0f (kind %d, %u left).", slot, p.pos[0], p.pos[1],
+	             p.pos[2], kind, (unsigned)deck.size());
+}
+
 bool On(uint8_t* game)
 {
 	return game && game[kGameVersus] && g_pick != kPickDefault && !ModeActive();
@@ -540,7 +595,10 @@ void RespawnSetMap(const MapPhysics* physics)
 		g_lastState[s] = LifeState::None;
 		g_hasPos[s] = false;
 		g_pending[s].on = false;
+		g_startDone[s] = false;
 	}
+	g_startDeck.clear();
+	g_startDealt = false;
 	if (!g_zones.empty()) {
 		XLS_LOG_INFO("mods: respawn: %u spawn zone(s).", (unsigned)g_zones.size());
 	}
@@ -588,6 +646,7 @@ void RespawnAfter(unsigned char* ctl, int slot, bool free)
 	if (!ctl || slot < 0 || slot >= 16) {
 		return;
 	}
+	ShuffledStart(ctl, slot);
 	uint8_t* game = Game();
 	float* timers = (float*)(ctl + kCtlTimers);
 	bool viewDone = ctl[kCtlState] == kStateDeath && !(timers[1] > 0.0f);

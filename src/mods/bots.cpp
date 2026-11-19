@@ -656,7 +656,9 @@ bool SwapBeforePickUp(uint8_t* unit, uint8_t* plan);
 
 uint32_t __attribute__((thiscall)) HmAction(uint8_t* move, uint8_t* unit, uint8_t* plan, uint8_t* pad)
 {
-	if (move && move[4] == kPadActionPickUp && unit && plan && pad && BotMenuOptions().improved) {
+	// our bots only (as the other hooks): every AI soldier comes through here, the Campaign's partners and enemies too
+	bool ours = BotWorld(*(uint8_t**)At(g_vas->game)) && BotMenuOptions().improved;
+	if (move && move[4] == kPadActionPickUp && unit && plan && pad && ours) {
 		uint32_t& buttons = *(uint32_t*)(pad + kPadButtons);
 		bool pressed = buttons & kPadPickUp;
 		uint32_t r = g_hmActionOriginal(move, unit, plan, pad);
@@ -673,7 +675,7 @@ uint32_t __attribute__((thiscall)) HmAction(uint8_t* move, uint8_t* unit, uint8_
 	bool dodge = move && move[4] == 4 && pad;
 	bool before = dodge && (*(uint32_t*)(pad + kPadDodge) >> 31);
 	uint32_t r = g_hmActionOriginal(move, unit, plan, pad);
-	if (!dodge || before || !(*(uint32_t*)(pad + kPadDodge) >> 31) || !unit || !plan || !BotMenuOptions().improved) {
+	if (!dodge || before || !(*(uint32_t*)(pad + kPadDodge) >> 31) || !unit || !plan || !ours) {
 		return r;
 	}
 	uint8_t* target = *(uint8_t**)(unit + g_vas->target);
@@ -766,6 +768,27 @@ uint8_t* FiredAt(uint8_t* unit, Reaction& r, DWORD now, bool everyone, float* di
 	return best;
 }
 
+// A fighter who died stops counting at once. The game keeps a grudge until it fades, so bots went on facing and following
+// the body; with its value 0 the game's pick (FUN_0090ffb0: the top grudge with a value, else no target) takes the next.
+void ForgetDead(uint8_t* think, uint8_t* unit, uint8_t slot)
+{
+	uint8_t* was = *(uint8_t**)(unit + g_vas->target);
+	int forgot = 0;
+	for (int i = 0; i < kGrudgeCount; i++) {
+		uint8_t* entry = think + i * kGrudgeStride;
+		uint8_t* fighter = *(uint8_t**)(entry + kGrudgeFighter);
+		uint16_t& value = *(uint16_t*)(entry + kGrudgeValue);
+		if (fighter && value && fighter[0x1f] == 1 && !Alive(fighter)) { // characters only (a VS's state reads otherwise)
+			value = 0;
+			forgot++;
+		}
+	}
+	static LONG logged = 0;
+	if (forgot && was && was[0x1f] == 1 && !Alive(was) && InterlockedIncrement(&logged) <= 40) {
+		XLS_LOG_INFO("mods: bots: slot %u: its target %p died: grudge dropped (%d), the game picks the next.", slot, was, forgot);
+	}
+}
+
 void ReactToHit(uint8_t* think, uint8_t* unit)
 {
 	const uint8_t slot = think[kThinkSlot];
@@ -777,6 +800,7 @@ void ReactToHit(uint8_t* think, uint8_t* unit)
 	uint8_t* p = unit + g_vas->param;
 	p[kOwnLife] = LifePercent(unit);
 	p[kTargetLife] = LifePercent(*(uint8_t**)(unit + g_vas->target));
+	ForgetDead(think, unit, slot);
 	uint8_t* plan = *(uint8_t**)(think + kThinkPlan);
 	uint8_t* post = plan ? *(uint8_t**)(plan + kPlanPost) : nullptr;
 	{
@@ -1300,7 +1324,7 @@ const float kLookAhead = 1200.0f; // route points closer than this are skipped (
 const float kJumpUp = 50.0f, kJumpGap = 150.0f; // a jump link needs a jump past these (else it's run across)
 
 thread_local float t_grappleCost = 1.0f; // the routing bot's grapple liking (Resolve sets it around Waypoint)
-const float kGrappleCross = 350.0f, kGrappleRun = 0.5f; // a grapple: a flat cost (aim, fire) plus half its length (reeling is quick)
+const float kGrappleCross = 150.0f, kGrappleRun = 0.5f; // a grapple: a flat cost (aim, fire) plus half its length (reeling is quick)
 
 const float* ZoneWaypoint(const float* from, const float* goal, int start, int end, int* hopFrom, int* hopTo, const Hop** link)
 {
@@ -1328,7 +1352,7 @@ const float* ZoneWaypoint(const float* from, const float* goal, int start, int e
 				continue;
 			}
 			float run = sqrtf(Distance2(g_areas[u].pos, h.a)) + sqrtf(Distance2(h.b, g_areas[h.to].pos));
-			float cross = h.kind == kNavWalk ? 0.0f : h.kind == kNavJump ? 300.0f : h.kind == kNavDrop ? 200.0f : h.kind == kNavLaunch ? 150.0f : h.kind == kNavLadder ? 200.0f : 0.0f;
+			float cross = h.kind == kNavWalk ? 0.0f : h.kind == kNavJump ? 100.0f : h.kind == kNavDrop ? 200.0f : h.kind == kNavLaunch ? 150.0f : h.kind == kNavLadder ? 200.0f : 0.0f;
 			float span = sqrtf(Distance2(h.a, h.b));
 			cross += h.kind == kNavLaunch ? span * 0.3f : h.kind == kNavGrapple ? (kGrappleCross + span * kGrappleRun) * t_grappleCost : h.kind == kNavLadder ? span * 1.5f : span; // climbing: ~2/3 running speed
 			auto it = g_blocked.find((int64_t)u * 4096 + h.to);
@@ -1776,10 +1800,118 @@ uint32_t __attribute__((thiscall)) PathStep(void* self, uint8_t* unit, float* fr
 	return r;
 }
 
+// Chasing (target 1: the plan's enemy, plan +0x898, FUN_0091bb40 case 1): the game runs straight at the enemy with its own
+// path step, which never jumps or grapples. When the enemy is in another zone and far (or well above), the bot is sent
+// along the zone route instead, so Traverse takes its jump / grapple links; grapples count cheaper when the enemy is
+// above (up after them). Near, or in the same zone, it's the game's chase.
+const int kTgtFoe = 1;
+const float kChaseFar = 1500.0f, kChaseAbove = 300.0f, kChaseGrappleUp = 0.6f;
+// diagnostics: how chases went, a line every 30 s while there were any
+std::atomic<uint32_t> g_chaseSeen{0}, g_chaseFar{0}, g_chaseSame{0}, g_chaseRouted{0};
+// what bots did across links and in fights (counted always; their own lines need bot-log.txt)
+std::atomic<uint32_t> g_doneJumps{0}, g_doneAnchors{0}, g_doneClimbs{0}, g_doneUnstuck{0}, g_doneHops{0};
+void ChaseStats()
+{
+	static std::atomic<DWORD> at{0};
+	DWORD now = GetTickCount(), was = at;
+	if (now - was < 30000 || !at.compare_exchange_strong(was, now)) {
+		return;
+	}
+	uint32_t seen = g_chaseSeen.exchange(0), wide = g_chaseFar.exchange(0), same = g_chaseSame.exchange(0), routed = g_chaseRouted.exchange(0);
+	uint32_t jumps = g_doneJumps.exchange(0), anchors = g_doneAnchors.exchange(0), climbs = g_doneClimbs.exchange(0),
+	         unstuck = g_doneUnstuck.exchange(0), hops = g_doneHops.exchange(0);
+	if (seen || jumps || anchors || hops) {
+		XLS_LOG_INFO("mods: bots: last 30 s: chases %u fight resolves, %u far / above, %u of them same zone or no route, %u routed; "
+		             "link jumps %u, anchors fired %u (%u climbed), jumps to get unstuck %u, fight hops %u.", seen, wide, same, routed,
+		             jumps, anchors, climbs, unstuck, hops);
+	}
+}
+
+void ChaseRoute(uint8_t* unit, float* out)
+{
+	uint8_t* game = *(uint8_t**)At(g_vas->game);
+	if (!BotWorld(game) || !BotMenuOptions().improved || unit[0x1f] != 1) {
+		return;
+	}
+	g_chaseSeen++;
+	ChaseStats();
+	const float* here = (const float*)(unit + 0xd0);
+	float dx = out[0] - here[0], dz = out[2] - here[2], up = out[1] - here[1];
+	bool above = up > kChaseAbove;
+	if (!above && dx * dx + dz * dz < kChaseFar * kChaseFar) {
+		return;
+	}
+	g_chaseFar++;
+	DWORD now = GetTickCount();
+	std::lock_guard<std::mutex> lock(g_goalLock);
+	if (g_goals.size() > 128) {
+		g_goals.clear();
+	}
+	RoamGoal& g = g_goals[unit];
+	AreasBuild();
+	float foe[3] = {out[0], out[1], out[2]};
+	int hopFrom, hopTo;
+	const Hop* link = nullptr;
+	t_grappleCost = Traits(unit).grapple * (above ? kChaseGrappleUp : 1.0f);
+	const float* to = Waypoint(here, foe, &hopFrom, &hopTo, &link);
+	t_grappleCost = 1.0f;
+	if (to == foe || hopTo < 0) { // same zone, or no route: the game's chase
+		g_chaseSame++;
+		return;
+	}
+	g_chaseRouted++;
+	g.linkKind = link ? link->kind : -1;
+	if (link) {
+		memcpy(g.linkA, link->a, sizeof(g.linkA));
+		memcpy(g.linkB, link->b, sizeof(g.linkB));
+	}
+	g.linkSeen = now;
+	memcpy(g.way, to, sizeof(g.way));
+	float left = sqrtf(Distance2(here, to));
+	if (hopFrom != g.hopFrom || hopTo != g.hopTo || now - g.hopProgress > 2 * kHopStuck) {
+		g.hopFrom = hopFrom;
+		g.hopTo = hopTo;
+		g.hopBest = left;
+		g.hopProgress = now;
+	}
+	else if (left < g.hopBest - kProgress) {
+		g.hopBest = left;
+		g.hopProgress = now;
+	}
+	else if (hopFrom >= 0 && now - g.hopProgress > kHopStuck) {
+		g_blocked[(int64_t)hopFrom * 4096 + hopTo] = now;
+		g.hopProgress = now;
+	}
+	out[0] = to[0];
+	out[1] = to[1];
+	out[2] = to[2];
+	static DWORD logged = 0;
+	if (BotLogOn() && now - logged > 3000) {
+		logged = now;
+		static const char* const kKinds[] = {"walk", "jump", "drop", "grapple", "launch", "ladder"};
+		XLS_LOG_INFO("mods: bots: %p chases by route: target %.0f m away, %.1f m up; hop zone %d -> %d (%s).", unit,
+		             sqrtf(dx * dx + dz * dz) / 100.0f, up / 100.0f, hopFrom, hopTo, link ? kKinds[link->kind % kNavKinds] : "walk");
+	}
+}
+
 char __attribute__((thiscall)) Resolve(void* self, uint8_t* unit, uint8_t* plan, void* ctx, uint32_t target, float* out, void* info)
 {
 	CostScope cost(kCostRoute);
 	const uint8_t type = target & 0xff;
+	{
+		// which target types bots move by: logged the first time each is seen (checks kTgtFoe is the chase)
+		static std::atomic<uint32_t> seen{0};
+		if (type < 32 && !(seen.fetch_or(1u << type) & (1u << type))) {
+			XLS_LOG_INFO("mods: bots: target type %u first resolved (plan item %s).", type, plan ? PlanItemName(plan) : "-");
+		}
+	}
+	if (type == kTgtFoe && unit && plan && out) {
+		char r = g_resolveOriginal(self, unit, plan, ctx, target, out, info);
+		if (r) {
+			ChaseRoute(unit, out);
+		}
+		return r;
+	}
 	if ((type != kTgtPost && type != kTgtRoam) || !unit || !plan) {
 		return g_resolveOriginal(self, unit, plan, ctx, target, out, info);
 	}
@@ -1947,6 +2079,33 @@ void IdleTrack(RoamGoal& g, uint8_t* unit, const float* here, DWORD now, bool pl
 	}
 }
 
+// Combat hops: now and then a jump while it fights a living enemy 4 - 40 m off, as players do. A check every
+// kHopCheck; the chance by difficulty, times 0.5 - 1.5 by boldness; at least kHopRest between hops.
+const DWORD kHopCheck = 700, kHopRest = 2500;
+const float kHopChance[4] = {0.03f, 0.06f, 0.09f, 0.12f};
+DWORD g_hopNext[16] = {};
+void CombatHop(uint8_t* think, uint8_t* unit, const float* here, DWORD now)
+{
+	const uint8_t slot = think[kThinkSlot];
+	uint8_t* foe = *(uint8_t**)(unit + g_vas->target);
+	if (slot >= 16 || !foe || foe[0x1f] != 1 || !Alive(foe) || (int)(now - g_hopNext[slot]) < 0) {
+		return;
+	}
+	g_hopNext[slot] = now + kHopCheck;
+	float d2 = Distance2(here, (const float*)(foe + 0xd0));
+	float chance = kHopChance[BotMenuOptions().difficulty & 3] * (0.5f + Traits(unit).bold);
+	if (d2 < 400.0f * 400.0f || d2 > 4000.0f * 4000.0f || (Rand() % 1000) >= (unsigned)(chance * 1000.0f)) {
+		return;
+	}
+	g_hopNext[slot] = now + kHopRest;
+	*(uint32_t*)(think + kPadButtons) |= kPadJump;
+	g_doneHops++;
+	static LONG logged = 0;
+	if (BotLogOn() && InterlockedIncrement(&logged) <= 20) {
+		XLS_LOG_INFO("mods: bots: slot %u hops in a fight (target %.0f m away).", slot, sqrtf(d2) / 100.0f);
+	}
+}
+
 void Traverse(uint8_t* think, uint8_t* unit)
 {
 	uint8_t* game = *(uint8_t**)At(g_vas->game);
@@ -1969,6 +2128,9 @@ void Traverse(uint8_t* think, uint8_t* unit)
 		RoamGoal& g = it->second;
 		if (g.grappleCheck && now - g.grappleAt > 1500) {
 			g.grappleCheck = false;
+			if (here[1] - g.grappleY > 150.0f) {
+				g_doneClimbs++;
+			}
 			if (BotLogOn()) {
 				XLS_LOG_INFO("mods: bots: %p grapple %s (%.1f m up).", unit, here[1] - g.grappleY > 150.0f ? "climbed" : "didn't climb",
 				             (here[1] - g.grappleY) / 100.0f);
@@ -2031,6 +2193,7 @@ void Traverse(uint8_t* think, uint8_t* unit)
 			press = kPadJump;
 			g.jumpAt = now;
 			what = "jumps";
+			g_doneJumps++;
 			logA = flat(here, g.linkB) / 100.0f;
 			logB = (g.linkB[1] - here[1]) / 100.0f;
 		}
@@ -2053,6 +2216,7 @@ void Traverse(uint8_t* think, uint8_t* unit)
 				g.grappleY = here[1];
 				g.grappleCheck = true;
 				what = "fires the anchor";
+				g_doneAnchors++;
 				logA = sqrtf(Distance2(here, g.linkB)) / 100.0f;
 				logB = (g.linkB[1] - here[1]) / 100.0f;
 			}
@@ -2064,6 +2228,7 @@ void Traverse(uint8_t* think, uint8_t* unit)
 				press = kPadJump;
 				g.unstickAt = g.jumpAt = now;
 				what = "jumps to get unstuck";
+				g_doneUnstuck++;
 				logA = g.hopBest / 100.0f;
 				logB = 0;
 			}
@@ -2274,6 +2439,12 @@ uint32_t __attribute__((thiscall)) ThinkBody(uint8_t* think, uint8_t* unit)
 	uint32_t r = g_thinkBodyOriginal(think, unit);
 	if (r) {
 		Traverse(think, unit);
+	}
+	// combat hops run in fights too, where the think has no move to cross links on (r 0, no Traverse)
+	uint8_t* game = *(uint8_t**)At(g_vas->game);
+	if (unit && unit[0x1f] == 1 && BotWorld(game) && BotMenuOptions().improved && Alive(unit)) {
+		CombatHop(think, unit, (const float*)(unit + 0xd0), GetTickCount());
+		ChaseStats();
 	}
 	return r;
 }

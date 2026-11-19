@@ -42,6 +42,8 @@ struct ModMap {
 
 std::vector<ModMap> g_maps; // always slots 13 and 14
 uint32_t* g_remapTable = nullptr;         // {map, size} x 16
+uint32_t g_remapStock[2][2] = {{1, 1}, {12, 1}}; // slots 13 / 14 as shipped (placeholders: Desecration, Frozen Wasteland's neighbour)
+std::mutex g_remapMutex;
 
 // Online map availability (DX11 FUN_0080e470, thiscall on the game object, (u8 map, u8 flag)):
 // 13 and 14 are hard-disabled, 4/8/11/15 depend on DLC flag bits at +0x50d20, 2 and 9 are off when
@@ -252,6 +254,8 @@ bool PatchRemapTable(uint8_t* base)
 			}
 			auto* table = (uint32_t*)p;
 			g_remapTable = table;
+			memcpy(g_remapStock[0], table + 13 * 2, 8);
+			memcpy(g_remapStock[1], table + 14 * 2, 8);
 			for (const ModMap& m : g_maps) {
 				uint32_t size = m.size >= 0 ? (uint32_t)m.size : (m.base < 16 ? table[m.base * 2 + 1] : 1);
 				uint32_t entry[2] = {(uint32_t)m.slot, size};
@@ -360,6 +364,7 @@ void MapsRebind(int slot, int base, int size, const std::vector<std::string>& pr
 		}
 	}
 	if (g_remapTable) {
+		std::lock_guard<std::mutex> lock(g_remapMutex);
 		uint32_t entry[2] = {(uint32_t)slot, size >= 0 ? (uint32_t)size : (base < 13 || base == 15 ? g_remapTable[base * 2 + 1] : 1)};
 		DWORD old = 0;
 		if (VirtualProtect(g_remapTable + slot * 2, 8, PAGE_READWRITE, &old)) {
@@ -630,6 +635,10 @@ void InstallPicker(uint8_t* base)
 	XLS_LOG_INFO("mods: maps: create-match map picker %s, map names %s.", g_stepOriginal ? "hooked" : "NOT hooked (unknown code)", g_messageOriginal ? "hooked" : "NOT hooked");
 }
 
+namespace {
+bool InstallRandomPick(uint8_t* base, int build);
+}
+
 // Called once the whole of .text is decrypted (SteamStub decrypts it progressively, so the
 // pickers can still be encrypted when MapsTryInstall succeeds).
 void MapsPatchPickers(unsigned char* base)
@@ -643,7 +652,72 @@ void MapsPatchPickers(unsigned char* base)
 	if (!PatchRemapTable(base)) {
 		XLS_LOG_WARN("mods: maps: match-start map table not found, mod maps will load another map.");
 	}
+	if (g_build >= 0) {
+		InstallRandomPick(base, g_build);
+	}
 }
+
+// The match-start map pick (DX11 FUN_00828f90, thiscall(game, rules)): rules +0x51 map, +0x52 size, +0x53 the random
+// kind (0x10-0x12 Random Small/Medium/Large from fixed pools, 0x13 Random All = a roll of 0-17 through the {map, size}
+// table, 0xff the fallback when a player lacks the map, also a roll through the table). Slots 13 / 14 resolve to
+// themselves in that table (PatchRemapTable), so Random All could roll an empty slot 13 and every PC hit "Fatal error.
+// Failed open file ... aArea_ONLINE_13.tde" (a tester's host, 2026-11-18). For any pick but an explicit, bound 13 / 14
+// the table gets the shipped placeholders back for the call: random rolls land on stock maps only (custom maps in
+// Random: roadmap TODO).
+namespace {
+using RandomPickFn = void(__attribute__((thiscall)) *)(void*, uint8_t*);
+RandomPickFn g_randomPickOriginal = nullptr;
+const uint32_t kRandomPick[kBuildCount] = {0x828f90, 0x81a1b0, 0x8291b0, 0x81a250};
+const uint32_t kRandomPickFlags[kBuildCount] = {0x18d08ac, 0x18c080c, 0x18d18ac, 0x18c080c}; // its first mov eax,[flags]
+
+void WriteRemap(int slot, const uint32_t* entry)
+{
+	DWORD old = 0;
+	if (VirtualProtect(g_remapTable + slot * 2, 8, PAGE_READWRITE, &old)) {
+		memcpy(g_remapTable + slot * 2, entry, 8);
+		VirtualProtect(g_remapTable + slot * 2, 8, old, &old);
+	}
+}
+
+void __attribute__((thiscall)) RandomPick(void* game, uint8_t* rules)
+{
+	uint8_t map = rules[0x51], kind = rules[0x53];
+	bool random = kind >= 0x10 && kind <= 0x15;
+	bool mod = !random && (map == 13 || map == 14) && PackagesSlotBound(map);
+	if (mod || !g_remapTable) {
+		g_randomPickOriginal(game, rules);
+		return;
+	}
+	std::lock_guard<std::mutex> lock(g_remapMutex);
+	uint32_t was[2][2];
+	memcpy(was[0], g_remapTable + 13 * 2, 8);
+	memcpy(was[1], g_remapTable + 14 * 2, 8);
+	WriteRemap(13, g_remapStock[0]);
+	WriteRemap(14, g_remapStock[1]);
+	g_randomPickOriginal(game, rules);
+	WriteRemap(13, was[0]);
+	WriteRemap(14, was[1]);
+	if (random || map == 13 || map == 14) {
+		XLS_LOG_INFO("mods: maps: match map %u%s -> %u (size %u; custom map slots kept out).", map,
+		             random ? FormatA(" (random kind 0x%02x)", kind).c_str() : " (custom slot, nothing bound)", rules[0x51], rules[0x52]);
+	}
+}
+
+bool InstallRandomPick(uint8_t* base, int build)
+{
+	uint8_t* fn = base + (kRandomPick[build] - 0x400000);
+	uint8_t expect[6] = {0x51, 0xa1};
+	memcpy(expect + 2, &kRandomPickFlags[build], 4);
+	g_randomPickOriginal = (RandomPickFn)Detour(fn, expect, sizeof(expect), (void*)&RandomPick);
+	if (!g_randomPickOriginal) {
+		XLS_LOG_WARN("mods: maps: match map pick not recognised: Random All may roll an empty custom map slot.");
+		return false;
+	}
+	XLS_LOG_INFO("mods: maps: match map pick hooked (random rolls keep to stock maps).");
+	return true;
+}
+
+} // namespace
 
 // Called from the worker until it returns true (the code must be decrypted first).
 bool MapsTryInstall(unsigned char* base)

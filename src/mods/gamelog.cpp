@@ -27,6 +27,7 @@ const int kSlotLevel = 0x20 / 4, kSlotError = 0x24 / 4, kSlotWarn = 0x28 / 4;
 const int kMaxPerSecond = 10;
 
 uint8_t*** g_library = nullptr;
+uintptr_t g_codeLo = 0, g_codeHi = 0, g_base = 0;  // the exe's code: return addresses on the stack fall in it
 void* g_vtable[kSlots];
 volatile LONG g_second = 0, g_count = 0, g_dropped = 0;
 char g_last[256];
@@ -68,12 +69,46 @@ void Emit(const char* kind, int level, const char* format, va_list args)
 	LeaveCriticalSection(&g_lock);
 }
 
+// "Communication Error - Connection Lost": the game closes its own connection (NetworkConnectionStable close-leave,
+// DX11 0x452b50 / DX9 0x452b10, a virtual method) with nothing logged before it. Whoever asked is up the stack: every
+// value there pointing into the exe's code is logged (as the exe's own addresses, 0x400000 base), most are return
+// addresses. Once per second at most.
+void __attribute__((noinline)) LogCallers(const char* why)
+{
+	static volatile LONG last = 0;
+	LONG now = (LONG)(GetTickCount() / 1000);
+	if (!g_codeLo || InterlockedExchange(&last, now) == now) {
+		return;
+	}
+	uintptr_t* sp = (uintptr_t*)__builtin_frame_address(0);
+	NT_TIB* tib = (NT_TIB*)NtCurrentTeb();
+	uintptr_t* top = (uintptr_t*)tib->StackBase;
+	char text[1024];
+	size_t n = 0;
+	int found = 0;
+	for (int i = 0; i < 2048 && sp + i < top && found < 40; i++) {
+		uintptr_t v = sp[i];
+		if (v >= g_codeLo && v < g_codeHi) {
+			n += snprintf(text + n, sizeof(text) - n, " %x", (unsigned)(v - g_base + 0x400000));
+			found++;
+			if (n >= sizeof(text) - 16) {
+				break;
+			}
+		}
+	}
+	text[n] = 0;
+	XLS_LOG_INFO("game net: %s, code addresses up the stack (callers first):%s", why, text);
+}
+
 int __cdecl PrintLevel(void*, int level, const char* format, ...)
 {
 	va_list args;
 	va_start(args, format);
 	Emit("info", level, format, args);
 	va_end(args);
+	if (format && strstr(format, "close-leave") && !strstr(format, "send control")) {
+		LogCallers("the game closes a connection (close-leave)");
+	}
 	return 0;
 }
 
@@ -123,6 +158,11 @@ void GameLogInstall(uint8_t* base, int build)
 {
 	InitializeCriticalSection(&g_lock);
 	g_library = (uint8_t***)(base + (kLibrary[build] - 0x400000));
+	IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)base;
+	IMAGE_NT_HEADERS32* nt = (IMAGE_NT_HEADERS32*)(base + dos->e_lfanew);
+	g_base = (uintptr_t)base;
+	g_codeLo = g_base + nt->OptionalHeader.BaseOfCode;
+	g_codeHi = g_codeLo + nt->OptionalHeader.SizeOfCode;
 	if (HANDLE t = CreateThread(nullptr, 0, Watch, nullptr, 0, nullptr)) {
 		CloseHandle(t);
 	}

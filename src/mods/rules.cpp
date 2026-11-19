@@ -686,7 +686,11 @@ struct AirCount {
 	int rno = 0;     // cJump Rno last frame
 	bool out = false; // the anchor out last frame (+0xcc0 bit 0x400000)
 	DWORD groundSince = 0; // standing (Rno 0 / 1, anchor in) since this tick, 0 while not
+	DWORD inSince = 0;     // the anchor in (bit clear) since this tick, 0: since the body appeared
 };
+// A shot counts only when the anchor had been in for this long first: pressing again while it's out (flying, not
+// latched) drops the out bit for a moment and sets it again, which read as a new shot and cost a use (2026-11-17).
+const DWORD kAnchorRefire = 250;
 AirCount g_airCounts[16];
 bool g_airDx9 = false;
 
@@ -2212,9 +2216,21 @@ void AirGrappleFrame()
 		}
 		int rno = *(const int*)(body + (g_airDx9 ? 0x17b0 : 0x17c0));
 		bool out = (*(const uint32_t*)(body + (g_airDx9 ? 0xcb0 : 0xcc0)) & 0x400000) != 0;
+		DWORD tick = GetTickCount();
 		if (out && !c.out && (c.rno == 2 || c.rno == 3)) {
-			c.used++;
-			XLS_LOG_INFO("mods: rules: Air Grapple: player %d anchor shot in the air (%d of %d).", slot, c.used, g_airGrapple - 1);
+			DWORD inFor = c.inSince ? tick - c.inSince : 0xffffffff;
+			if (inFor >= kAnchorRefire) {
+				c.used++;
+				XLS_LOG_INFO("mods: rules: Air Grapple: player %d anchor shot in the air (%d of %d; it was in %s ms).", slot, c.used,
+				             g_airGrapple - 1, inFor == 0xffffffff ? "since spawning," : std::to_string(inFor).c_str());
+			}
+			else {
+				XLS_LOG_INFO("mods: rules: Air Grapple: player %d anchor out again after %lu ms in: a press while it was out, not counted.",
+				             slot, (unsigned long)inFor);
+			}
+		}
+		if (!out && (c.out || !c.inSince)) {
+			c.inSince = tick | 1;
 		}
 		// Rno reads 1 while hanging on the anchor too, so a landing is Rno 0 / 1 with the anchor in, held for a moment
 		bool standing = (rno == 0 || rno == 1) && !out;
@@ -4913,10 +4929,38 @@ std::atomic<bool> g_lobbyPanelWant{false}; // the Ctrl shortcut menu's Change Ma
 // fastcall(menu) -> bool, opens the stock cut-in window 0x28 (0x29 in a Battle Series) when the menu's +0x1bc bit 2
 // says the entry is on (the host). In the lobby, as host, ours opens the Match Settings panel instead and answers
 // "nothing opened" (as a disabled entry does); the menu closes itself either way. Elsewhere the stock window opens.
+// (DX11 FUN_00f3d4c0 / 00f3db70 call it: true clears the menu's +4 bit 0x800, then +0x260 / +0x1d4 = the entry.)
 const uint32_t kShortcutSettings[kBuildCount] = {0xf3cec0, 0xf2d160, 0xf3d2f0, 0xf2d1f0};
 const uint8_t kShortcutSettingsPrologue[] = {0x56, 0x8b, 0xf1, 0x8b, 0x86, 0xbc, 0x01, 0x00, 0x00}; // push esi; mov esi,ecx; mov eax,[esi+0x1bc]
 typedef bool(__attribute__((fastcall)) * ShortcutFn)(uint8_t*);
 ShortcutFn g_shortcutSettingsOriginal = nullptr;
+
+std::atomic<uint8_t*> g_shortcutDiverted{nullptr}; // the menu whose Change Match Settings went to our panel
+
+// The menu's wait for the Change Match Settings window (DX11 FUN_00f3cf30, run each frame in state 0x500 for entry 2):
+// when the window at menu+0x268 answers (+0x4e8 = 1 or -1) it clears +0x1c0 bit 2, +0x1c4 = -1 and goes back to 0x100
+// (idle, Ctrl opens it again). For a diverted entry there is no window, so it finishes the same way straight away.
+const uint32_t kShortcutWait[kBuildCount] = {0xf3cf30, 0xf2d1d0, 0xf3d360, 0xf2d260};
+const uint32_t kShortcutWaitGlobal[kBuildCount] = {0x1852850, 0x18427b0, 0x1853850, 0x18427b0};
+typedef void(__attribute__((fastcall)) * ShortcutWaitFn)(uint8_t*);
+ShortcutWaitFn g_shortcutWaitOriginal = nullptr;
+
+extern "C" void __attribute__((fastcall)) ShortcutSettingsWait(uint8_t* menu)
+{
+	uint8_t* want = menu;
+	if (g_shortcutDiverted.compare_exchange_strong(want, nullptr)) {
+		*(uint32_t*)(menu + 0x1c0) &= ~4u;
+		*(int32_t*)(menu + 0x1c4) = -1;
+		*(uint32_t*)(menu + 0x25c) = 0x100;
+		XLS_LOG_INFO("mods: lobby settings: shortcut menu released (no stock window to wait for).");
+		return;
+	}
+	g_shortcutWaitOriginal(menu);
+}
+
+// Set when our panel opened but was never drawn (the post-game lobby, 2026-11-17: open and invisible, taking the lobby's
+// input until Esc): Change Match Settings gives the stock window until the overlay draws again.
+std::atomic<bool> g_panelUnseen{false};
 
 extern "C" bool __attribute__((fastcall)) ShortcutSettings(uint8_t* menu)
 {
@@ -4924,18 +4968,27 @@ extern "C" bool __attribute__((fastcall)) ShortcutSettings(uint8_t* menu)
 	// match (the lobby, or the results before it) the panel opens as soon as the lobby takes input again.
 	bool on = (*(uint32_t*)(menu + 0x1bc) >> 2) & 1;
 	bool host = g_isHost && g_lobbySession && *g_lobbySession && g_isHost(*g_lobbySession) == 1;
-	bool inMatch = GetTickCount() - g_hudSeenAt < 1000;
-	if (on && host && !inMatch) {
+	DWORD now = GetTickCount(), lobbyAge = now - g_lobbySeenAt, hudAge = now - g_hudSeenAt;
+	bool inMatch = hudAge < 1000;
+	// Our panel only opens from the lobby's input (LobbyPanelTick): the lobby must be the screen that last took input,
+	// after the match (the HUD) and lately. The screens after a match (results, the post-game lobby) may not run it, and
+	// diverting there opened nothing at all; they get the stock window.
+	bool lobby = g_lobbySeenAt != 0 && lobbyAge < 120000 && lobbyAge < hudAge;
+	if (on && host && !inMatch && lobby && g_shortcutWaitOriginal && !g_panelUnseen) {
 		g_lobbyPanelWant = true;
 		XLS_LOG_INFO("mods: lobby settings: Change Match Settings (shortcut menu) -> our panel (%s).",
 		             GetTickCount() - g_lobbySeenAt < 3000 ? "lobby" : "opens back in the lobby");
-		// as the stock opener does, less its window (0x28) and the wait for it (+0x1c0 bit 2): true lets the menu give up
-		// the input (it clears its +4 bit 0x800), +0x60 0 stops it reading the pad
+		// Answer "opened" like the stock window does. The menu then waits for that window to close (state 0x500, entry 2:
+		// ShortcutSettingsWait) and holds the lobby's input meanwhile; with no window the wait never ended (no panel, Ctrl
+		// menu dead, 2026-11-15), so ShortcutSettingsWait ends it at once for this menu.
+		*(uint32_t*)(menu + 0x1c0) |= 4;
 		menu[0x60] = 0;
+		g_shortcutDiverted = menu;
 		return true;
 	}
-	XLS_LOG_INFO("mods: lobby settings: Change Match Settings (shortcut menu) -> stock window (entry %s, %s, %s).", on ? "on" : "off",
-	             host ? "host" : "not host", inMatch ? "in a match" : "not in a match");
+	XLS_LOG_INFO("mods: lobby settings: Change Match Settings (shortcut menu) -> stock window (%sentry %s, %s, %s, lobby input %s).",
+	             g_panelUnseen ? "our panel isn't drawing here; " : "", on ? "on" : "off", host ? "host" : "not host", inMatch ? "in a match" : "not in a match",
+	             lobby ? "recent" : g_lobbySeenAt ? FormatA("%lu s ago, before the match", lobbyAge / 1000).c_str() : "never seen");
 	return g_shortcutSettingsOriginal(menu);
 }
 int g_lobbyCursor = 0;
@@ -5140,8 +5193,17 @@ void LobbyPanelStep(const LobbyLine& row, int dir)
 	}
 }
 
+std::atomic<uint32_t> g_lobbyDraws{0}; // LobbyPanelDraw calls (diagnostics)
+uint32_t g_openPresents = 0, g_openFrames = 0, g_openDraws = 0;
+DWORD g_openAt = 0;
+extern std::atomic<bool> g_panelUnseen;
+
 void LobbyPanelOpen()
 {
+	g_openAt = GetTickCount();
+	g_openPresents = UiPresents();
+	g_openFrames = UiFrames();
+	g_openDraws = g_lobbyDraws;
 	uint8_t* slots = LobbySlots();
 	if (slots) {
 		memcpy(g_lobbyBlock, slots + kSetupBlock, kBlockSize);
@@ -5187,7 +5249,8 @@ void LobbyPanelClose()
 		XLS_LOG_INFO("mods: lobby settings: rules changed (%s), saved to current.json.", Hex(g_lobbyBlock, kBlockSize).c_str());
 	}
 	g_lobbyChanged = g_lobbyStockChanged = false;
-	XLS_LOG_INFO("mods: lobby settings: closed.");
+	XLS_LOG_INFO("mods: lobby settings: closed (while open: %u presents, %u overlay frames, %u panel draws).", UiPresents() - g_openPresents,
+	             UiFrames() - g_openFrames, g_lobbyDraws - g_openDraws);
 }
 
 // A client: the lobby owner's rule block into ours, while in the lobby.
@@ -5218,6 +5281,10 @@ void LobbyBlockFollow(uint8_t* slots)
 bool LobbyPanelTick(uint8_t* screen)
 {
 	g_lobbyScreen = screen;
+	DWORD gap = GetTickCount() - g_lobbySeenAt;
+	if (g_lobbyPanelOpen && gap > 500) {
+		XLS_LOG_INFO("mods: lobby settings: lobby input back after %lu ms (screen %p).", gap, screen);
+	}
 	g_lobbySeenAt = GetTickCount();
 	bool host = g_isHost && g_lobbySession && *g_lobbySession && g_isHost(*g_lobbySession) == 1;
 	g_lobbyHost = host;
@@ -5248,6 +5315,7 @@ bool LobbyPanelTick(uint8_t* screen)
 	g_lobbyKeyWas = key;
 	if (!g_lobbyPanelOpen) {
 		if (toggle || g_lobbyPanelWant.exchange(false)) {
+			XLS_LOG_INFO("mods: lobby settings: panel opened (%s, screen %p).", toggle ? "F1" : "Change Match Settings", screen);
 			LobbyPanelOpen();
 			return true;
 		}
@@ -5256,6 +5324,13 @@ bool LobbyPanelTick(uint8_t* screen)
 	if (toggle || (buttons & kButtonBack)) {
 		LobbyPanelClose();
 		return true;
+	}
+	if (GetTickCount() - g_openAt > 1000 && g_lobbyDraws == g_openDraws) {
+		// open a second and not drawn once: it would hold the lobby's input, unseen, until Esc
+		XLS_LOG_INFO("mods: lobby settings: panel not drawn in 1 s: closed (the lobby gets its input back); the stock window until the overlay draws again.");
+		g_panelUnseen = true;
+		LobbyPanelClose();
+		return false;
 	}
 	int count = 0;
 	LobbyLine row{};
@@ -5283,12 +5358,34 @@ bool LobbyPanelTick(uint8_t* screen)
 
 void LobbyPanelDraw(float width, float height)
 {
-	if (!g_lobbyHost || GetTickCount() - g_lobbySeenAt > 500) {
+	g_lobbyDraws++;
+	if (g_panelUnseen.exchange(false)) {
+		XLS_LOG_INFO("mods: lobby settings: the overlay draws again: Change Match Settings opens our panel again.");
+	}
+	DWORD seenAge = GetTickCount() - g_lobbySeenAt;
+	if (!g_lobbyHost || seenAge > 500) {
+		// diagnostic (2026-11-15: panel opened from the shortcut menu after a match but never showed)
+		static DWORD logged = 0;
+		if (g_lobbyPanelOpen && GetTickCount() - logged > 2000) {
+			logged = GetTickCount();
+			XLS_LOG_INFO("mods: lobby settings: panel open but not drawn (%s, lobby input %lu ms ago).",
+			             g_lobbyHost ? "host" : "not host", seenAge);
+		}
 		return;
 	}
 	ImFont* font = UiFont(false);
 	ImFont* big = UiFont(true);
+	// diagnostic (2026-11-17: opened from the shortcut menu after a match, logged as open, not seen): each way it can
+	// end up not drawn says so once per opening, and the first drawn frame too
+	static bool shownSaid = false, emptySaid = false, fontSaid = false;
+	if (!g_lobbyPanelOpen) {
+		shownSaid = emptySaid = fontSaid = false;
+	}
 	if (!font || !big) {
+		if (g_lobbyPanelOpen && !fontSaid) {
+			fontSaid = true;
+			XLS_LOG_INFO("mods: lobby settings: panel open but not drawn (no UI font yet).");
+		}
 		return;
 	}
 	float scale = height / 720.0f;
@@ -5311,7 +5408,15 @@ void LobbyPanelDraw(float width, float height)
 		cursor = g_lobbyCursorShown;
 	}
 	if (lines.empty()) {
+		if (!emptySaid) {
+			emptySaid = true;
+			XLS_LOG_INFO("mods: lobby settings: panel open but not drawn (no rows).");
+		}
 		return;
+	}
+	if (!shownSaid) {
+		shownSaid = true;
+		XLS_LOG_INFO("mods: lobby settings: panel drawn (%d rows, %.0f x %.0f).", (int)lines.size(), width, height);
 	}
 	// rows and their section headers as one list, a window of it around the cursor
 	struct Item {
@@ -5740,10 +5845,23 @@ void BotsLobbyInstall(uint8_t* base, int build)
 	if (!g_shortcutSettingsOriginal) {
 		XLS_LOG_WARN("mods: lobby settings: shortcut menu's Change Match Settings not found, it opens the stock window.");
 	}
+	if (g_shortcutSettingsOriginal) {
+		// mov eax,[global]; cmp byte [eax+0x7c],2
+		uint32_t g = kShortcutWaitGlobal[build] - 0x400000 + (uint32_t)(uintptr_t)base; // relocated with the exe
+		const uint8_t wait[] = {0xa1, uint8_t(g), uint8_t(g >> 8), uint8_t(g >> 16), uint8_t(g >> 24), 0x80, 0x78, 0x7c, 0x02};
+		g_shortcutWaitOriginal = (ShortcutWaitFn)Detour(base + (kShortcutWait[build] - 0x400000), wait, sizeof(wait), (void*)&ShortcutSettingsWait);
+		if (!g_shortcutWaitOriginal) {
+			// without the release our panel would leave the menu stuck: keep the stock window
+			XLS_LOG_WARN("mods: lobby settings: shortcut menu's settings wait not found, Change Match Settings opens the stock window.");
+		}
+	}
 	g_lobbyLeaveOriginal = (LobbyTickFn)Detour(base + (kLeave[build] - 0x400000), kLeavePrologue, sizeof(kLeavePrologue), (void*)&LobbyLeave);
 	SoloInstall(base, build);
-	if (g_lobbyInputOriginal && g_input) {
+	// not on g_input: RulesInstall sets it after this runs, which kept the panel's layer from ever being added (the panel
+	// opened, took the lobby's input and was never drawn, 2026-11-17). LobbyPanelTick checks g_input itself.
+	if (g_lobbyInputOriginal) {
 		UiAddLayer("lobby settings", LobbyPanelDraw);
+		XLS_LOG_INFO("mods: lobby settings: panel layer added.");
 	}
 	if (!g_lobbyInputOriginal || !g_lobbyPromptOriginal || !g_lobbyStartOriginal || !g_lobbyLeaveOriginal) {
 		XLS_LOG_WARN("mods: bots: lobby code not recognised: input %d, prompt %d, start %d, leave %d.", g_lobbyInputOriginal != nullptr,
@@ -6700,6 +6818,11 @@ bool RulesPatchTrainingFlash(std::vector<uint8_t>* gfx)
 float RulesGrappleRange()
 {
 	return kGrappleStock * kGrappleScales[g_grapple % kGrappleValues];
+}
+
+bool RulesRunsHere(int slot)
+{
+	return RunsHere(slot);
 }
 
 bool RulesInPlay(int slot)
